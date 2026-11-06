@@ -1,19 +1,19 @@
 {
   "name": "balanced-life",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "workspaces": [
     "frontend",
     "backend"
   ],
   "scripts": {
     "dev": "concurrently -k -n api,web \"npm run dev -w backend\" \"npm run dev -w frontend\"",
-    "seed": "node scripts/seed-demo.mjs",
     "build": "npm run build --workspaces",
     "test": "npm run test -w backend",
     "lint": "npm run lint --workspaces",
-    "import:manuscript": "node --import tsx backend/scripts/import-manuscript.ts",
-    "prepare:brand": "node scripts/prepare-brand.mjs",
+    "db:migrate": "npm run db:migrate -w backend",
+    "admin:create": "npm run admin:create -w backend --",
+    "import:manuscript": "npm run import:manuscript -w backend --",
     "test:e2e": "playwright test"
   },
   "devDependencies": {
@@ -22,7 +22,6 @@
     "concurrently": "^9.2.1",
     "eslint": "^10.14.0",
     "prettier": "^3.9.10",
-    "sharp": "^0.35.5",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.72.1"
   },

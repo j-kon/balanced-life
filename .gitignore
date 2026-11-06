@@ -4,6 +4,7 @@ node_modules/
 **/*.sqlite*
 private/manuscript/*
 !private/manuscript/.gitkeep
+private/backups/
 .DS_Store
 tmp/
 test-results/

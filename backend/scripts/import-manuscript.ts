@@ -2,25 +2,28 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { openDatabase, root } from "../src/db.js";
+import { DEFAULT_MONTHLY_THEMES, openDatabase, root } from "../src/db.js";
 import { devotionals, monthlyThemes } from "../src/schema.js";
+
 const source = resolve(root, "private/manuscript/devotional-2027.pdf");
-if (!existsSync(source))
+if (!existsSync(source)) {
   throw new Error(
     "Place the original PDF at private/manuscript/devotional-2027.pdf first.",
   );
+}
 const bytes = readFileSync(source);
 const pdf = await getDocument({
   data: new Uint8Array(bytes),
   useSystemFonts: true,
   isEvalSupported: false,
 }).promise;
+
 const pages: { page: number; text: string }[] = [];
 for (let i = 1; i <= pdf.numPages; i++) {
-  const page = await pdf.getPage(i),
-    content = await page.getTextContent();
-  let line = "",
-    lastY: number | null = null;
+  const page = await pdf.getPage(i);
+  const content = await page.getTextContent();
+  let line = "";
+  let lastY: number | null = null;
   const lines: string[] = [];
   for (const item of content.items) {
     if (!("str" in item)) continue;
@@ -36,6 +39,7 @@ for (let i = 1; i <= pdf.numPages; i++) {
   if (line) lines.push(line.trim());
   pages.push({ page: i, text: lines.join("\n") });
 }
+
 const months = [
   "JANUARY",
   "FEBRUARY",
@@ -50,21 +54,9 @@ const months = [
   "NOVEMBER",
   "DECEMBER",
 ];
-// Transcribed from the supplied manuscript's monthly theme guide, PDF page 2.
-const themes = [
-  "Gratitude, Identity & Intentionality",
-  "Love, Family, friendship Relationships & Healthy Connections",
-  "EMOTIONAL INTELLIGENCE • SELF-AWARENESS • RESILIENCE",
-  "ACADEMIC / CAREER EXCELLENCE • SKILLS • CONSISTENCY",
-  "SELF-DISCOVERY • CONFIDENCE • PURPOSE • A HABIT OF PRAYER",
-  "FINANCIAL WISDOM • WORK • STEWARDSHIP",
-  "LEADERSHIP • RESPONSIBILITY • INFLUENCE",
-  "HOLINESS • THE FEAR OF GOD • HEALTHY LIVING",
-  "LEARNING • DIGITAL DISCIPLINE • OPPORTUNITY",
-  "NONCONFORMITY • COURAGE • BEING DIFFERENT IN A CHANGING WORLD.",
-  "THE HOLY SPIRIT • SPIRITUAL GIFTS • SERVING GOD",
-  "THE FRUIT OF THE SPIRIT • JESUS' BIRTH • GRATITUDE • PRAYER FOR THE NEW YEAR",
-];
+
+const themes = DEFAULT_MONTHLY_THEMES.map((t) => t.title);
+
 const combined = pages
   .map((p) => "\n[[PAGE " + p.page + "]]\n" + p.text)
   .join("\n");
@@ -76,14 +68,30 @@ const header = new RegExp(
 );
 const matches = [...combined.matchAll(header)];
 const issues: { date?: string; problem: string }[] = [];
-const entries: any[] = [];
+const entries: Array<{
+  date: string;
+  title: string;
+  theme: string;
+  bibleText: string;
+  memoryVerse: string;
+  reflection: string;
+  thinkAbout: string;
+  prayer: string;
+  challenge: string;
+  sample: boolean;
+  published: boolean;
+  reviewStatus: "pending_review" | "needs_revision" | "approved";
+  reviewerNotes: string;
+  sourcePages: string;
+}> = [];
 const dates = new Set<string>();
 const flatten = (text: string) => text.replace(/\s+/g, " ").trim();
+
 for (let i = 0; i < matches.length; i++) {
-  const m = matches[i],
-    month = months.indexOf(m[1]) + 1,
-    date =
-      "2027-" + String(month).padStart(2, "0") + "-" + m[2].padStart(2, "0");
+  const m = matches[i];
+  const month = months.indexOf(m[1]) + 1;
+  const date =
+    "2027-" + String(month).padStart(2, "0") + "-" + m[2].padStart(2, "0");
   const pageMarkers = [
     ...combined.slice(0, m.index).matchAll(/\[\[PAGE (\d+)\]\]/g),
   ];
@@ -108,13 +116,15 @@ for (let i = 0; i < matches.length; i++) {
     continue;
   }
   dates.add(date);
-  let title = flatten(parsed[1]),
-    challenge = flatten(m[3]);
+  let title = flatten(parsed[1]);
+  let challenge = flatten(m[3]);
   // PDF page 176 wraps the final chapter number onto its own line above the title.
   if (date === "2027-12-09" && /^1\n/.test(parsed[1])) {
     title = flatten(parsed[1].replace(/^1\n/, ""));
     challenge += " 1";
   }
+
+  let hasAnomaly = false;
   const entry = {
     date,
     title,
@@ -127,8 +137,14 @@ for (let i = 0; i < matches.length; i++) {
     challenge,
     sample: date === "2027-01-01",
     published: false,
+    reviewStatus: "pending_review" as
+      | "pending_review"
+      | "needs_revision"
+      | "approved",
+    reviewerNotes: "",
     sourcePages: String(page),
   };
+
   if (
     [
       entry.title,
@@ -140,28 +156,41 @@ for (let i = 0; i < matches.length; i++) {
     ].some((v) =>
       /DAILY BIBLE CHALLENGE|BIBLE TEXT:|MEMORY VERSE:|REFLECT:/.test(v),
     )
-  )
+  ) {
+    hasAnomaly = true;
     issues.push({
       date,
       problem:
         "Unexpected nested section label; do not publish without review.",
     });
+  }
   if (
     Object.values(entry).some(
       (v) => typeof v === "string" && v.includes("[[PAGE"),
     )
-  )
+  ) {
+    hasAnomaly = true;
     issues.push({ date, problem: "Page marker survived extraction." });
+  }
+
+  if (hasAnomaly) {
+    entry.reviewStatus = "needs_revision";
+    entry.reviewerNotes = `Nested section label detected during extraction; verify field boundaries against manuscript page ${page} before approval.`;
+  }
+
   entries.push(entry);
 }
+
 for (let day = 0; day < 365; day++) {
   const date = new Date(Date.UTC(2027, 0, 1 + day)).toISOString().slice(0, 10);
-  if (!dates.has(date))
+  if (!dates.has(date)) {
     issues.push({
       date,
       problem: "Missing from structured import; requires manual review.",
     });
+  }
 }
+
 const folder = resolve(root, "private/manuscript/extracted");
 mkdirSync(folder, { recursive: true });
 writeFileSync(resolve(folder, "pages.json"), JSON.stringify(pages, null, 2));
@@ -169,6 +198,7 @@ writeFileSync(
   resolve(folder, "entries.json"),
   JSON.stringify(entries, null, 2),
 );
+
 const report = {
   sourceSha256: createHash("sha256").update(bytes).digest("hex"),
   pages: pdf.numPages,
@@ -178,29 +208,30 @@ const report = {
   policy:
     "All imported entries are drafts. Only the first seven entries may be published after explicit visual verification. Whitespace is normalized; wording, capitalization, punctuation and source mistakes are retained.",
 };
+
 writeFileSync(
   resolve(folder, "import-report.json"),
   JSON.stringify(report, null, 2),
 );
+
 if (process.argv.includes("--write")) {
   const store = openDatabase();
   const now = new Date().toISOString();
   store.sqlite.transaction(() => {
-    for (const e of entries)
+    for (const e of entries) {
       store.db
         .insert(devotionals)
         .values({ ...e, createdAt: now, updatedAt: now })
         .onConflictDoNothing()
         .run();
-    for (let i = 0; i < themes.length; i++)
-      store.db
-        .insert(monthlyThemes)
-        .values({ month: i + 1, title: themes[i] })
-        .onConflictDoNothing()
-        .run();
+    }
+    for (const t of DEFAULT_MONTHLY_THEMES) {
+      store.db.insert(monthlyThemes).values(t).onConflictDoNothing().run();
+    }
   })();
   store.sqlite.close();
 }
+
 console.log(JSON.stringify(report, null, 2));
 console.log(
   process.argv.includes("--write")

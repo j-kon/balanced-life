@@ -1,108 +1,113 @@
 # The Balanced Life Devotional
 
-A local full-stack demonstration for **Cossy Teens Consult**, featuring the 2027 devotional by **Mrs. Adindu Ogechukwu Constance Nwisi**.
+Production-oriented full-stack web application for **Cossy Teens Consult**, featuring the 2027 daily devotional by **Mrs. Adindu Ogechukwu Constance Nwisi**.
 
-React + Vite + TypeScript + Tailwind CSS, Fastify + Drizzle ORM + SQLite. No hosted database or payment account is needed. No deployment or GitHub push has been performed.
+Built with **React 19, Vite, TypeScript, and Tailwind CSS** on the frontend, and **Fastify, TypeScript, Drizzle ORM, SQLite, and Zod** on the backend.
 
-## Run locally
+## Repository Structure
 
-Requires Node.js **24 LTS** and npm. From the repository root:
+```text
+balanced-life/
+  frontend/             # React + Vite + TypeScript client application & E2E tests
+  backend/              # Fastify + Drizzle + SQLite API, migrations, CLI scripts & tests
+  private/
+    manuscript/         # Private PDF manuscript and structured extraction (never served publicly)
+  package.json          # Workspace scripts and shared dev dependencies
+  package-lock.json
+  README.md
+  .gitignore
+```
+
+## Quick Start (Local Development)
+
+Requires **Node.js 24 LTS** and npm. From the repository root:
 
 ```bash
 npm install
-npm run seed
+npm run db:migrate
 npm run dev
 ```
 
-- Website: **http://localhost:5173**
-- API health: **http://localhost:4000/api/v1/health**
-- Reader: http://localhost:5173/dashboard
-- Author administration: http://localhost:5173/admin
+- **Frontend Application**: http://127.0.0.1:5173
+- **API Base URL**: http://127.0.0.1:4000/api/v1
+- **Health Check**: http://127.0.0.1:4000/api/v1/health
 
-Leave the terminal running. Both servers bind to loopback by default. Stop them with Ctrl+C. SQLite data persists under `backend/data/devotional.sqlite`; restarting does not erase journals, payments, or reading progress.
+Both servers start together via `npm run dev` and persist all data in `backend/data/devotional.sqlite` across restarts.
 
-The initial preview reading date is **January 1, 2027**, visibly labeled Demo Preview Mode. The administrator can change this under Administration → Settings. Subscription expiry uses the real clock, independently of the preview date.
+## Creating an Administrator Account
 
-## Local demo accounts
-
-These are **development-only**, deliberately public demo credentials. The sign-in screen also has clearly labeled role buttons.
-
-| Role | Email | Password | Access |
-| --- | --- | --- | --- |
-| Admin | admin@balanced.test | Demo-Admin-2027! | All administration and readings |
-| Subscriber | subscriber@balanced.test | Demo-Reader-2027! | Seeded yearly membership |
-| Guest | guest@balanced.test | Demo-Guest-2027! | January 1 sample; upgrade using demo checkout |
-
-New registration works too. Each account has its own private journal. Administrators cannot read another account's journal through the admin API.
-
-Seeding is repeatable and preserves existing accounts, edits and subscription state. It does not extend an expired seeded membership on every restart. Use simulated renewal to renew it. Never reuse these credentials or this demo database in production.
-
-## What works
-
-- Branded responsive homepage, About, pricing, bookstore inquiry, login and registration.
-- Actual supplied cover and author biography artwork, optimized for the web.
-- Reader dashboard, monthly theme filters, search, bookmarks, completion history, private journal.
-- Seven visually checked readings for January 1–7, 2027; January 1 is a free sample.
-- All **365 entries extracted into structured data**. The other **358 remain drafts** for author review.
-- Four editable proposed membership plans with integer kobo prices.
-- Clearly labeled simulated checkout, idempotent payment references, membership activation, renewal preferences, cancellation preserving access, manual renewal and payment history.
-- Admin overview, subscriber list, devotional creation/editing/publication, pricing controls, payment records, hardcover inquiry status, engagement and audit activity.
-- Installable PWA manifest/icons; service worker caches only an explicit public icon/manifest allowlist.
-- HTTP-only opaque sessions, password hashing, server-side authorization, request-origin checks, rate limiting, validated inputs and owner-scoped journals.
-
-## Commands
+No public demo credentials or quick-login shortcuts exist. To create or promote a local administrator account, run the one-time interactive CLI bootstrap command:
 
 ```bash
-npm run seed                 # accounts, plans, branding, private manuscript import, reviewed first week
-npm run dev                  # frontend + API
-npm run build                # frontend production bundle + backend TypeScript compilation
-npm run test                 # API, auth, access, privacy and subscription tests (isolated databases)
-npm run lint                 # TypeScript checks + ESLint
-npm run test:e2e              # Chrome desktop/mobile flows; npm run dev must already be running
-npm run import:manuscript     # extract only; does not modify the database
-npm run import:manuscript -- --write  # import as drafts, preserve existing entries
-npm run prepare:brand        # optimize actual images and regenerate PWA icons
-npm audit                    # dependency vulnerability audit (requires network)
+npm run admin:create
 ```
 
-Browser tests use installed Google Chrome and the local running application. They create identifiable `e2e-…@example.test` readers and demo transactions, update the subscriber's first-day bookmark/completion, and save the first devotional unchanged. Use a disposable demo database if you want these tests entirely separated from a presentation database.
+Or pass flags directly:
 
-## Manuscript privacy and review
+```bash
+npm run admin:create -- --name "Mrs. Adindu Nwisi" --email "admin@cossyteens.org" --password "YourStrongPassword123!"
+```
 
-The original PDF is at `private/manuscript/devotional-2027.pdf`. It is never copied into the frontend or served by the API. Raw extraction, structured entries, a SHA-256 provenance hash and review issues are stored only under `private/manuscript/extracted/`.
+Passwords are hashed using Node's `crypto.scrypt` with a 16-byte random salt and verified in constant time via `timingSafeEqual`.
 
-The importer normalizes layout whitespace and joins PDF text fragments; it does **not** rewrite the author's grammar, capitalization or wording. January 1–7 were compared with rendered PDF pages 5–8. The publication helper is bound to the supplied PDF's exact SHA-256, and refuses an unreviewed replacement.
+## Root Commands
 
-All remaining entries require editorial review before publication. An extra nested section label was detected in the February 13 source; see `docs/manuscript-review.md`. New imported entries are drafts by default. An administrator can review and publish each in the UI. Premium bodies are absent from the static application bundle and public library metadata.
+```bash
+npm install                      # Install workspace dependencies
+npm run db:migrate               # Apply SQLite migrations and initialize default plans/themes/settings
+npm run admin:create             # Create or promote an administrator account securely
+npm run dev                      # Start backend API (port 4000) and frontend Vite server (port 5173)
+npm run build                    # Typecheck and build both frontend and backend for production
+npm run test                     # Run backend unit, integration, security, and subscription test suites
+npm run lint                     # Run TypeScript compiler checks and ESLint across workspaces
+npm run test:e2e                 # Run Playwright browser E2E and privacy tests (with npm run dev running)
+npm run import:manuscript        # Inspect extracted 2027 devotional entries from private/manuscript/
+npm run import:manuscript -- --write  # Import missing manuscript entries as unreviewed drafts
+```
 
-## Configuration
+## Key Architecture & Domain Rules
 
-Defaults work without .env files. Examples are in `backend/.env.example` and `frontend/.env.example`. If needed, copy the backend example to `backend/.env`.
+### 1. Authentication & Accounts
+- Real reader registration (`/register`), login (`/login`), logout, profile updates, and password updates (`/app/account`).
+- HTTP-only, `SameSite=Lax` opaque session cookies (`balanced_session`, SHA-256 hashed in SQLite `sessions`).
+- Account recovery flow (`/forgot-password` and `/reset-password`) backed by hashed, expiring single-use tokens in `password_reset_tokens` and an email provider abstraction (`PASSWORD_RESET_WEBHOOK_URL`).
+- Strict server-side role checks (`requireUser`, `requireAdmin`) and account suspension enforcement (`status: 'active' | 'suspended'`).
 
-- `HOST`: defaults to 127.0.0.1.
-- `PORT`: defaults to 4000.
-- `DATABASE_PATH`: SQLite file path; default is backend/data/devotional.sqlite. Relative paths are consistently resolved from backend/, including when seeding from the repository root.
-- `DEMO_MODE`: defaults on in development; set false to disable quick demo login and demo checkout.
-- `DEMO_REFERENCE_DATE`: initial reading date for a new database. Existing preview settings are changed in administration.
-- `APP_ORIGIN`: allowed browser origin, default http://localhost:5173; loopback http://127.0.0.1:5173 is also allowed.
-- `NODE_ENV`: production disables demo defaults and makes session cookies Secure. Explicit production + demo mode is rejected.
-- `LOG_REQUESTS`: optional true to enable development request logs.
+### 2. 2027 Devotional Content & Editorial Workflow
+- Covers **January 1 through December 31, 2027** (365 entries).
+- **7 entries** (`2027-01-01` through `2027-01-07`) are editorially verified and published; `2027-01-01` serves as the open sample devotional.
+- **358 entries** remain stored as `draft` until reviewed and approved by an administrator in `/app/admin` (including `2027-02-13`, which is flagged `needs_revision` with editorial notes).
+- Uses the real system clock. Before January 1, 2027, the application displays upcoming-year messaging while allowing readers to preview the January 1 sample and eligible subscribers to browse published archive entries.
+- Full devotional content (`reflection`, `thinkAbout`, `prayer`, `challenge`) is stripped on the server for locked entries.
+- The original PDF (`private/manuscript/devotional-2027.pdf`) is never copied to public assets or exposed over HTTP.
 
-There are no frontend secrets. No real payment provider is connected. The local seed script refuses production and explicit non-demo configurations.
+### 3. Subscriptions, Complimentary Access & Paystack Abstraction
+- Editable provisional membership plans:
+  - **Monthly Plan**: ₦1,000
+  - **Quarterly Plan**: ₦2,700
+  - **Six-Month Plan**: ₦4,800
+  - **Yearly Plan**: ₦8,500
+- Online payment initiation and verification are built around a Paystack provider abstraction (`backend/src/services/payments.ts`).
+- When `PAYSTACK_SECRET_KEY` is not configured, online payment initiation returns HTTP `503` and the UI displays a clear configuration state—no simulated or fabricated payment successes occur.
+- Administrators can grant or revoke **Complimentary Membership** (`access_type = 'complimentary'`) with an audit note via `/app/admin`. Complimentary memberships unlock subscriber readings for local testing and ministry gifts, are explicitly labeled in the UI, and are **never counted as verified payment revenue**.
 
-## Documentation
+### 4. Personal Growth Journal & Reader Progress
+- Readers can mark devotionals complete, bookmark entries, and write, edit, filter, or delete personal journal reflections.
+- All journal entries are strictly scoped to the authenticated owner (`user_id`); administrative endpoints never expose private reader journal bodies.
 
-- [Architecture](docs/architecture.md)
-- [Database and migrations](docs/database.md)
-- [Subscription rules](docs/subscription-logic.md)
-- [5–10 minute demo walkthrough](docs/demo-walkthrough.md)
-- [Manuscript review notes](docs/manuscript-review.md)
-- [Deployment checklist](docs/deployment-checklist.md)
+## Environment Configuration
 
-## Scope boundaries
+Copy `backend/.env.example` to `backend/.env` (and optionally `frontend/.env.example` to `frontend/.env`) to customize local settings:
 
-This is a local MVP, not a production release. Real Paystack integration, email/password recovery and verification, audio, native apps, production operations, and physical fulfillment are not implemented. Automatic renewal is modeled but never charges. Prices are proposals. No testimonials were invented. Manuscript copyright and publication decisions remain with the author.
-
-Install support depends on the browser. The app needs the local API online to read devotionals or access journals; private content is intentionally not cached for offline use. For a phone demonstration, use the browser's mobile emulation or separately configure a trusted local-network setup; default loopback servers cannot be reached from another device.
-
-See [verification notes](docs/verification.md) for the tested flows and test-run limits.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `NODE_ENV` | `development` | `development`, `test`, or `production` |
+| `HOST` | `127.0.0.1` | Backend bind address |
+| `PORT` | `4000` | Backend HTTP port |
+| `DATABASE_PATH` | `data/devotional.sqlite` | SQLite database path (relative to `backend/`) |
+| `APP_ORIGIN` | `http://localhost:5173` | Allowed CORS/CSRF browser origin (`127.0.0.1:5173` also allowed in dev) |
+| `PAYSTACK_SECRET_KEY` | *(empty)* | Live or test `sk_...` key to enable Paystack checkout |
+| `PAYSTACK_PUBLIC_KEY` | *(empty)* | Optional `pk_...` public key exposed to the client |
+| `PAYSTACK_WEBHOOK_SECRET` | *(empty)* | Optional webhook signing secret (defaults to `PAYSTACK_SECRET_KEY`) |
+| `PASSWORD_RESET_WEBHOOK_URL` | *(empty)* | Transactional email webhook URL to enable password-reset emails |
+| `EMAIL_FROM` | `no-reply@cossyteens.org` | Sender address for transactional emails |

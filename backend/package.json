@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "node --import tsx --watch src/server.ts",
     "build": "tsc",
-    "seed": "node --import tsx src/seed.ts",
+    "db:migrate": "node --import tsx scripts/migrate.ts",
+    "admin:create": "node --import tsx scripts/create-admin.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "lint": "tsc --noEmit && eslint src tests scripts",
     "import:manuscript": "node --import tsx scripts/import-manuscript.ts"
