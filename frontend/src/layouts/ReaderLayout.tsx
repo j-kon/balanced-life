@@ -8,19 +8,57 @@ import {
   LogOut,
   PenLine,
   Shield,
+  ShoppingBag,
   UserCheck,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
-import { Empty } from "../components/Common";
+import { Empty, PwaInstallBanner } from "../components/Common";
 import { api } from "../api";
 
 export const readerLinks = [
-  { to: "/dashboard", label: "My journey", shortLabel: "Home", icon: LayoutDashboard },
-  { to: "/library", label: "Devotional library", shortLabel: "Read", icon: BookOpen },
-  { to: "/saved", label: "Saved readings", shortLabel: "Saved", icon: Bookmark },
-  { to: "/journal", label: "My Growth Journal", shortLabel: "Journal", icon: PenLine },
-  { to: "/subscription", label: "Membership", shortLabel: "Plan", icon: CreditCard },
-  { to: "/account", label: "Account settings", shortLabel: "Account", icon: UserCheck },
+  {
+    to: "/dashboard",
+    label: "My journey",
+    shortLabel: "Home",
+    icon: LayoutDashboard,
+  },
+  {
+    to: "/library",
+    label: "Devotional library",
+    shortLabel: "Read",
+    icon: BookOpen,
+  },
+  {
+    to: "/saved",
+    label: "Saved readings",
+    shortLabel: "Saved",
+    icon: Bookmark,
+  },
+  {
+    to: "/journal",
+    label: "My Growth Journal",
+    shortLabel: "Journal",
+    icon: PenLine,
+  },
+  {
+    to: "/digital-edition",
+    label: "2027 Digital Edition",
+    shortLabel: "Edition",
+    icon: ShoppingBag,
+    desktopOnly: true,
+  },
+  {
+    to: "/subscription",
+    label: "Membership",
+    shortLabel: "Plan",
+    icon: CreditCard,
+  },
+  {
+    to: "/account",
+    label: "Account & reminders",
+    shortLabel: "Account",
+    icon: UserCheck,
+  },
 ];
 
 export function ReaderShell({ children }: { children: ReactNode }) {
@@ -70,14 +108,19 @@ export function ReaderShell({ children }: { children: ReactNode }) {
           </button>
         </div>
       </aside>
-      <div className="reader-main">{children}</div>
+      <div className="reader-main">
+        <PwaInstallBanner />
+        {children}
+      </div>
       <nav className="mobile-bottom" aria-label="Mobile reader navigation">
-        {readerLinks.map(({ to, label, shortLabel, icon: Icon }) => (
-          <NavLink key={to} to={to} aria-label={label}>
-            <Icon size={20} />
-            <span>{shortLabel}</span>
-          </NavLink>
-        ))}
+        {readerLinks
+          .filter((l) => !l.desktopOnly)
+          .map(({ to, label, shortLabel, icon: Icon }) => (
+            <NavLink key={to} to={to} aria-label={label}>
+              <Icon size={20} />
+              <span>{shortLabel}</span>
+            </NavLink>
+          ))}
       </nav>
     </div>
   );
@@ -103,4 +146,3 @@ export function Protected({
   }
   return <ReaderShell>{children}</ReaderShell>;
 }
-

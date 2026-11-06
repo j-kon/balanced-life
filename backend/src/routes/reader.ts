@@ -7,9 +7,13 @@ import { HttpError } from "../errors.js";
 import {
   checkoutInitiateSchema,
   checkoutVerifySchema,
+  digitalPurchaseInitiateSchema,
+  digitalTransferProofSchema,
   idOf,
   journalCreateSchema,
   journalUpdateSchema,
+  notificationPreferencesSchema,
+  pushSubscriptionSchema,
   subscriptionPreferenceSchema,
 } from "../validation.js";
 import { getAppSettings } from "../services/settings.js";
@@ -17,9 +21,28 @@ import {
   getSubscriptionDetails,
   getUserPayments,
   hasPremiumAccess,
+  hasSubscriptionAccess,
   initiatePaystackCheckout,
   verifyAndActivatePayment,
 } from "../services/subscriptions.js";
+import {
+  getUserDigitalEntitlement,
+  getUserDigitalPurchases,
+  hasActiveDigitalEntitlement,
+  initiateDigitalPurchase,
+  submitBankTransferProof,
+  verifyAndActivateDigitalPurchase,
+} from "../services/commerce.js";
+import {
+  evaluateUserReminders,
+  getNotificationPreferences,
+  getUserNotifications,
+  getUserPushSubscriptionsCount,
+  markNotificationRead,
+  removePushSubscription,
+  savePushSubscription,
+  updateNotificationPreferences,
+} from "../services/notifications.js";
 import type { PaymentProvider } from "../services/payments.js";
 import { formatEntryMetadata, getAuthorizedEntry } from "./public.js";
 import { z } from "zod";
@@ -39,6 +62,14 @@ export function registerReaderRoutes(
     const currentDate = new Date().toISOString().slice(0, 10);
     const isUpcomingYear = currentDate < "2027-01-01";
     const canReadPremium = hasPremiumAccess(store, user);
+    const subscriptionAccess = hasSubscriptionAccess(store, user);
+    const digitalAccess =
+      user.role === "admin" || hasActiveDigitalEntitlement(store, user.id, 2027);
+    const digitalEntitlement = getUserDigitalEntitlement(store, user.id, 2027);
+
+    evaluateUserReminders(store, user.id, currentDate);
+    const notifications = getUserNotifications(store, user.id, 10);
+    const notificationPreferences = getNotificationPreferences(store, user.id);
 
     const entries = db
       .select()
@@ -87,6 +118,9 @@ export function registerReaderRoutes(
       currentDate,
       isUpcomingYear,
       hasAccess: canReadPremium,
+      hasSubscriptionAccess: subscriptionAccess,
+      hasDigitalEditionAccess: digitalAccess,
+      digitalEntitlement,
       completed: done.length,
       bookmarksCount: savedRows.length,
       journalsCount: journalRows.length,
@@ -104,6 +138,8 @@ export function registerReaderRoutes(
         user.id,
         settings.renewalReminderDays,
       ),
+      notifications,
+      notificationPreferences,
     };
   });
 
@@ -243,6 +279,9 @@ export function registerReaderRoutes(
         id: s.journals.id,
         title: s.journals.title,
         body: s.journals.body,
+        lessonLearned: s.journals.lessonLearned,
+        actionStep: s.journals.actionStep,
+        prayerFocus: s.journals.prayerFocus,
         createdAt: s.journals.createdAt,
         updatedAt: s.journals.updatedAt,
         devotionalId: s.journals.devotionalId,
@@ -263,18 +302,47 @@ export function registerReaderRoutes(
       getAuthorizedEntry(store, input.devotionalId, user);
     }
     const now = new Date().toISOString();
-    return db
-      .insert(s.journals)
-      .values({
-        userId: user.id,
-        devotionalId: input.devotionalId,
-        title: input.title,
-        body: input.body,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning({ id: s.journals.id })
-      .get();
+    return store.sqlite.transaction(() => {
+      const created = db
+        .insert(s.journals)
+        .values({
+          userId: user.id,
+          devotionalId: input.devotionalId,
+          title: input.title,
+          body: input.body,
+          lessonLearned: input.lessonLearned,
+          actionStep: input.actionStep,
+          prayerFocus: input.prayerFocus,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+        .get();
+
+      if (input.devotionalId && typeof input.completed === "boolean") {
+        if (input.completed) {
+          db.insert(s.progress)
+            .values({
+              userId: user.id,
+              devotionalId: input.devotionalId,
+              completedAt: now,
+            })
+            .onConflictDoNothing()
+            .run();
+        } else {
+          db.delete(s.progress)
+            .where(
+              and(
+                eq(s.progress.userId, user.id),
+                eq(s.progress.devotionalId, input.devotionalId),
+              ),
+            )
+            .run();
+        }
+      }
+
+      return created;
+    })();
   });
 
   app.put(prefix + "/me/journal/:id", async (req) => {
@@ -282,19 +350,53 @@ export function registerReaderRoutes(
     const id = idOf(req);
     const input = journalUpdateSchema.parse(req.body);
     const now = new Date().toISOString();
-    const updated = db
-      .update(s.journals)
-      .set({
-        ...(input.title !== undefined ? { title: input.title } : {}),
-        body: input.body,
-        updatedAt: now,
-      })
-      .where(and(eq(s.journals.id, id), eq(s.journals.userId, user.id)))
-      .returning()
-      .get();
+    return store.sqlite.transaction(() => {
+      const updated = db
+        .update(s.journals)
+        .set({
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          body: input.body,
+          ...(input.lessonLearned !== undefined
+            ? { lessonLearned: input.lessonLearned }
+            : {}),
+          ...(input.actionStep !== undefined
+            ? { actionStep: input.actionStep }
+            : {}),
+          ...(input.prayerFocus !== undefined
+            ? { prayerFocus: input.prayerFocus }
+            : {}),
+          updatedAt: now,
+        })
+        .where(and(eq(s.journals.id, id), eq(s.journals.userId, user.id)))
+        .returning()
+        .get();
 
-    if (!updated) throw new HttpError(404, "Reflection not found.");
-    return updated;
+      if (!updated) throw new HttpError(404, "Reflection not found.");
+
+      if (updated.devotionalId && typeof input.completed === "boolean") {
+        if (input.completed) {
+          db.insert(s.progress)
+            .values({
+              userId: user.id,
+              devotionalId: updated.devotionalId,
+              completedAt: now,
+            })
+            .onConflictDoNothing()
+            .run();
+        } else {
+          db.delete(s.progress)
+            .where(
+              and(
+                eq(s.progress.userId, user.id),
+                eq(s.progress.devotionalId, updated.devotionalId),
+              ),
+            )
+            .run();
+        }
+      }
+
+      return updated;
+    })();
   });
 
   app.delete(prefix + "/me/journal/:id", async (req) => {
@@ -396,5 +498,129 @@ export function registerReaderRoutes(
       );
     },
   );
+
+  app.get(prefix + "/me/digital-edition", async (req) => {
+    const user = requireUser(req);
+    const settings = getAppSettings(store);
+    const entitlement = getUserDigitalEntitlement(store, user.id, 2027);
+    return {
+      entitlement,
+      active: Boolean(entitlement && entitlement.status === "active"),
+      purchases: getUserDigitalPurchases(store, user.id),
+      product: {
+        editionYear: 2027,
+        amountKobo: settings.digitalEditionPriceKobo,
+        available: settings.digitalEditionAvailability === "available",
+        accessScope: settings.digitalEditionScope,
+        note: settings.digitalEditionNote,
+      },
+      paymentProvider: {
+        name: paymentProvider.name,
+        configured: paymentProvider.configured,
+        publicKey: paymentProvider.publicKey,
+      },
+      bankTransfer: {
+        enabled: settings.bankTransferEnabled,
+        accounts: settings.bankTransferEnabled ? settings.bankAccounts : [],
+      },
+    };
+  });
+
+  app.post(
+    prefix + "/digital-purchases/checkout",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      const input = digitalPurchaseInitiateSchema.parse(req.body || {});
+      return initiateDigitalPurchase(
+        store,
+        user,
+        input,
+        paymentProvider,
+        appOrigin,
+      );
+    },
+  );
+
+  app.post(
+    prefix + "/digital-purchases/verify",
+    { config: { rateLimit: { max: 30, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      const { reference } = checkoutVerifySchema.parse(req.body);
+      return verifyAndActivateDigitalPurchase(
+        store,
+        reference,
+        paymentProvider,
+        user.id,
+      );
+    },
+  );
+
+  app.post(
+    prefix + "/digital-purchases/:id/transfer-proof",
+    { config: { rateLimit: { max: 15, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      const purchaseId = idOf(req);
+      const input = digitalTransferProofSchema.parse(req.body);
+      const purchase = submitBankTransferProof(
+        store,
+        user.id,
+        purchaseId,
+        input,
+      );
+      return { ok: true, purchase };
+    },
+  );
+
+  app.get(prefix + "/me/notifications", async (req) => {
+    const user = requireUser(req);
+    const currentDate = new Date().toISOString().slice(0, 10);
+    evaluateUserReminders(store, user.id, currentDate);
+    return {
+      preferences: getNotificationPreferences(store, user.id),
+      pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
+      events: getUserNotifications(store, user.id, 30),
+    };
+  });
+
+  app.patch(prefix + "/me/notifications/preferences", async (req) => {
+    const user = requireUser(req);
+    const input = notificationPreferencesSchema.parse(req.body);
+    return {
+      ok: true,
+      preferences: updateNotificationPreferences(store, user.id, input),
+    };
+  });
+
+  app.post(prefix + "/me/notifications/push-subscribe", async (req) => {
+    const user = requireUser(req);
+    const input = pushSubscriptionSchema.parse(req.body);
+    const saved = savePushSubscription(store, user.id, input);
+    return {
+      ok: true,
+      subscriptionId: saved.id,
+      pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
+    };
+  });
+
+  app.post(prefix + "/me/notifications/push-unsubscribe", async (req) => {
+    const user = requireUser(req);
+    const { endpoint } = z
+      .object({ endpoint: z.string().trim().optional() })
+      .parse(req.body || {});
+    removePushSubscription(store, user.id, endpoint);
+    return {
+      ok: true,
+      pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
+    };
+  });
+
+  app.post(prefix + "/me/notifications/:id/read", async (req) => {
+    const user = requireUser(req);
+    const id = idOf(req);
+    return markNotificationRead(store, user.id, id);
+  });
 }
 

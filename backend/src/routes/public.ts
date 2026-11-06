@@ -6,9 +6,20 @@ import { root, type Store } from "../db.js";
 import * as s from "../schema.js";
 import type { PublicUser } from "../auth.js";
 import { HttpError } from "../errors.js";
-import { idOf, inquiryCreateSchema } from "../validation.js";
+import {
+  bulkOrderCreateSchema,
+  idOf,
+  inquiryCreateSchema,
+} from "../validation.js";
 import { getAppSettings } from "../services/settings.js";
-import { hasPremiumAccess } from "../services/subscriptions.js";
+import {
+  hasPremiumAccess,
+  verifyAndActivatePayment,
+} from "../services/subscriptions.js";
+import {
+  createBulkOrder,
+  verifyAndActivateDigitalPurchase,
+} from "../services/commerce.js";
 import type { PaymentProvider } from "../services/payments.js";
 import type { EmailService } from "../services/email.js";
 
@@ -73,7 +84,7 @@ export function getAuthorizedEntry(
   if (!entry.sample && !hasPremiumAccess(store, user)) {
     throw new HttpError(
       403,
-      "An active membership is needed to read this devotional.",
+      "An active membership or 2027 Digital Edition purchase is needed to read this devotional.",
     );
   }
   return entry;
@@ -121,7 +132,10 @@ export function registerPublicRoutes(
         .from(s.monthlyThemes)
         .orderBy(s.monthlyThemes.month)
         .all(),
-      settings,
+      settings: {
+        ...settings,
+        bankAccounts: settings.bankTransferEnabled ? settings.bankAccounts : [],
+      },
       payments: {
         configured: paymentProvider.configured,
         provider: paymentProvider.name,
@@ -221,9 +235,24 @@ export function registerPublicRoutes(
       .map((item) => item.id);
     const idx = accessibleIds.indexOf(e.id);
 
+    const accountabilityEntry = req.user
+      ? db
+          .select()
+          .from(s.journals)
+          .where(
+            and(
+              eq(s.journals.userId, req.user.id),
+              eq(s.journals.devotionalId, e.id),
+            ),
+          )
+          .orderBy(desc(s.journals.updatedAt))
+          .get() || null
+      : null;
+
     return {
       ...e,
       ...formatEntryMetadata(store, e, req.user),
+      accountabilityEntry,
       previousId: idx > 0 ? accessibleIds[idx - 1] : null,
       nextId:
         idx >= 0 && idx < accessibleIds.length - 1
@@ -251,6 +280,64 @@ export function registerPublicRoutes(
         })
         .returning({ id: s.inquiries.id })
         .get();
+    },
+  );
+
+  app.post(
+    prefix + "/bulk-orders",
+    { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = bulkOrderCreateSchema.parse(req.body);
+      return createBulkOrder(store, input, req.user?.id ?? null);
+    },
+  );
+
+  app.post(
+    prefix + "/webhooks/paystack",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (req) => {
+      const signature = String(req.headers["x-paystack-signature"] || "");
+      const rawBody =
+        (req as { rawBody?: string }).rawBody ||
+        JSON.stringify(req.body || {});
+      if (!paymentProvider.verifyWebhookSignature(rawBody, signature)) {
+        throw new HttpError(401, "Invalid Paystack webhook signature.");
+      }
+
+      const payload = (req.body || {}) as {
+        event?: string;
+        data?: { reference?: string };
+      };
+      const reference = String(payload.data?.reference || "").trim();
+      if (payload.event !== "charge.success" || !reference) {
+        return { received: true, processed: false };
+      }
+
+      const digitalPurchase = db
+        .select()
+        .from(s.digitalPurchases)
+        .where(eq(s.digitalPurchases.reference, reference))
+        .get();
+      if (digitalPurchase) {
+        await verifyAndActivateDigitalPurchase(
+          store,
+          reference,
+          paymentProvider,
+        );
+        return { received: true, processed: true, kind: "digital_edition" };
+      }
+
+      const subscriptionPayment = db
+        .select()
+        .from(s.payments)
+        .where(eq(s.payments.reference, reference))
+        .get();
+      if (subscriptionPayment) {
+        await verifyAndActivatePayment(store, reference, paymentProvider);
+        return { received: true, processed: true, kind: "subscription" };
+      }
+
+      return { received: true, processed: false };
     },
   );
 }

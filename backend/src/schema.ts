@@ -2,6 +2,7 @@ import {
   sqliteTable,
   integer,
   text,
+  real,
   primaryKey,
 } from "drizzle-orm/sqlite-core";
 
@@ -13,6 +14,12 @@ export const users = sqliteTable("users", {
   role: text("role").notNull().default("reader"),
   status: text("status").notNull().default("active"),
   suspendedReason: text("suspended_reason").notNull().default(""),
+  ageGroup: text("age_group").notNull().default("18_25"),
+  guardianConsentConfirmed: integer("guardian_consent_confirmed", {
+    mode: "boolean",
+  })
+    .notNull()
+    .default(true),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -121,6 +128,79 @@ export const payments = sqliteTable("payments", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const digitalPurchases = sqliteTable("digital_purchases", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  productCode: text("product_code").notNull().default("digital_2027"),
+  productName: text("product_name")
+    .notNull()
+    .default("The Balanced Life Devotional — 2027 Digital Edition"),
+  amountKobo: integer("amount_kobo").notNull(),
+  currency: text("currency").notNull().default("NGN"),
+  paymentMethod: text("payment_method").notNull(),
+  reference: text("reference").notNull().unique(),
+  authorizationUrl: text("authorization_url"),
+  providerTransactionId: text("provider_transaction_id"),
+  transferReference: text("transfer_reference").notNull().default(""),
+  payerNote: text("payer_note").notNull().default(""),
+  status: text("status").notNull(),
+  adminNotes: text("admin_notes").notNull().default(""),
+  verifiedByAdminId: integer("verified_by_admin_id").references(
+    () => users.id,
+    { onDelete: "set null" },
+  ),
+  verifiedAt: text("verified_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const digitalEntitlements = sqliteTable("digital_entitlements", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  purchaseId: integer("purchase_id")
+    .notNull()
+    .unique()
+    .references(() => digitalPurchases.id, { onDelete: "cascade" }),
+  editionYear: integer("edition_year").notNull().default(2027),
+  accessScope: text("access_scope").notNull().default("edition_2027"),
+  status: text("status").notNull().default("active"),
+  grantedAt: text("granted_at").notNull(),
+  revokedAt: text("revoked_at"),
+  revokeReason: text("revoke_reason").notNull().default(""),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const bulkOrders = sqliteTable("bulk_orders", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  contactName: text("contact_name").notNull(),
+  organizationName: text("organization_name").notNull(),
+  organizationType: text("organization_type").notNull(),
+  email: text("email").notNull(),
+  phone: text("phone").notNull(),
+  quantity: integer("quantity").notNull(),
+  preferredFormat: text("preferred_format").notNull().default("printed"),
+  deliveryLocation: text("delivery_location").notNull(),
+  notes: text("notes").notNull().default(""),
+  status: text("status").notNull().default("new"),
+  unitPriceKobo: integer("unit_price_kobo").notNull().default(500000),
+  discountPercent: real("discount_percent"),
+  quotedTotalKobo: integer("quoted_total_kobo"),
+  agreedTotalKobo: integer("agreed_total_kobo"),
+  quotationSummary: text("quotation_summary").notNull().default(""),
+  fulfillmentStatus: text("fulfillment_status").notNull().default("pending"),
+  trackingNote: text("tracking_note").notNull().default(""),
+  adminNotes: text("admin_notes").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const progress = sqliteTable(
   "reading_progress",
   {
@@ -158,7 +238,10 @@ export const journals = sqliteTable("journal_entries", {
     onDelete: "set null",
   }),
   title: text("title").notNull().default(""),
+  lessonLearned: text("lesson_learned").notNull().default(""),
   body: text("body").notNull(),
+  actionStep: text("action_step").notNull().default(""),
+  prayerFocus: text("prayer_focus").notNull().default(""),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -176,6 +259,55 @@ export const inquiries = sqliteTable("hardcover_inquiries", {
   adminNotes: text("admin_notes").notNull().default(""),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const notificationPreferences = sqliteTable("notification_preferences", {
+  userId: integer("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  dailyReminderEnabled: integer("daily_reminder_enabled", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  reminderTime: text("reminder_time").notNull().default("06:30"),
+  timezone: text("timezone").notNull().default("Africa/Lagos"),
+  subscriptionAlertsEnabled: integer("subscription_alerts_enabled", {
+    mode: "boolean",
+  })
+    .notNull()
+    .default(true),
+  purchaseAlertsEnabled: integer("purchase_alerts_enabled", { mode: "boolean" })
+    .notNull()
+    .default(true),
+  lastDailyReminderDate: text("last_daily_reminder_date"),
+  lastExpiryReminderFor: text("last_expiry_reminder_for"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const pushSubscriptions = sqliteTable("push_subscriptions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  endpoint: text("endpoint").notNull().unique(),
+  p256dhKey: text("p256dh_key").notNull(),
+  authKey: text("auth_key").notNull(),
+  userAgent: text("user_agent").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const notificationEvents = sqliteTable("notification_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  category: text("category").notNull(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  actionUrl: text("action_url").notNull().default("/dashboard"),
+  dedupeKey: text("dedupe_key").notNull().unique(),
+  readAt: text("read_at"),
+  createdAt: text("created_at").notNull(),
 });
 
 export const auditLogs = sqliteTable("admin_audit_logs", {

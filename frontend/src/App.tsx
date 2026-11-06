@@ -15,7 +15,9 @@ import {
 } from "./pages/public/AboutPages";
 import {
   BookstorePage,
+  BulkOrdersPage,
   ContactPage,
+  DigitalEditionPage,
   PricingPage,
 } from "./pages/public/CommercePages";
 import {
@@ -106,7 +108,9 @@ export default function App() {
             <Route path="/about-author" element={<AboutAuthorPage />} />
             <Route path="/themes" element={<ThemesPage />} />
             <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/digital-edition" element={<DigitalEditionPage />} />
             <Route path="/bookstore" element={<BookstorePage />} />
+            <Route path="/bulk-orders" element={<BulkOrdersPage />} />
             <Route path="/contact" element={<ContactPage />} />
             <Route path="/privacy" element={<PrivacyPage />} />
             <Route path="/terms" element={<TermsPage />} />

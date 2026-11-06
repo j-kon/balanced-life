@@ -26,17 +26,30 @@ export const yearDate = z
     "Use a valid calendar date in 2027.",
   );
 
-export const registerSchema = z.object({
-  name: z.string().trim().min(2, "Name must be at least 2 characters.").max(100),
-  email: z
-    .email("Enter a valid email address.")
-    .max(254)
-    .transform((v) => v.toLowerCase()),
-  password: z
-    .string()
-    .min(10, "Password must be at least 10 characters.")
-    .max(128),
-});
+export const registerSchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(2, "Name must be at least 2 characters.")
+      .max(100),
+    email: z
+      .email("Enter a valid email address.")
+      .max(254)
+      .transform((v) => v.toLowerCase()),
+    password: z
+      .string()
+      .min(10, "Password must be at least 10 characters.")
+      .max(128),
+    ageGroup: z
+      .enum(["13_17", "18_25", "adult_mentor"])
+      .default("18_25"),
+    guardianConsentConfirmed: z.boolean().default(true),
+  })
+  .refine(
+    (v) => v.ageGroup !== "13_17" || v.guardianConsentConfirmed === true,
+    "Readers aged 13–17 must confirm parent, guardian, or youth mentor permission.",
+  );
 
 export const loginSchema = z.object({
   email: z
@@ -130,12 +143,20 @@ export const themeUpdateSchema = z.object({
 export const journalCreateSchema = z.object({
   devotionalId: z.number().int().positive().optional(),
   title: z.string().trim().max(200).default(""),
+  lessonLearned: z.string().trim().max(2000).default(""),
   body: z.string().trim().min(1, "Reflection body cannot be empty.").max(10000),
+  actionStep: z.string().trim().max(2000).default(""),
+  prayerFocus: z.string().trim().max(2000).default(""),
+  completed: z.boolean().optional(),
 });
 
 export const journalUpdateSchema = z.object({
   title: z.string().trim().max(200).optional(),
+  lessonLearned: z.string().trim().max(2000).optional(),
   body: z.string().trim().min(1, "Reflection body cannot be empty.").max(10000),
+  actionStep: z.string().trim().max(2000).optional(),
+  prayerFocus: z.string().trim().max(2000).optional(),
+  completed: z.boolean().optional(),
 });
 
 export const subscriptionPreferenceSchema = z
@@ -160,6 +181,99 @@ export const checkoutVerifySchema = z.object({
     .min(8)
     .max(120)
     .regex(/^[a-zA-Z0-9_-]+$/),
+});
+
+export const digitalPurchaseInitiateSchema = z.object({
+  paymentMethod: z.enum(["paystack", "bank_transfer"]).default("paystack"),
+  currency: z.enum(["NGN", "USD", "GBP"]).default("NGN"),
+  transferReference: z.string().trim().max(120).default(""),
+  payerNote: z.string().trim().max(1000).default(""),
+});
+
+export const digitalTransferProofSchema = z.object({
+  transferReference: z
+    .string()
+    .trim()
+    .min(3, "Enter a bank transfer reference or narration.")
+    .max(120),
+  payerNote: z.string().trim().max(1000).default(""),
+});
+
+export const adminReconcileDigitalPurchaseSchema = z.object({
+  action: z.enum(["approve", "reject", "refund", "revoke"]),
+  adminNotes: z.string().trim().max(2000).optional(),
+});
+
+export const bulkOrderCreateSchema = z.object({
+  contactName: z.string().trim().min(2).max(100),
+  organizationName: z.string().trim().min(2).max(160),
+  organizationType: z.enum([
+    "parent",
+    "school",
+    "church",
+    "youth_organization",
+    "other",
+  ]),
+  email: z.email("Enter a valid email address.").max(254),
+  phone: z.string().trim().min(5).max(40),
+  quantity: z.coerce.number().int().min(1).max(50000),
+  preferredFormat: z.enum(["printed", "digital", "mixed"]).default("printed"),
+  deliveryLocation: z.string().trim().min(2).max(240),
+  notes: z.string().trim().max(3000).default(""),
+});
+
+export const adminBulkOrderUpdateSchema = z.object({
+  status: z
+    .enum([
+      "new",
+      "contacted",
+      "quoted",
+      "approved",
+      "converted",
+      "fulfilled",
+      "archived",
+    ])
+    .optional(),
+  unitPriceKobo: z.coerce.number().int().min(100).max(100000000).optional(),
+  discountPercent: z.coerce.number().min(0).max(100).nullable().optional(),
+  quotedTotalKobo: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(1000000000)
+    .nullable()
+    .optional(),
+  agreedTotalKobo: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(1000000000)
+    .nullable()
+    .optional(),
+  quotationSummary: z.string().trim().max(3000).optional(),
+  fulfillmentStatus: z
+    .enum(["pending", "processing", "shipped", "delivered", "cancelled"])
+    .optional(),
+  trackingNote: z.string().trim().max(1000).optional(),
+  adminNotes: z.string().trim().max(3000).optional(),
+});
+
+export const notificationPreferencesSchema = z.object({
+  dailyReminderEnabled: z.boolean().optional(),
+  reminderTime: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/, "Use HH:MM format.")
+    .optional(),
+  timezone: z.string().trim().min(2).max(80).optional(),
+  subscriptionAlertsEnabled: z.boolean().optional(),
+  purchaseAlertsEnabled: z.boolean().optional(),
+});
+
+export const pushSubscriptionSchema = z.object({
+  endpoint: z.url().max(2000),
+  p256dhKey: z.string().trim().min(8).max(500),
+  authKey: z.string().trim().min(4).max(500),
+  userAgent: z.string().trim().max(500).optional(),
 });
 
 export const complimentaryGrantSchema = z.object({
@@ -201,9 +315,21 @@ export const inquiryUpdateSchema = z.object({
   adminNotes: z.string().trim().max(2000).optional(),
 });
 
+export const bankAccountSchema = z.object({
+  currency: z.enum(["NGN", "USD", "GBP"]),
+  label: z.string().trim().min(2).max(80),
+  bankName: z.string().trim().min(2).max(120),
+  accountName: z.string().trim().min(2).max(160),
+  accountNumber: z.string().trim().min(6).max(40),
+});
+
 export const settingsUpdateSchema = z.object({
   siteTitle: z.string().trim().min(2).max(120).optional(),
   siteTagline: z.string().trim().min(2).max(300).optional(),
+  brandStatement: z.string().trim().min(2).max(300).optional(),
+  siteHeadline: z.string().trim().min(2).max(300).optional(),
+  siteSubheadline: z.string().trim().min(2).max(300).optional(),
+  targetAudience: z.string().trim().min(2).max(120).optional(),
   organizationName: z.string().trim().min(2).max(120).optional(),
   organizationDescription: z.string().trim().max(2000).optional(),
   authorName: z.string().trim().min(2).max(120).optional(),
@@ -211,14 +337,36 @@ export const settingsUpdateSchema = z.object({
   authorBio: z.string().trim().max(4000).optional(),
   contactEmail: z.email().max(254).optional(),
   contactPhone: z.string().trim().max(60).optional(),
+  contactSecondaryPhone: z.string().trim().max(60).optional(),
+  contactWebsite: z.string().trim().max(160).optional(),
   contactAddress: z.string().trim().max(300).optional(),
-  hardcoverPriceKobo: z.coerce.number().int().min(100).max(100000000).optional(),
+  hardcoverPriceKobo: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(100000000)
+    .optional(),
   hardcoverAvailability: z
     .enum(["available", "preorder", "out_of_stock"])
     .optional(),
   hardcoverNote: z.string().trim().max(1000).optional(),
+  digitalEditionPriceKobo: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(100000000)
+    .optional(),
+  digitalEditionAvailability: z
+    .enum(["available", "unavailable"])
+    .optional(),
+  digitalEditionScope: z
+    .enum(["edition_2027", "includes_membership_updates"])
+    .optional(),
+  digitalEditionNote: z.string().trim().max(1000).optional(),
+  bulkDiscountNote: z.string().trim().max(1000).optional(),
+  bankTransferEnabled: z.boolean().optional(),
+  bankAccounts: z.array(bankAccountSchema).min(1).max(6).optional(),
   allowRegistration: z.boolean().optional(),
   enableAutoRenewal: z.boolean().optional(),
   renewalReminderDays: z.coerce.number().int().min(1).max(60).optional(),
 });
-

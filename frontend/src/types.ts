@@ -4,7 +4,23 @@ export type User = {
   email: string;
   role: "admin" | "reader";
   status?: "active" | "suspended";
+  ageGroup?: "13_17" | "18_25" | "adult_mentor" | string;
+  guardianConsentConfirmed?: boolean;
   createdAt?: string;
+};
+
+export type JournalEntry = {
+  id: number;
+  title: string;
+  lessonLearned?: string;
+  body: string;
+  actionStep?: string;
+  prayerFocus?: string;
+  createdAt: string;
+  updatedAt: string;
+  devotionalId: number | null;
+  devotionalTitle: string | null;
+  devotionalDate: string | null;
 };
 
 export type Entry = {
@@ -28,6 +44,7 @@ export type Entry = {
   thinkAbout?: string;
   prayer?: string;
   challenge?: string;
+  accountabilityEntry?: JournalEntry | null;
   previousId?: number | null;
   nextId?: number | null;
 };
@@ -47,9 +64,21 @@ export type Plan = {
   active: boolean;
 };
 
+export type BankAccountSetting = {
+  currency: "NGN" | "USD" | "GBP";
+  label: string;
+  bankName: string;
+  accountName: string;
+  accountNumber: string;
+};
+
 export type AppSettings = {
   siteTitle: string;
   siteTagline: string;
+  brandStatement: string;
+  siteHeadline: string;
+  siteSubheadline: string;
+  targetAudience: string;
   organizationName: string;
   organizationDescription: string;
   authorName: string;
@@ -57,10 +86,19 @@ export type AppSettings = {
   authorBio: string;
   contactEmail: string;
   contactPhone: string;
+  contactSecondaryPhone: string;
+  contactWebsite: string;
   contactAddress: string;
   hardcoverPriceKobo: number;
   hardcoverAvailability: "available" | "preorder" | "out_of_stock";
   hardcoverNote: string;
+  digitalEditionPriceKobo: number;
+  digitalEditionAvailability: "available" | "unavailable";
+  digitalEditionScope: "edition_2027" | "includes_membership_updates";
+  digitalEditionNote: string;
+  bulkDiscountNote: string;
+  bankTransferEnabled: boolean;
+  bankAccounts: BankAccountSetting[];
   allowRegistration: boolean;
   enableAutoRenewal: boolean;
   renewalReminderDays: number;
@@ -128,15 +166,90 @@ export type PaymentRecord = {
   createdAt: string;
 };
 
-export type JournalEntry = {
+export type DigitalEntitlementRecord = {
   id: number;
-  title: string;
-  body: string;
+  userId: number;
+  purchaseId: number;
+  editionYear: number;
+  accessScope: "edition_2027" | "includes_membership_updates";
+  status: "active" | "revoked" | "refunded";
+  grantedAt: string;
+  revokedAt: string | null;
+  revokeReason: string;
+  updatedAt: string;
+};
+
+export type DigitalPurchaseRecord = {
+  id: number;
+  userId: number;
+  userName?: string;
+  email?: string;
+  productCode: string;
+  productName: string;
+  editionYear?: number;
+  amountKobo: number;
+  currency: "NGN" | "USD" | "GBP";
+  paymentMethod: "paystack" | "bank_transfer";
+  reference: string;
+  authorizationUrl: string | null;
+  providerTransactionId?: string | null;
+  transferReference: string;
+  payerNote: string;
+  status:
+    | "pending"
+    | "verifying_transfer"
+    | "succeeded"
+    | "failed"
+    | "refunded"
+    | "revoked";
+  accessScope?: "edition_2027" | "includes_membership_updates";
+  entitlementStatus?: string;
+  adminNotes: string;
+  verifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  devotionalId: number | null;
-  devotionalTitle: string | null;
-  devotionalDate: string | null;
+};
+
+export type BulkOrderRecord = {
+  id: number;
+  userId: number | null;
+  contactName: string;
+  organizationName: string;
+  organizationType:
+    | "parent"
+    | "school"
+    | "church"
+    | "youth_organization"
+    | "other";
+  email: string;
+  phone: string;
+  quantity: number;
+  preferredFormat: "printed" | "digital" | "mixed";
+  deliveryLocation: string;
+  notes: string;
+  status:
+    | "new"
+    | "contacted"
+    | "quoted"
+    | "approved"
+    | "converted"
+    | "fulfilled"
+    | "archived";
+  unitPriceKobo: number;
+  discountPercent: number | null;
+  quotedTotalKobo: number | null;
+  agreedTotalKobo: number | null;
+  quotationSummary: string;
+  fulfillmentStatus:
+    | "pending"
+    | "processing"
+    | "shipped"
+    | "delivered"
+    | "cancelled";
+  trackingNote: string;
+  adminNotes: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type InquiryRecord = {
@@ -154,3 +267,26 @@ export type InquiryRecord = {
   updatedAt: string;
 };
 
+export type NotificationPreferences = {
+  userId: number;
+  dailyReminderEnabled: boolean;
+  reminderTime: string;
+  timezone: string;
+  subscriptionAlertsEnabled: boolean;
+  purchaseAlertsEnabled: boolean;
+  lastDailyReminderDate: string | null;
+  lastExpiryReminderFor: string | null;
+  updatedAt: string;
+};
+
+export type NotificationEventRecord = {
+  id: number;
+  userId: number;
+  category: "daily_reminder" | "subscription" | "digital_purchase" | "system";
+  title: string;
+  body: string;
+  actionUrl: string;
+  dedupeKey: string;
+  readAt: string | null;
+  createdAt: string;
+};

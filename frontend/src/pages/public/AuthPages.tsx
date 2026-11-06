@@ -10,16 +10,32 @@ export function AuthPage({ register = false }: { register?: boolean }) {
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ageGroup, setAgeGroup] = useState<
+    "13_17" | "18_25" | "adult_mentor"
+  >("18_25");
+  const [guardianConsent, setGuardianConsent] = useState(true);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
     setBusy(true);
+    const f = new FormData(e.currentTarget);
     try {
-      await api(
-        register ? "/auth/register" : "/auth/login",
-        Object.fromEntries(new FormData(e.currentTarget)),
-      );
+      if (register) {
+        await api("/auth/register", {
+          name: f.get("name"),
+          email: f.get("email"),
+          password: f.get("password"),
+          ageGroup,
+          guardianConsentConfirmed:
+            ageGroup === "13_17" ? guardianConsent : true,
+        });
+      } else {
+        await api("/auth/login", {
+          email: f.get("email"),
+          password: f.get("password"),
+        });
+      }
       await refresh();
       navigate("/dashboard");
     } catch (e) {
@@ -38,7 +54,10 @@ export function AuthPage({ register = false }: { register?: boolean }) {
           <br />
           starts here.
         </h1>
-        <p>Come as you are. Make room to read, reflect, and grow.</p>
+        <p>
+          Come as you are. Make room to connect with Jesus, learn, reflect,
+          apply, and track your growth.
+        </p>
         <div className="auth-decoration">
           <BookOpen size={84} strokeWidth={0.7} />
         </div>
@@ -47,21 +66,59 @@ export function AuthPage({ register = false }: { register?: boolean }) {
         <h2>{register ? "Begin your journey" : "Welcome back"}</h2>
         <p>
           {register
-            ? "Create your account to keep your reflections and progress together."
+            ? "Create your account to keep your reflections, daily accountability, and reading progress together."
             : "Take a breath. Your daily space is waiting."}
         </p>
         <form className="stack" onSubmit={submit}>
           {register && (
-            <label>
-              Your name
-              <input
-                name="name"
-                required
-                minLength={2}
-                maxLength={100}
-                autoComplete="name"
-              />
-            </label>
+            <>
+              <label>
+                Your name
+                <input
+                  name="name"
+                  required
+                  minLength={2}
+                  maxLength={100}
+                  autoComplete="name"
+                />
+              </label>
+              <label>
+                Reader group
+                <select
+                  name="ageGroup"
+                  value={ageGroup}
+                  onChange={(e) => {
+                    const next = e.target.value as
+                      | "13_17"
+                      | "18_25"
+                      | "adult_mentor";
+                    setAgeGroup(next);
+                    if (next !== "13_17") setGuardianConsent(true);
+                  }}
+                >
+                  <option value="18_25">Young Adult (Ages 18–25)</option>
+                  <option value="13_17">Teenager (Ages 13–17)</option>
+                  <option value="adult_mentor">
+                    Parent, Teacher, Youth Leader or Mentor
+                  </option>
+                </select>
+              </label>
+              {ageGroup === "13_17" && (
+                <label className="check-label">
+                  <input
+                    type="checkbox"
+                    checked={guardianConsent}
+                    required
+                    onChange={(e) => setGuardianConsent(e.target.checked)}
+                  />
+                  <span>
+                    I confirm that I have permission from my parent, guardian,
+                    school chaplain, or youth mentor to create this devotional
+                    account.
+                  </span>
+                </label>
+              )}
+            </>
           )}
           <label>
             Email address
@@ -89,7 +146,8 @@ export function AuthPage({ register = false }: { register?: boolean }) {
           </label>
           {register && (
             <small id="password-help" className="field-help">
-              Use at least 10 characters. No birth date or address needed.
+              Use at least 10 characters. We collect only your name and email —
+              no birth date, phone number, or home address is required.
             </small>
           )}
           <ErrorBox message={error} />
@@ -266,4 +324,3 @@ export function ResetPasswordPage() {
     </div>
   );
 }
-

@@ -57,6 +57,25 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(rateLimit, { max: 400, timeWindow: "1 minute" });
   app.decorateRequest("user", null);
+  app.decorateRequest("rawBody", "");
+
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (req, body, done) => {
+      const raw = typeof body === "string" ? body : body.toString("utf8");
+      (req as { rawBody?: string }).rawBody = raw;
+      if (!raw.trim()) {
+        done(null, {});
+        return;
+      }
+      try {
+        done(null, JSON.parse(raw));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
 
   const origins = new Set([
     env.appOrigin,
@@ -66,7 +85,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   app.addHook("onRequest", async (req, reply) => {
     reply.header("Cache-Control", "no-store");
-    if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+    const isPaystackWebhook = req.url.startsWith("/api/v1/webhooks/paystack");
+    if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !isPaystackWebhook) {
       if (
         req.headers["x-requested-with"] !== "BalancedLife" ||
         (req.headers.origin && !origins.has(req.headers.origin)) ||

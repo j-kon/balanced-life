@@ -19,6 +19,8 @@ export type PublicUser = {
   email: string;
   role: "admin" | "reader";
   status: "active" | "suspended";
+  ageGroup: string;
+  guardianConsentConfirmed: boolean;
   createdAt: string;
 };
 
@@ -34,6 +36,8 @@ export const publicUser = (user: typeof s.users.$inferSelect): PublicUser => ({
   email: user.email,
   role: user.role === "admin" ? "admin" : "reader",
   status: user.status === "suspended" ? "suspended" : "active",
+  ageGroup: user.ageGroup || "18_25",
+  guardianConsentConfirmed: Boolean(user.guardianConsentConfirmed),
   createdAt: user.createdAt,
 });
 

@@ -5,6 +5,8 @@ import * as s from "../schema.js";
 import { requireAdmin } from "../auth.js";
 import { HttpError } from "../errors.js";
 import {
+  adminBulkOrderUpdateSchema,
+  adminReconcileDigitalPurchaseSchema,
   complimentaryGrantSchema,
   entrySchema,
   entryStatusPatchSchema,
@@ -23,6 +25,11 @@ import {
   grantComplimentaryAccess,
   revokeSubscriptionAccess,
 } from "../services/subscriptions.js";
+import {
+  getUserDigitalEntitlement,
+  reconcileDigitalPurchaseAdmin,
+  updateBulkOrderAdmin,
+} from "../services/commerce.js";
 import type { PaymentProvider } from "../services/payments.js";
 
 export function registerAdminRoutes(
@@ -67,6 +74,8 @@ export function registerAdminRoutes(
         role: s.users.role,
         status: s.users.status,
         suspendedReason: s.users.suspendedReason,
+        ageGroup: s.users.ageGroup,
+        guardianConsentConfirmed: s.users.guardianConsentConfirmed,
         createdAt: s.users.createdAt,
       })
       .from(s.users)
@@ -79,9 +88,14 @@ export function registerAdminRoutes(
         u.id,
         settings.renewalReminderDays,
       );
+      const digitalEntitlement = getUserDigitalEntitlement(store, u.id, 2027);
       return {
         ...u,
         subscription: sub,
+        digitalEntitlement,
+        hasDigitalEdition: Boolean(
+          digitalEntitlement && digitalEntitlement.status === "active",
+        ),
         planName: sub?.planName || null,
         accessType: sub?.accessType || null,
         subscriptionStatus: sub?.effectiveStatus || "none",
@@ -139,6 +153,52 @@ export function registerAdminRoutes(
       .orderBy(desc(s.inquiries.createdAt))
       .all();
 
+    const digitalPurchaseRows = db
+      .select({
+        id: s.digitalPurchases.id,
+        userId: s.digitalPurchases.userId,
+        userName: s.users.name,
+        email: s.users.email,
+        productCode: s.digitalPurchases.productCode,
+        productName: s.digitalPurchases.productName,
+        amountKobo: s.digitalPurchases.amountKobo,
+        currency: s.digitalPurchases.currency,
+        reference: s.digitalPurchases.reference,
+        paymentMethod: s.digitalPurchases.paymentMethod,
+        transferReference: s.digitalPurchases.transferReference,
+        payerNote: s.digitalPurchases.payerNote,
+        status: s.digitalPurchases.status,
+        adminNotes: s.digitalPurchases.adminNotes,
+        verifiedAt: s.digitalPurchases.verifiedAt,
+        createdAt: s.digitalPurchases.createdAt,
+        updatedAt: s.digitalPurchases.updatedAt,
+      })
+      .from(s.digitalPurchases)
+      .innerJoin(s.users, eq(s.users.id, s.digitalPurchases.userId))
+      .orderBy(desc(s.digitalPurchases.createdAt))
+      .all()
+      .map((dp) => {
+        const entitlement = getUserDigitalEntitlement(store, dp.userId, 2027);
+        return {
+          ...dp,
+          editionYear: 2027,
+          accessScope: entitlement?.accessScope || settings.digitalEditionScope,
+          entitlementStatus: entitlement?.status || "none",
+        };
+      });
+
+    const activeEntitlementsCount = db
+      .select()
+      .from(s.digitalEntitlements)
+      .where(eq(s.digitalEntitlements.status, "active"))
+      .all().length;
+
+    const bulkOrderRows = db
+      .select()
+      .from(s.bulkOrders)
+      .orderBy(desc(s.bulkOrders.createdAt))
+      .all();
+
     const readerUsers = enrichedUsers.filter((u) => u.role !== "admin");
     const activeSubs = enrichedUsers.filter((u) => u.subscription?.active);
     const expiredSubs = enrichedUsers.filter(
@@ -149,9 +209,15 @@ export function registerAdminRoutes(
           u.subscription.effectiveStatus === "revoked"),
     );
 
-    const verifiedRevenueKobo = paymentRows
+    const subscriptionRevenueKobo = paymentRows
       .filter((p) => p.status === "succeeded" && p.provider === "paystack")
       .reduce((sum, p) => sum + p.amountKobo, 0);
+
+    const digitalRevenueKobo = digitalPurchaseRows
+      .filter((dp) => dp.status === "succeeded" && dp.currency === "NGN")
+      .reduce((sum, dp) => sum + dp.amountKobo, 0);
+
+    const verifiedRevenueKobo = subscriptionRevenueKobo + digitalRevenueKobo;
 
     const auditRows = db
       .select({
@@ -177,6 +243,10 @@ export function registerAdminRoutes(
           (u) => u.accessType === "complimentary",
         ).length,
         expiredMemberships: expiredSubs.length,
+        digitalEditionsSold: activeEntitlementsCount,
+        pendingDigitalPurchases: digitalPurchaseRows.filter(
+          (dp) => dp.status === "pending" || dp.status === "verifying_transfer",
+        ).length,
         published: entries.filter((e) => e.published).length,
         drafts: entries.filter((e) => !e.published).length,
         approvedReadings: entries.filter((e) => e.reviewStatus === "approved")
@@ -186,8 +256,14 @@ export function registerAdminRoutes(
         ).length,
         completions: progressRows.length,
         bookmarks: bookmarkRows.length,
+        subscriptionRevenueKobo,
+        digitalRevenueKobo,
         verifiedRevenueKobo,
         openInquiries: inquiryRows.filter((i) => i.status === "new").length,
+        bulkOrderInquiries: bulkOrderRows.length,
+        openBulkOrders: bulkOrderRows.filter(
+          (b) => b.status === "new" || b.status === "quoted",
+        ).length,
       },
       users: enrichedUsers,
       devotionals: entries,
@@ -198,6 +274,8 @@ export function registerAdminRoutes(
         .all(),
       plans: db.select().from(s.plans).orderBy(s.plans.months).all(),
       payments: paymentRows,
+      digitalPurchases: digitalPurchaseRows,
+      bulkOrders: bulkOrderRows,
       inquiries: inquiryRows,
       engagement: entries
         .filter((e) => e.published)
@@ -548,6 +626,20 @@ export function registerAdminRoutes(
       );
       return result;
     })();
+  });
+
+  app.post(prefix + "/admin/digital-purchases/:id/reconcile", async (req) => {
+    const admin = requireAdmin(req);
+    const purchaseId = idOf(req);
+    const input = adminReconcileDigitalPurchaseSchema.parse(req.body);
+    return reconcileDigitalPurchaseAdmin(store, admin.id, purchaseId, input);
+  });
+
+  app.patch(prefix + "/admin/bulk-orders/:id", async (req) => {
+    const admin = requireAdmin(req);
+    const bulkOrderId = idOf(req);
+    const input = adminBulkOrderUpdateSchema.parse(req.body);
+    return updateBulkOrderAdmin(store, admin.id, bulkOrderId, input);
   });
 
   app.get(prefix + "/admin/settings", async (req) => {

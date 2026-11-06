@@ -11,13 +11,15 @@ export function JournalPage() {
   const { data, error, reload } = useData<JournalEntry[]>("/me/journal");
   const { toast } = useApp();
   const [title, setTitle] = useState("");
+  const [lessonLearned, setLessonLearned] = useState("");
   const [body, setBody] = useState("");
+  const [actionStep, setActionStep] = useState("");
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<JournalEntry | null>(null);
   const [busy, setBusy] = useState(false);
 
   const filtered = data?.filter((j) =>
-    `${j.title} ${j.body} ${j.devotionalTitle || ""}`
+    `${j.title} ${j.lessonLearned || ""} ${j.body} ${j.actionStep || ""} ${j.devotionalTitle || ""}`
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
@@ -28,20 +30,30 @@ export function JournalPage() {
         <div>
           <span className="eyebrow">Just between you and God</span>
           <h1>My Growth Journal</h1>
-          <p>A private space for the things you are learning along the way.</p>
+          <p>
+            A private space for the lessons, reflections, and action steps you
+            are recording along the way.
+          </p>
         </div>
         <PenLine size={40} strokeWidth={1} />
       </div>
 
       <form
-        className="journal-form"
+        className="journal-form stack"
         onSubmit={async (e) => {
           e.preventDefault();
           setBusy(true);
           try {
-            await api("/me/journal", { title, body });
+            await api("/me/journal", {
+              title,
+              lessonLearned,
+              body,
+              actionStep,
+            });
             setTitle("");
+            setLessonLearned("");
             setBody("");
+            setActionStep("");
             reload();
             toast("Your reflection is saved.");
           } catch (e) {
@@ -51,16 +63,28 @@ export function JournalPage() {
           }
         }}
       >
-        <label htmlFor="journal-title" className="journal-title-label">
-          Reflection title (optional)
-          <input
-            id="journal-title"
-            maxLength={200}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Gratitude for a new week…"
-          />
-        </label>
+        <div className="form-row-2">
+          <label htmlFor="journal-title" className="journal-title-label">
+            Reflection title (optional)
+            <input
+              id="journal-title"
+              maxLength={200}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Gratitude for a new week…"
+            />
+          </label>
+          <label htmlFor="journal-lesson" className="journal-title-label">
+            Today's lesson (optional)
+            <input
+              id="journal-lesson"
+              maxLength={2000}
+              value={lessonLearned}
+              onChange={(e) => setLessonLearned(e.target.value)}
+              placeholder="Key takeaway or Biblical principle…"
+            />
+          </label>
+        </div>
         <label htmlFor="journal-body">What's on your heart today?</label>
         <textarea
           id="journal-body"
@@ -70,6 +94,16 @@ export function JournalPage() {
           onChange={(e) => setBody(e.target.value)}
           placeholder="Begin with a thought, a prayer, or a moment of gratitude…"
         />
+        <label htmlFor="journal-action">
+          Practical action to take (optional)
+          <input
+            id="journal-action"
+            maxLength={2000}
+            value={actionStep}
+            onChange={(e) => setActionStep(e.target.value)}
+            placeholder="One practical step I will take…"
+          />
+        </label>
         <button className="button" disabled={busy}>
           Save reflection <PenLine size={16} />
         </button>
@@ -82,7 +116,7 @@ export function JournalPage() {
             <Search size={18} />
             <input
               aria-label="Search journal reflections"
-              placeholder="Search your journal entries…"
+              placeholder="Search your journal entries, lessons, or action steps…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -103,7 +137,12 @@ export function JournalPage() {
                 try {
                   await api(
                     "/me/journal/" + j.id,
-                    { title: editing.title, body: editing.body },
+                    {
+                      title: editing.title,
+                      lessonLearned: editing.lessonLearned || "",
+                      body: editing.body,
+                      actionStep: editing.actionStep || "",
+                    },
                     "PUT",
                   );
                   setEditing(null);
@@ -127,16 +166,28 @@ export function JournalPage() {
                   <X size={16} />
                 </button>
               </div>
-              <label>
-                Title (optional)
-                <input
-                  value={editing.title}
-                  maxLength={200}
-                  onChange={(e) =>
-                    setEditing({ ...editing, title: e.target.value })
-                  }
-                />
-              </label>
+              <div className="form-row-2">
+                <label>
+                  Title (optional)
+                  <input
+                    value={editing.title}
+                    maxLength={200}
+                    onChange={(e) =>
+                      setEditing({ ...editing, title: e.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  Today's lesson (optional)
+                  <input
+                    value={editing.lessonLearned || ""}
+                    maxLength={2000}
+                    onChange={(e) =>
+                      setEditing({ ...editing, lessonLearned: e.target.value })
+                    }
+                  />
+                </label>
+              </div>
               <label>
                 Reflection
                 <textarea
@@ -145,6 +196,16 @@ export function JournalPage() {
                   value={editing.body}
                   onChange={(e) =>
                     setEditing({ ...editing, body: e.target.value })
+                  }
+                />
+              </label>
+              <label>
+                Practical action step (optional)
+                <input
+                  value={editing.actionStep || ""}
+                  maxLength={2000}
+                  onChange={(e) =>
+                    setEditing({ ...editing, actionStep: e.target.value })
                   }
                 />
               </label>
@@ -171,12 +232,19 @@ export function JournalPage() {
                   {j.devotionalTitle}
                 </Link>
               )}
+              {j.lessonLearned && (
+                <p className="journal-meta-line">
+                  <strong>Today's Lesson:</strong> {j.lessonLearned}
+                </p>
+              )}
               <p>{j.body}</p>
+              {j.actionStep && (
+                <p className="journal-meta-line">
+                  <strong>Action Step:</strong> {j.actionStep}
+                </p>
+              )}
               <div className="actions">
-                <button
-                  className="text-link"
-                  onClick={() => setEditing(j)}
-                >
+                <button className="text-link" onClick={() => setEditing(j)}>
                   Edit reflection
                 </button>
                 <button
@@ -210,4 +278,3 @@ export function JournalPage() {
     </>
   );
 }
-

@@ -91,25 +91,74 @@ export const DEFAULT_MONTHLY_THEMES = [
   },
 ] as const;
 
+export type BankAccountSetting = {
+  currency: "NGN" | "USD" | "GBP";
+  label: string;
+  bankName: string;
+  accountName: string;
+  accountNumber: string;
+};
+
+export const DEFAULT_BANK_ACCOUNTS: BankAccountSetting[] = [
+  {
+    currency: "NGN",
+    label: "Naira Account",
+    bankName: "Access Bank",
+    accountName: "Cossy Teens Consult Enterprises",
+    accountNumber: "1996043204",
+  },
+  {
+    currency: "USD",
+    label: "USD Account",
+    bankName: "Access Bank",
+    accountName: "Cossy Teens Consult",
+    accountNumber: "2002256283",
+  },
+  {
+    currency: "GBP",
+    label: "GBP Account",
+    bankName: "Access Bank",
+    accountName: "Cossy Teens Consult",
+    accountNumber: "2002391667",
+  },
+];
+
 export const DEFAULT_SETTINGS: Record<string, string> = {
   siteTitle: "The Balanced Life Devotional",
   siteTagline:
     "Godliness for the heart. Wisdom for the journey. Growth for the whole person.",
-  organizationName: "Cossy Teens Consult",
+  brandStatement:
+    "Building Minds. Shaping Character. Creating Balanced Lives.",
+  siteHeadline: "Growing up is a journey. Make every day count.",
+  siteSubheadline:
+    "365 Days of Connecting with Jesus with holistic development.",
+  targetAudience: "Teenagers & Young Adults | Ages 13–25",
+  organizationName: "Cossy Teens Consult Enterprises",
   organizationDescription:
-    "Cossy Teens Consult is a professional counselling and mentorship hub committed to helping teenagers and young adults grow with balance. Its work helps young people build strong faith, sound character, healthy relationships, emotional wisdom, life skills, and the confidence to live purposefully.",
+    "Cossy Teens Consult Enterprises is a professional counselling and mentorship hub committed to helping teenagers and young adults grow with balance. Its work helps young people build strong faith, sound character, healthy relationships, emotional wisdom, life skills, and the confidence to live purposefully.",
   authorName: "Mrs. Adindu Ogechukwu Constance Nwisi",
   authorTitle:
-    "Certified Counselling Practitioner & Lead Consultant, Cossy Teens Consult",
+    "Certified Counselling Practitioner & Lead Consultant, Cossy Teens Consult Enterprises",
   authorBio:
-    "Adindu Ogechukwu Constance Nwisi is a Certified Counselling Practitioner, writer, preacher, public speaker, and the Lead Consultant of Cossy Teens Consult. She has worked with teenagers and young adults for over a decade. Her journey with God began as a child—she began using devotionals as far back as Primary Four and gave her life to Christ in Primary Six. Her passion is rooted in a simple desire: to help young people know God for themselves, discover who they are, and grow holistically in every important area of life.",
-  contactEmail: "inquiries@cossyteensconsult.org",
-  contactPhone: "+234 800 000 0000",
-  contactAddress: "Lagos, Nigeria",
+    "Adindu Ogechukwu Constance Nwisi is a Certified Counselling Practitioner, writer, preacher, public speaker, and the Lead Consultant of Cossy Teens Consult Enterprises. She has worked with teenagers and young adults for over a decade. Her journey with God began as a child—she began using devotionals as far back as Primary Four and gave her life to Christ in Primary Six. Her passion is rooted in a simple desire: to help young people know God for themselves, discover who they are, and grow holistically in every important area of life.",
+  contactEmail: "cossyteensconsult@gmail.com",
+  contactPhone: "+2349055002143",
+  contactSecondaryPhone: "+2349113708399",
+  contactWebsite: "cossyteens.com",
+  contactAddress: "Nigeria",
   hardcoverPriceKobo: "500000",
   hardcoverAvailability: "available",
   hardcoverNote:
-    "Hardcover copies of the 2027 edition are available for individual readers, youth ministries, schools, and church groups.",
+    "Printed copies of the 2027 edition are available at ₦5,000 for individual readers, parents, schools, churches, and youth organizations.",
+  digitalEditionPriceKobo: "350000",
+  digitalEditionAvailability: "available",
+  digitalEditionScope: "edition_2027",
+  digitalEditionNote:
+    "One-time purchase (₦3,500) granting persistent online reading access to the 2027 edition inside your reader dashboard.",
+  bulkDiscountNote:
+    "Bulk orders for parents, schools, churches, youth groups, and organizations qualify for a custom discount approved by the author.",
+  bankTransferEnabled: "false",
+  bankAccountsJson: JSON.stringify(DEFAULT_BANK_ACCOUNTS),
   allowRegistration: "true",
   enableAutoRenewal: "true",
   renewalReminderDays: "7",

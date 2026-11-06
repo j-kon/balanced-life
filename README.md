@@ -1,6 +1,6 @@
 # The Balanced Life Devotional
 
-Production-oriented full-stack web application for **Cossy Teens Consult**, featuring the 2027 daily devotional by **Mrs. Adindu Ogechukwu Constance Nwisi**.
+Production-oriented full-stack web application and mobile Progressive Web App (PWA) for **Cossy Teens Consult Enterprises** (*Building Minds. Shaping Character. Creating Balanced Lives.*), featuring the 2027 daily devotional by **Mrs. Adindu Ogechukwu Constance Nwisi**.
 
 Built with **React 19, Vite, TypeScript, and Tailwind CSS** on the frontend, and **Fastify, TypeScript, Drizzle ORM, SQLite, and Zod** on the backend.
 
@@ -81,19 +81,23 @@ npm run import:manuscript -- --write  # Import missing manuscript entries as unr
 - Full devotional content (`reflection`, `thinkAbout`, `prayer`, `challenge`) is stripped on the server for locked entries.
 - The original PDF (`private/manuscript/devotional-2027.pdf`) is never copied to public assets or exposed over HTTP.
 
-### 3. Subscriptions, Complimentary Access & Paystack Abstraction
-- Editable provisional membership plans:
+### 3. Commerce: Printed Copy, Digital Edition, Memberships & Bulk Orders
+- **Printed Copy (₦5,000)**: Ordered via `/bookstore` with delivery inquiries tracked in `/admin` (`Bookstore` tab).
+- **2027 Digital Edition (₦3,500)**: Dedicated one-time purchase (`/digital-edition`) granting persistent online access to all published 2027 devotionals (`digital_purchases` and `digital_entitlements`), separate from recurring subscriptions. Supports instant Paystack checkout & webhooks plus optional admin-reconciled Access Bank transfer checkout (`bankTransferEnabled` false by default pending owner approval).
+- **Bulk & Institutional Orders (`/bulk-orders`)**: Dedicated workflow for parents, schools, churches, and youth organizations with admin quotation, custom discount percentage, conversion, and fulfillment tracking (`bulk_orders`).
+- **Provisional Digital Membership Plans (`/pricing`)**:
   - **Monthly Plan**: ₦1,000
   - **Quarterly Plan**: ₦2,700
   - **Six-Month Plan**: ₦4,800
   - **Yearly Plan**: ₦8,500
-- Online payment initiation and verification are built around a Paystack provider abstraction (`backend/src/services/payments.ts`).
-- When `PAYSTACK_SECRET_KEY` is not configured, online payment initiation returns HTTP `503` and the UI displays a clear configuration state—no simulated or fabricated payment successes occur.
-- Administrators can grant or revoke **Complimentary Membership** (`access_type = 'complimentary'`) with an audit note via `/app/admin`. Complimentary memberships unlock subscriber readings for local testing and ministry gifts, are explicitly labeled in the UI, and are **never counted as verified payment revenue**.
+- When `PAYSTACK_SECRET_KEY` is not configured, online payment initiation returns HTTP `503` and the UI displays an honest configuration state—no simulated or fabricated payment successes occur.
+- Administrators can grant or revoke **Complimentary Membership** (`access_type = 'complimentary'`) with an audit note via `/admin`. Complimentary memberships unlock subscriber readings for local testing and ministry gifts, are explicitly labeled in the UI, and are **never counted as verified payment revenue**.
 
-### 4. Personal Growth Journal & Reader Progress
-- Readers can mark devotionals complete, bookmark entries, and write, edit, filter, or delete personal journal reflections.
+### 4. 5-Step Daily Growth & Accountability Experience + Mobile PWA
+- Structured around the 5-step daily growth framework: **1. Connect with Jesus**, **2. Learn**, **3. Reflect**, **4. Apply**, and **5. Track Your Growth**.
+- Each devotional reading includes a private **Daily Growth & Accountability** check-in recording **Today's lesson** (`lesson_learned`), **Personal reflection** (`body`), **Practical action step** (`action_step`), and **Completion status**.
 - All journal entries are strictly scoped to the authenticated owner (`user_id`); administrative endpoints never expose private reader journal bodies.
+- Installable Mobile PWA (`manifest.webmanifest` + `sw.js`) with Android `beforeinstallprompt` banner, iPhone Safari Add to Home Screen instructions, standalone safe-area layout, and battery-conscious reminder preferences (`/account`).
 
 ## Environment Configuration
 

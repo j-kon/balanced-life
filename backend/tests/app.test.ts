@@ -22,6 +22,7 @@ class MockPaystackProvider implements PaymentProvider {
   readonly configured = true;
   readonly publicKey = "pk_test_mock";
   public initialized = new Map<string, number>();
+  public forceFailedReferences = new Set<string>();
 
   async initializeTransaction(input: PaymentInitializeInput) {
     this.initialized.set(input.reference, input.amountKobo);
@@ -33,6 +34,16 @@ class MockPaystackProvider implements PaymentProvider {
 
   async verifyTransaction(reference: string) {
     const amountKobo = this.initialized.get(reference) || 100000;
+    if (this.forceFailedReferences.has(reference)) {
+      return {
+        reference,
+        status: "failed" as const,
+        amountKobo,
+        currency: "NGN",
+        providerTransactionId: "ps_failed_" + reference,
+        paidAt: null,
+      };
+    }
     return {
       reference,
       status: "succeeded" as const,
@@ -580,4 +591,378 @@ test("unsafe browser requests require origin and anti-CSRF header", async () => 
     ).statusCode,
     403,
   );
+});
+
+test("owner brand settings, book prices, and young reader registration consent work as specified", async () => {
+  const pubCfg = (await send("GET", "/config")).json();
+  assert.equal(
+    pubCfg.settings.organizationName,
+    "Cossy Teens Consult Enterprises",
+  );
+  assert.equal(pubCfg.settings.hardcoverPriceKobo, 500000);
+  assert.equal(pubCfg.settings.digitalEditionPriceKobo, 350000);
+  assert.equal(pubCfg.settings.contactEmail, "cossyteensconsult@gmail.com");
+  assert.equal(pubCfg.settings.bankTransferEnabled, false);
+  assert.equal(pubCfg.settings.bankAccounts.length, 0);
+
+  // Admin settings contain the 3 Access Bank accounts from the PDF
+  const adminSettings = (
+    await send("GET", "/admin/settings", undefined, adminCookie)
+  ).json();
+  assert.equal(adminSettings.bankAccounts.length, 3);
+  assert.equal(adminSettings.bankAccounts[0].accountNumber, "1996043204");
+
+  // Teen reader (13-17) without guardian consent must be rejected
+  assert.equal(
+    (
+      await send("POST", "/auth/register", {
+        name: "Teen Reader",
+        email: "teen-no-consent@example.org",
+        password: "Teen-Reader-Pass-2027!",
+        ageGroup: "13_17",
+        guardianConsentConfirmed: false,
+      })
+    ).statusCode,
+    400,
+  );
+
+  // Teen reader (13-17) with guardian consent succeeds
+  const teenReg = await send("POST", "/auth/register", {
+    name: "Teen Reader",
+    email: "teen@example.org",
+    password: "Teen-Reader-Pass-2027!",
+    ageGroup: "13_17",
+    guardianConsentConfirmed: true,
+  });
+  assert.equal(teenReg.statusCode, 200);
+  assert.equal(teenReg.json().user.ageGroup, "13_17");
+  assert.equal(teenReg.json().user.guardianConsentConfirmed, true);
+});
+
+test("5-step accountability check-in stores lessonLearned, reflection, actionStep, and completion", async () => {
+  const devList = (await send("GET", "/devotionals")).json();
+  const entryId = devList[0].id;
+
+  const created = await send(
+    "POST",
+    "/me/journal",
+    {
+      devotionalId: entryId,
+      title: "Jan 1 Check-In",
+      lessonLearned: "Stay rooted in Christ daily",
+      body: "I noticed how intentional prayer steadies my decisions.",
+      actionStep: "Read John 15 before checking my phone tomorrow morning.",
+      prayerFocus: "Consistency and humility",
+      completed: true,
+    },
+    subscriberCookie,
+  );
+  assert.equal(created.statusCode, 200);
+  assert.equal(created.json().lessonLearned, "Stay rooted in Christ daily");
+  assert.equal(
+    created.json().actionStep,
+    "Read John 15 before checking my phone tomorrow morning.",
+  );
+
+  // Reading the devotional returns the user's accountabilityEntry and completed=true
+  const devDetail = (
+    await send("GET", `/devotionals/${entryId}`, undefined, subscriberCookie)
+  ).json();
+  assert.equal(devDetail.completed, true);
+  assert.equal(
+    devDetail.accountabilityEntry.lessonLearned,
+    "Stay rooted in Christ daily",
+  );
+
+  // Another user never sees this accountabilityEntry
+  const otherReg = await send("POST", "/auth/register", {
+    name: "Other Reader",
+    email: "other-reader@example.org",
+    password: "Other-Reader-Pass-2027!",
+  });
+  const otherCookie = String(otherReg.headers["set-cookie"]).split(";")[0];
+  const sampleId = devList.find((d: { sample: boolean }) => d.sample).id;
+  const sampleDetail = (
+    await send("GET", `/devotionals/${sampleId}`, undefined, otherCookie)
+  ).json();
+  assert.equal(sampleDetail.accountabilityEntry, null);
+});
+
+test("dedicated Digital Edition purchase (Paystack + webhook + failed verification + bank transfer reconciliation) grants persistent 2027 access", async () => {
+  const buyerReg = await send("POST", "/auth/register", {
+    name: "Digital Buyer",
+    email: "digital-buyer@example.org",
+    password: "Digital-Buyer-Pass-2027!",
+  });
+  assert.equal(buyerReg.statusCode, 200);
+  const buyerCookie = String(buyerReg.headers["set-cookie"]).split(";")[0];
+
+  // Before purchase, non-sample devotional is locked (403)
+  const devList = (await send("GET", "/devotionals")).json();
+  const lockedEntry = devList.find((d: { sample: boolean }) => !d.sample);
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/devotionals/${lockedEntry.id}`,
+        undefined,
+        buyerCookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // 1. Failed Paystack verification must NOT activate entitlement
+  const failedInit = await send(
+    "POST",
+    "/digital-purchases/checkout",
+    { paymentMethod: "paystack" },
+    buyerCookie,
+  );
+  assert.equal(failedInit.statusCode, 200);
+  const failedRef = failedInit.json().reference;
+  assert.ok(failedRef.startsWith("BLD_DIG_"));
+  paystackProvider.forceFailedReferences.add(failedRef);
+
+  const failedVerify = await send(
+    "POST",
+    "/digital-purchases/verify",
+    { reference: failedRef },
+    buyerCookie,
+  );
+  assert.equal(failedVerify.statusCode, 400);
+  assert.equal(
+    (await send("GET", "/me/digital-edition", undefined, buyerCookie)).json()
+      .active,
+    false,
+  );
+
+  // 2. Successful Paystack checkout + webhook idempotency
+  const initRes = await send(
+    "POST",
+    "/digital-purchases/checkout",
+    { paymentMethod: "paystack" },
+    buyerCookie,
+  );
+  assert.equal(initRes.statusCode, 200);
+  const reference = initRes.json().reference;
+
+  // Trigger Paystack webhook first
+  const webhookRes = await app.inject({
+    method: "POST",
+    url: "/api/v1/webhooks/paystack",
+    payload: {
+      event: "charge.success",
+      data: { reference },
+    },
+    headers: { "x-paystack-signature": "valid_mock_sig" },
+  });
+  assert.equal(webhookRes.statusCode, 200);
+  assert.equal(webhookRes.json().processed, true);
+
+  // Replaying verify after webhook is idempotent and does not duplicate revenue
+  const verifyRes = await send(
+    "POST",
+    "/digital-purchases/verify",
+    { reference },
+    buyerCookie,
+  );
+  assert.equal(verifyRes.statusCode, 200);
+  assert.equal(verifyRes.json().replayed, true);
+  assert.equal(verifyRes.json().entitlement.status, "active");
+  assert.equal(verifyRes.json().entitlement.editionYear, 2027);
+
+  // Buyer can now read non-sample 2027 devotional without a recurring subscription
+  const unlockedRes = await send(
+    "GET",
+    `/devotionals/${lockedEntry.id}`,
+    undefined,
+    buyerCookie,
+  );
+  assert.equal(unlockedRes.statusCode, 200);
+  assert.equal(unlockedRes.json().reflection, entryFixture.reflection);
+
+  // Overview revenue includes 100,000 kobo subscription + 350,000 kobo digital edition = 450,000 kobo
+  const overview = (
+    await send("GET", "/admin/overview", undefined, adminCookie)
+  ).json();
+  assert.equal(overview.metrics.digitalRevenueKobo, 350000);
+  assert.equal(overview.metrics.verifiedRevenueKobo, 450000);
+  assert.equal(overview.metrics.digitalEditionsSold, 1);
+
+  // 3. Bank-transfer workflow when enabled by admin
+  const transferBuyerReg = await send("POST", "/auth/register", {
+    name: "Transfer Buyer",
+    email: "transfer-buyer@example.org",
+    password: "Transfer-Buyer-Pass-2027!",
+  });
+  const transferCookie = String(transferBuyerReg.headers["set-cookie"]).split(
+    ";",
+  )[0];
+
+  // While bankTransferEnabled is false, bank_transfer checkout is rejected
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/digital-purchases/checkout",
+        { paymentMethod: "bank_transfer" },
+        transferCookie,
+      )
+    ).statusCode,
+    503,
+  );
+
+  // Enable bankTransferEnabled in admin settings
+  const currentSettings = (
+    await send("GET", "/admin/settings", undefined, adminCookie)
+  ).json();
+  const enableRes = await send(
+    "PUT",
+    "/admin/settings",
+    { ...currentSettings, bankTransferEnabled: true },
+    adminCookie,
+  );
+  assert.equal(enableRes.statusCode, 200);
+
+  const btOrder = await send(
+    "POST",
+    "/digital-purchases/checkout",
+    {
+      paymentMethod: "bank_transfer",
+      currency: "NGN",
+      payerNote: "Transfer from Access Bank",
+    },
+    transferCookie,
+  );
+  assert.equal(btOrder.statusCode, 200);
+  const purchaseId = btOrder.json().purchase.id;
+
+  // Submitting transfer proof moves status to verifying_transfer and NEVER auto-activates access
+  const proofRes = await send(
+    "POST",
+    `/digital-purchases/${purchaseId}/transfer-proof`,
+    {
+      transferReference: "NIP-SESSION-99887766",
+      payerNote: "Paid NGN 3,500",
+    },
+    transferCookie,
+  );
+  assert.equal(proofRes.statusCode, 200);
+  assert.equal(proofRes.json().purchase.status, "verifying_transfer");
+  assert.equal(
+    (await send("GET", "/me/digital-edition", undefined, transferCookie)).json()
+      .active,
+    false,
+  );
+
+  // Admin reconciliation approves and activates entitlement
+  const approveRes = await send(
+    "POST",
+    `/admin/digital-purchases/${purchaseId}/reconcile`,
+    { action: "approve", adminNotes: "Confirmed on Access Bank statement" },
+    adminCookie,
+  );
+  assert.equal(approveRes.statusCode, 200);
+  assert.equal(
+    (await send("GET", "/me/digital-edition", undefined, transferCookie)).json()
+      .active,
+    true,
+  );
+});
+
+test("bulk-order workflow stores null discount by default and supports admin quotation, discount, and fulfillment", async () => {
+  const created = await send("POST", "/bulk-orders", {
+    contactName: "Pastor Samuel Adeyemi",
+    organizationName: "Grace Youth Fellowship",
+    organizationType: "church",
+    email: "youth@gracechurch.org",
+    phone: "+2348030001122",
+    quantity: 50,
+    preferredFormat: "printed",
+    deliveryLocation: "Ikeja, Lagos",
+    notes: "For our annual youth camp in August.",
+  });
+  assert.equal(created.statusCode, 200);
+  const bulkId = created.json().id;
+  assert.equal(created.json().discountPercent, null);
+  assert.equal(created.json().quotedTotalKobo, null);
+
+  const patched = await send(
+    "PATCH",
+    `/admin/bulk-orders/${bulkId}`,
+    {
+      status: "quoted",
+      unitPriceKobo: 500000,
+      discountPercent: 10,
+      quotedTotalKobo: 22500000,
+      adminNotes: "Approved 10% church youth camp discount.",
+    },
+    adminCookie,
+  );
+  assert.equal(patched.statusCode, 200);
+  assert.equal(patched.json().status, "quoted");
+  assert.equal(patched.json().discountPercent, 10);
+  assert.equal(patched.json().quotedTotalKobo, 22500000);
+});
+
+test("PWA notification preferences, push subscriptions, and daily reminders deduplicate cleanly", async () => {
+  const initNotifs = (
+    await send("GET", "/me/notifications", undefined, subscriberCookie)
+  ).json();
+  assert.equal(initNotifs.preferences.dailyReminderEnabled, false);
+  assert.equal(initNotifs.pushSubscriptionsCount, 0);
+
+  // Enable daily reminder
+  const prefRes = await send(
+    "PATCH",
+    "/me/notifications/preferences",
+    {
+      dailyReminderEnabled: true,
+      reminderTime: "06:30",
+      timezone: "Africa/Lagos",
+      subscriptionAlertsEnabled: true,
+      purchaseAlertsEnabled: true,
+    },
+    subscriberCookie,
+  );
+  assert.equal(prefRes.statusCode, 200);
+  assert.equal(prefRes.json().preferences.dailyReminderEnabled, true);
+
+  // Register push subscription
+  const subPush = await send(
+    "POST",
+    "/me/notifications/push-subscribe",
+    {
+      endpoint: "https://fcm.googleapis.com/fcm/send/mock-endpoint-1",
+      p256dhKey: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQ",
+      authKey: "tBHItJI5svbpez7KI4CCXg",
+      userAgent: "Playwright Mobile PWA Test",
+    },
+    subscriberCookie,
+  );
+  assert.equal(subPush.statusCode, 200);
+  assert.equal(subPush.json().pushSubscriptionsCount, 1);
+
+  // Unmark progress on devotional #1 so today's daily reading reminder is eligible
+  const devList = (await send("GET", "/devotionals")).json();
+  await send(
+    "POST",
+    `/me/progress/${devList[0].id}`,
+    { completed: false },
+    subscriberCookie,
+  );
+
+  // Calling GET /me/notifications twice on the same day must not create duplicate daily reminders
+  const firstFetch = (
+    await send("GET", "/me/notifications", undefined, subscriberCookie)
+  ).json();
+  const secondFetch = (
+    await send("GET", "/me/notifications", undefined, subscriberCookie)
+  ).json();
+  const dailyReminders = secondFetch.events.filter(
+    (e: { category: string }) => e.category === "daily_reminder",
+  );
+  assert.equal(dailyReminders.length, 1);
+  assert.equal(firstFetch.events.length, secondFetch.events.length);
 });

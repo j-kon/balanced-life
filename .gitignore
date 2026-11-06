@@ -5,6 +5,7 @@ node_modules/
 private/manuscript/*
 !private/manuscript/.gitkeep
 private/backups/
+private/Devotional_Website_Content.pdf
 .DS_Store
 tmp/
 test-results/

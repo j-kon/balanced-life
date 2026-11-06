@@ -5,6 +5,8 @@ import * as s from "../schema.js";
 import { HttpError } from "../errors.js";
 import type { PaymentProvider } from "./payments.js";
 import type { PublicUser } from "../auth.js";
+import { hasActiveDigitalEntitlement } from "./commerce.js";
+import { createNotificationEvent } from "./notifications.js";
 
 export function addMonths(date: string, months: number): string {
   const value = new Date(date);
@@ -141,7 +143,7 @@ export function getSubscriptionDetails(
   };
 }
 
-export function hasPremiumAccess(
+export function hasSubscriptionAccess(
   store: Store,
   user: PublicUser | null,
 ): boolean {
@@ -159,6 +161,16 @@ export function hasPremiumAccess(
     )
     .get();
   return Boolean(sub && sub.status !== "revoked");
+}
+
+export function hasPremiumAccess(
+  store: Store,
+  user: PublicUser | null,
+): boolean {
+  if (!user || user.status === "suspended") return false;
+  if (user.role === "admin") return true;
+  if (hasSubscriptionAccess(store, user)) return true;
+  return hasActiveDigitalEntitlement(store, user.id, 2027);
 }
 
 export function grantComplimentaryAccess(
@@ -224,6 +236,15 @@ export function grantComplimentaryAccess(
         createdAt: now,
       })
       .run();
+
+    createNotificationEvent(store, {
+      userId: targetUserId,
+      category: "subscription",
+      title: `Complimentary ${plan.name} Membership Activated`,
+      body: `You have been granted complimentary ${plan.name.toLowerCase()} membership access (${input.reason}).`,
+      actionUrl: "/subscription",
+      dedupeKey: `comp_grant_${targetUserId}_${now.slice(0, 16)}`,
+    });
 
     return getSubscriptionDetails(store, targetUserId);
   })();
@@ -466,6 +487,15 @@ export async function verifyAndActivatePayment(
       .where(eq(s.payments.id, existingPayment.id))
       .returning()
       .get();
+
+    createNotificationEvent(store, {
+      userId: existingPayment.userId,
+      category: "subscription",
+      title: `${plan.name} Membership Activated`,
+      body: `Your ${plan.name.toLowerCase()} membership payment (${existingPayment.reference}) has been verified.`,
+      actionUrl: "/subscription",
+      dedupeKey: `sub_payment_verified_${existingPayment.id}`,
+    });
 
     return {
       subscription: getSubscriptionDetails(store, existingPayment.userId),

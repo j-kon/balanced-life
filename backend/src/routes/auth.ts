@@ -56,6 +56,8 @@ export function registerAuthRoutes(
           role: "reader",
           status: "active",
           suspendedReason: "",
+          ageGroup: input.ageGroup || "18_25",
+          guardianConsentConfirmed: Boolean(input.guardianConsentConfirmed),
           createdAt: now,
           updatedAt: now,
         })

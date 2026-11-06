@@ -172,8 +172,9 @@ hr {
 .public-nav {
   display: flex;
   align-items: center;
-  gap: 30px;
-  font-size: 0.78rem;
+  gap: 16px;
+  font-size: 0.74rem;
+  flex-wrap: wrap;
 }
 .public-nav > a:not(.button) {
   padding: 10px 0;
@@ -2258,5 +2259,391 @@ tr:last-child td {
   .feature-list-grid,
   .form-row-2 {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Owner PDF Corrections, 5-Step Experience, Commerce & Mobile PWA Styles */
+.hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.hero-subheadline {
+  font-size: 1.05rem;
+  color: var(--wine);
+  margin-bottom: 14px;
+}
+.hero-supporting-copy {
+  font-size: 0.92rem;
+  margin-top: 12px;
+  max-width: 540px;
+}
+.holistic-pillars-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+.pillar-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 18px;
+  background: #fffdf9;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 550;
+  color: var(--wine);
+}
+.pillar-chip svg {
+  color: var(--gold);
+}
+.narrative-band {
+  background: #f3ecdf;
+  border-block: 1px solid var(--border);
+  padding: 72px 0;
+}
+.narrative-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 28px;
+  align-items: stretch;
+}
+.narrative-grid .panel {
+  margin-bottom: 0;
+}
+.check-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+  display: grid;
+  gap: 12px;
+}
+.check-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 0.84rem;
+  line-height: 1.6;
+  color: #4d453e;
+}
+.check-list li svg {
+  color: #9b7c37;
+  margin-top: 3px;
+}
+.experience-band {
+  background: #f6efe4;
+  border-block: 1px solid var(--border);
+}
+.five-step-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+  margin: 24px 0 32px;
+}
+.five-step-grid.compact {
+  margin: 16px 0 28px;
+}
+.five-step-card {
+  background: #fffdf9;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--wine);
+  border-radius: 10px;
+  padding: 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.five-step-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #9b7c37;
+}
+.step-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--wine);
+  background: #f5ecdc;
+  padding: 4px 10px;
+  border-radius: 30px;
+}
+.five-step-card h3 {
+  font-size: 1.18rem;
+}
+.five-step-card p {
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+.accountability-preview {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 36px;
+  align-items: center;
+  margin-top: 24px;
+}
+.accountability-mockup {
+  background: #faf5ed;
+  border: 1px solid #dfd2be;
+  border-radius: 10px;
+  padding: 22px;
+  display: grid;
+  gap: 14px;
+}
+.mockup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--wine);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.mockup-field {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 12px 14px;
+}
+.mockup-field small {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #8f7239;
+  margin-bottom: 4px;
+}
+.mockup-field p {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #3b342f;
+}
+.mockup-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #2f5c2b;
+  background: #eef6ec;
+  padding: 10px 14px;
+  border-radius: 6px;
+}
+.vision-card {
+  background: var(--wine);
+  color: #fff6e8;
+  border-color: var(--wine);
+  justify-content: space-between;
+}
+.vision-card .eyebrow {
+  color: #e7c97a;
+}
+.vision-card h2 {
+  color: #fff6e8;
+}
+.vision-quote {
+  margin: 12px 0;
+  font-family: Georgia, serif;
+  font-size: 1.32rem;
+  line-height: 1.65;
+  color: #f9eedb;
+}
+.vision-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  padding-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: #e5d2b5;
+}
+.copy-options-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 22px;
+  align-items: stretch;
+}
+.copy-option-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 0;
+}
+.copy-option-card.featured-option {
+  border: 2px solid var(--wine);
+  background: #fffdf8;
+}
+.bank-accounts-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.bank-account-card {
+  background: #fbf6ec;
+  border: 1px solid #dfd1ba;
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.bank-account-card strong {
+  font-size: 0.85rem;
+  color: var(--wine);
+}
+.bank-account-card p {
+  font-size: 0.76rem;
+  margin: 0;
+}
+.account-number {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #2c2522;
+  letter-spacing: 0.04em;
+}
+.pwa-banner {
+  background: #fffdf8;
+  border: 1px solid #dfcda8;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 22px;
+}
+.pwa-banner-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.pwa-banner-main > div:nth-child(2) {
+  flex: 1;
+  min-width: 200px;
+}
+.pwa-banner-main strong {
+  display: block;
+  font-size: 0.84rem;
+  color: var(--wine);
+}
+.pwa-banner-main p {
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.pwa-icon {
+  color: var(--wine);
+}
+.pwa-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pwa-guide {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  font-size: 0.78rem;
+}
+.pwa-guide ol {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+.reading-steps-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.reading-step-pill {
+  font-size: 0.7rem;
+  background: #f4ecdd;
+  border: 1px solid #e1d2b7;
+  color: #695026;
+  padding: 5px 11px;
+  border-radius: 30px;
+}
+.journal-meta-line {
+  background: #f7f0e2;
+  padding: 10px 14px;
+  border-left: 3px solid var(--gold);
+  border-radius: 4px;
+  font-size: 0.82rem;
+  margin: 10px 0 !important;
+}
+.footer-brand-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.footer-brand-statement {
+  font-size: 0.78rem;
+  color: var(--wine);
+}
+@media (max-width: 1120px) {
+  .holistic-pillars-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .five-step-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .copy-options-grid {
+    grid-template-columns: 1fr;
+  }
+  .accountability-preview {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 860px) {
+  .narrative-grid,
+  .bank-accounts-grid,
+  .pwa-guide {
+    grid-template-columns: 1fr;
+  }
+  .five-step-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .holistic-pillars-grid,
+  .five-step-grid {
+    grid-template-columns: 1fr;
+  }
+  .hero h1 {
+    font-size: clamp(2.25rem, 8.5vw, 3.1rem);
+  }
+  .hero-art {
+    width: 100%;
+    max-width: 260px;
+  }
+  .orbit {
+    width: 100%;
+    max-width: 260px;
+  }
+  .art-caption {
+    right: 0;
+  }
+}
+@media (max-width: 395px) {
+  .container {
+    padding-inline: 16px;
+  }
+  .reader-main {
+    padding-inline: 14px;
+  }
+  .brand {
+    font-size: 0.96rem;
+  }
+  .brand small {
+    max-width: 190px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }

@@ -1,1 +1,32 @@
-{"id":"/","name":"The Balanced Life Devotional","short_name":"Balanced Life","description":"Your daily space to read, reflect and grow.","start_url":"/dashboard","scope":"/","display":"standalone","background_color":"#FAF5ED","theme_color":"#570008","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
+{
+  "id": "/",
+  "name": "The Balanced Life Devotional",
+  "short_name": "Balanced Life",
+  "description": "365 Days of Connecting with Jesus with holistic development for Teenagers & Young Adults (Ages 13–25).",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FAF5ED",
+  "theme_color": "#570008",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

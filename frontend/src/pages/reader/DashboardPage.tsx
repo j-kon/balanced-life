@@ -4,9 +4,11 @@ import {
   AlertCircle,
   ArrowRight,
   ArrowUpRight,
+  Bell,
   BookOpen,
   CheckCircle2,
   PenLine,
+  ShoppingBag,
   Sun,
 } from "lucide-react";
 import { useApp } from "../../context/AppContext";
@@ -15,16 +17,25 @@ import {
   Empty,
   EntryCard,
   ErrorBox,
+  FiveStepFramework,
   Loading,
   UpcomingYearNotice,
 } from "../../components/Common";
-import { dateLabel } from "../../api";
-import type { Entry, SubscriptionDetails } from "../../types";
+import { dateLabel, money } from "../../api";
+import type {
+  DigitalEntitlementRecord,
+  Entry,
+  NotificationEventRecord,
+  SubscriptionDetails,
+} from "../../types";
 
 type DashboardData = {
   currentDate: string;
   isUpcomingYear: boolean;
   hasAccess: boolean;
+  hasSubscriptionAccess: boolean;
+  hasDigitalEditionAccess: boolean;
+  digitalEntitlement: DigitalEntitlementRecord | null;
   completed: number;
   bookmarksCount: number;
   journalsCount: number;
@@ -32,11 +43,15 @@ type DashboardData = {
   continueReading: Entry | null;
   history: Entry[];
   subscription: SubscriptionDetails | null;
+  notifications: NotificationEventRecord[];
 };
 
 export function DashboardPage() {
   const { user, config } = useApp();
   const { data, error } = useData<DashboardData>("/me/dashboard");
+
+  const unreadNotifications =
+    data?.notifications?.filter((n) => !n.readAt) || [];
 
   return (
     <>
@@ -51,7 +66,9 @@ export function DashboardPage() {
             <br />
             {user?.name.split(" ")[0]}.
           </h1>
-          <p>Make today a moment of intention.</p>
+          <p>
+            Connect with Jesus · Learn · Reflect · Apply · Track Your Growth
+          </p>
         </div>
         <Sun className="heading-sun" size={54} strokeWidth={1} />
       </div>
@@ -67,6 +84,27 @@ export function DashboardPage() {
             <Link className="text-link" to="/subscription">
               Manage membership <ArrowRight size={15} />
             </Link>
+          </div>
+        </div>
+      )}
+
+      {unreadNotifications.length > 0 && (
+        <div className="notice">
+          <Bell size={20} />
+          <div>
+            <strong>{unreadNotifications[0].title}</strong>
+            <p>{unreadNotifications[0].body}</p>
+            <div className="actions" style={{ marginTop: "8px" }}>
+              <Link
+                className="text-link"
+                to={unreadNotifications[0].actionUrl || "/dashboard"}
+              >
+                Open <ArrowRight size={14} />
+              </Link>
+              <Link className="text-link" to="/account">
+                Manage reminders ({unreadNotifications.length} unread)
+              </Link>
+            </div>
           </div>
         </div>
       )}
@@ -95,7 +133,7 @@ export function DashboardPage() {
                       className="button cream"
                       to={"/read/" + data.featured.id}
                     >
-                      Pause & read <ArrowRight size={17} />
+                      Start 5-step daily growth <ArrowRight size={17} />
                     </Link>
                   </>
                 ) : (
@@ -120,7 +158,7 @@ export function DashboardPage() {
                 />
               </section>
               <section className="progress-card">
-                <h3>Your reading journey</h3>
+                <h3>Your 365-day growth</h3>
                 <div
                   className="progress-circle"
                   style={
@@ -134,13 +172,22 @@ export function DashboardPage() {
                     <span>of 365 days</span>
                   </div>
                 </div>
-                <p>Every day is a new beginning.</p>
+                <p>Every day is a new step forward.</p>
                 <small>
                   {config.publishedCount} published readings ·{" "}
                   {data.bookmarksCount} saved · {data.journalsCount} reflections
                 </small>
               </section>
             </div>
+
+            <div className="section-title" style={{ marginTop: "30px" }}>
+              <h2>Your 5-Step Daily Growth Rhythm</h2>
+              <Link to="/journal">
+                Open Growth Journal <ArrowRight size={15} />
+              </Link>
+            </div>
+            <FiveStepFramework compact />
+
             <div className="dashboard-lower">
               <section>
                 <div className="section-title">
@@ -184,33 +231,68 @@ export function DashboardPage() {
                   <PenLine size={25} />
                   <h3>My Growth Journal</h3>
                   <p>
-                    Your thoughts, prayers, and little discoveries. A space that
-                    belongs to you.
+                    Your daily lessons, personal reflections, and practical
+                    action steps. Strictly private to your account.
                   </p>
                   <span>
                     Write a reflection <ArrowRight size={17} />
                   </span>
                 </Link>
-                <div className="membership-summary">
-                  <span className="eyebrow">Your membership</span>
+
+                <div className="membership-summary panel" style={{ marginTop: "18px" }}>
+                  <span className="eyebrow">Your Reading Access</span>
                   <h3>
-                    {data.subscription?.active
-                      ? `${data.subscription.planName} (${data.subscription.accessType === "complimentary" ? "Complimentary" : "Paid"})`
-                      : "Free reader"}
+                    {data.digitalEntitlement?.status === "active"
+                      ? "2027 Digital Edition Owner"
+                      : data.subscription?.active
+                        ? `${data.subscription.planName} (${data.subscription.accessType === "complimentary" ? "Complimentary" : "Paid"})`
+                        : "Free Sample Reader"}
                   </h3>
-                  <p>
-                    {data.subscription?.active
-                      ? "Active until " +
-                        new Date(
-                          data.subscription.expiresAt,
-                        ).toLocaleDateString("en-GB")
-                      : data.subscription
-                        ? `Membership ${data.subscription.effectiveStatus} (${new Date(data.subscription.expiresAt).toLocaleDateString("en-GB")})`
-                        : "Read free sample devotionals or activate a membership."}
-                  </p>
-                  <Link to="/subscription">
-                    Manage membership <ArrowUpRight size={15} />
-                  </Link>
+                  {data.digitalEntitlement?.status === "active" && (
+                    <p>
+                      <CheckCircle2
+                        size={15}
+                        style={{ display: "inline", marginRight: "6px" }}
+                      />
+                      Persistent online access to the 2027 edition (granted{" "}
+                      {new Date(
+                        data.digitalEntitlement.grantedAt,
+                      ).toLocaleDateString("en-GB")}
+                      ).
+                    </p>
+                  )}
+                  {data.subscription && (
+                    <p>
+                      {data.subscription.active
+                        ? "Membership active until " +
+                          new Date(
+                            data.subscription.expiresAt,
+                          ).toLocaleDateString("en-GB")
+                        : `Membership ${data.subscription.effectiveStatus} (${new Date(data.subscription.expiresAt).toLocaleDateString("en-GB")})`}
+                    </p>
+                  )}
+                  {!data.hasAccess && (
+                    <p>
+                      Unlock all published 2027 devotionals with a one-time{" "}
+                      <strong>
+                        Digital Copy (
+                        {money(config.settings.digitalEditionPriceKobo)})
+                      </strong>{" "}
+                      or a recurring membership plan.
+                    </p>
+                  )}
+                  <div className="stack" style={{ gap: "10px", marginTop: "12px" }}>
+                    <Link to="/digital-edition">
+                      <ShoppingBag size={15} />{" "}
+                      {data.digitalEntitlement?.status === "active"
+                        ? "View 2027 Digital Edition"
+                        : `Buy 2027 Digital Copy (${money(config.settings.digitalEditionPriceKobo)})`}{" "}
+                      <ArrowUpRight size={14} />
+                    </Link>
+                    <Link to="/subscription">
+                      Manage membership <ArrowUpRight size={14} />
+                    </Link>
+                  </div>
                 </div>
               </aside>
             </div>
@@ -220,4 +302,3 @@ export function DashboardPage() {
     </>
   );
 }
-
