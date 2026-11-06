@@ -1,0 +1,10 @@
+node_modules/
+**/dist/
+**/.env
+**/*.sqlite*
+private/manuscript/*
+!private/manuscript/.gitkeep
+.DS_Store
+tmp/
+test-results/
+playwright-report/
