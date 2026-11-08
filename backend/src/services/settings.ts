@@ -26,12 +26,18 @@ export type AppSettings = {
   hardcoverPriceKobo: number;
   hardcoverAvailability: "available" | "preorder" | "out_of_stock";
   hardcoverNote: string;
+  printedBookStockCount: number;
+  deliveryPricingMode: "quotation_required" | "fixed_fee";
+  defaultDeliveryFeeKobo: number | null;
+  deliveryPolicyNote: string;
   digitalEditionPriceKobo: number;
   digitalEditionAvailability: "available" | "unavailable";
   digitalEditionScope: "edition_2027" | "includes_membership_updates";
+  digitalAccessDurationMonths: number;
   digitalEditionNote: string;
   bulkDiscountNote: string;
   bankTransferEnabled: boolean;
+  bankTransferInstructions: string;
   bankAccounts: BankAccountSetting[];
   allowRegistration: boolean;
   enableAutoRenewal: boolean;
@@ -81,6 +87,24 @@ export function getAppSettings(store: Store): AppSettings {
         ? map.hardcoverAvailability
         : "available",
     hardcoverNote: map.hardcoverNote,
+    printedBookStockCount:
+      map.printedBookStockCount !== undefined &&
+      map.printedBookStockCount !== ""
+        ? Math.max(0, Number(map.printedBookStockCount) || 0)
+        : 500,
+    deliveryPricingMode:
+      map.deliveryPricingMode === "fixed_fee"
+        ? "fixed_fee"
+        : "quotation_required",
+    defaultDeliveryFeeKobo:
+      map.defaultDeliveryFeeKobo !== undefined &&
+      map.defaultDeliveryFeeKobo.trim() !== "" &&
+      !Number.isNaN(Number(map.defaultDeliveryFeeKobo))
+        ? Math.max(0, Math.round(Number(map.defaultDeliveryFeeKobo)))
+        : null,
+    deliveryPolicyNote:
+      map.deliveryPolicyNote ||
+      DEFAULT_SETTINGS.deliveryPolicyNote,
     digitalEditionPriceKobo: Number(map.digitalEditionPriceKobo) || 350000,
     digitalEditionAvailability:
       map.digitalEditionAvailability === "unavailable"
@@ -90,9 +114,14 @@ export function getAppSettings(store: Store): AppSettings {
       map.digitalEditionScope === "includes_membership_updates"
         ? "includes_membership_updates"
         : "edition_2027",
+    digitalAccessDurationMonths:
+      Math.max(1, Number(map.digitalAccessDurationMonths) || 12),
     digitalEditionNote: map.digitalEditionNote,
     bulkDiscountNote: map.bulkDiscountNote,
     bankTransferEnabled: map.bankTransferEnabled === "true",
+    bankTransferInstructions:
+      map.bankTransferInstructions ||
+      DEFAULT_SETTINGS.bankTransferInstructions,
     bankAccounts: parseBankAccounts(map.bankAccountsJson),
     allowRegistration: map.allowRegistration !== "false",
     enableAutoRenewal: map.enableAutoRenewal !== "false",
@@ -125,7 +154,7 @@ export function updateAppSettings(
           .run();
         continue;
       }
-      const value = String(val);
+      const value = val === null ? "" : String(val);
       store.db
         .insert(s.settings)
         .values({ key, value })

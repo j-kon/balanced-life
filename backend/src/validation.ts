@@ -204,6 +204,119 @@ export const adminReconcileDigitalPurchaseSchema = z.object({
   adminNotes: z.string().trim().max(2000).optional(),
 });
 
+export const printedOrderCreateSchema = z.object({
+  fullName: z.string().trim().min(2, "Full name is required.").max(120),
+  email: z
+    .email("Enter a valid email address.")
+    .max(254)
+    .transform((v) => v.toLowerCase()),
+  phone: z.string().trim().min(5, "Phone number is required.").max(40),
+  streetAddress: z
+    .string()
+    .trim()
+    .min(4, "Delivery street address is required.")
+    .max(300),
+  city: z.string().trim().min(2, "City / Town is required.").max(100),
+  state: z.string().trim().min(2, "State / Province is required.").max(100),
+  country: z
+    .string()
+    .trim()
+    .min(2, "Country is required.")
+    .max(100)
+    .default("Nigeria"),
+  deliveryLandmark: z.string().trim().max(240).default(""),
+  quantity: z.coerce
+    .number()
+    .int()
+    .min(1, "Quantity must be at least 1 copy.")
+    .max(10000),
+  customerDeliveryNotes: z.string().trim().max(2000).default(""),
+});
+
+export const printedOrderLookupSchema = z.object({
+  orderNumber: z.string().trim().min(4).max(60),
+  email: z
+    .email("Enter a valid email address.")
+    .max(254)
+    .transform((v) => v.toLowerCase()),
+});
+
+export const printedOrderQuoteApproveSchema = z.object({
+  email: z
+    .email()
+    .max(254)
+    .transform((v) => v.toLowerCase())
+    .optional(),
+});
+
+export const printedOrderPayInitiateSchema = z.object({
+  paymentMethod: z.enum(["paystack", "bank_transfer"]).default("paystack"),
+  transferReference: z.string().trim().max(120).optional(),
+  payerNote: z.string().trim().max(1000).optional(),
+  email: z
+    .email()
+    .max(254)
+    .transform((v) => v.toLowerCase())
+    .optional(),
+});
+
+export const printedOrderVerifySchema = z.object({
+  reference: z
+    .string()
+    .trim()
+    .min(6)
+    .max(120)
+    .regex(/^[a-zA-Z0-9_-]+$/),
+});
+
+export const adminPrintedOrderUpdateSchema = z.object({
+  deliveryFeeKobo: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(1000000000)
+    .nullable()
+    .optional(),
+  finalTotalKobo: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(1000000000)
+    .nullable()
+    .optional(),
+  paymentStatus: z
+    .enum(["pending", "awaiting_verification", "paid", "failed", "refunded"])
+    .optional(),
+  fulfillmentStatus: z
+    .enum([
+      "new",
+      "awaiting_delivery_quotation",
+      "awaiting_payment",
+      "processing",
+      "ready_for_dispatch",
+      "shipped",
+      "delivered",
+      "cancelled",
+    ])
+    .optional(),
+  dispatchExceptionNote: z.string().trim().max(1000).optional(),
+  courierName: z.string().trim().max(120).optional(),
+  trackingReference: z.string().trim().max(160).optional(),
+  cancellationReason: z.string().trim().max(1000).optional(),
+  refundReason: z.string().trim().max(1000).optional(),
+  adminNotes: z.string().trim().max(3000).optional(),
+});
+
+export const complimentaryOnlineAccessGrantSchema = z.object({
+  months: z.coerce.number().int().min(1).max(60).optional(),
+  expiresAt: z.string().trim().max(60).optional(),
+  reason: z
+    .string()
+    .trim()
+    .min(2, "Provide a brief reason for the audit log.")
+    .max(500),
+});
+
 export const bulkOrderCreateSchema = z.object({
   contactName: z.string().trim().min(2).max(100),
   organizationName: z.string().trim().min(2).max(160),
@@ -255,7 +368,9 @@ export const adminBulkOrderUpdateSchema = z.object({
     .enum(["pending", "processing", "shipped", "delivered", "cancelled"])
     .optional(),
   trackingNote: z.string().trim().max(1000).optional(),
+  contactHistory: z.string().trim().max(4000).optional(),
   adminNotes: z.string().trim().max(3000).optional(),
+  convertToPrintedOrder: z.boolean().optional(),
 });
 
 const hhmmRegex = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -391,11 +506,34 @@ export const settingsUpdateSchema = z.object({
     .enum(["available", "preorder", "out_of_stock"])
     .optional(),
   hardcoverNote: z.string().trim().max(1000).optional(),
+  printedBookStockCount: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(1000000)
+    .optional(),
+  deliveryPricingMode: z
+    .enum(["quotation_required", "fixed_fee"])
+    .optional(),
+  defaultDeliveryFeeKobo: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(100000000)
+    .nullable()
+    .optional(),
+  deliveryPolicyNote: z.string().trim().max(2000).optional(),
   digitalEditionPriceKobo: z.coerce
     .number()
     .int()
     .min(100)
     .max(100000000)
+    .optional(),
+  digitalAccessDurationMonths: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(60)
     .optional(),
   digitalEditionAvailability: z
     .enum(["available", "unavailable"])
@@ -406,6 +544,7 @@ export const settingsUpdateSchema = z.object({
   digitalEditionNote: z.string().trim().max(1000).optional(),
   bulkDiscountNote: z.string().trim().max(1000).optional(),
   bankTransferEnabled: z.boolean().optional(),
+  bankTransferInstructions: z.string().trim().max(2000).optional(),
   bankAccounts: z.array(bankAccountSchema).min(1).max(6).optional(),
   allowRegistration: z.boolean().optional(),
   enableAutoRenewal: z.boolean().optional(),

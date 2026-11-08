@@ -10,6 +10,11 @@ import {
   bulkOrderCreateSchema,
   idOf,
   inquiryCreateSchema,
+  printedOrderCreateSchema,
+  printedOrderLookupSchema,
+  printedOrderPayInitiateSchema,
+  printedOrderQuoteApproveSchema,
+  printedOrderVerifySchema,
 } from "../validation.js";
 import { getAppSettings } from "../services/settings.js";
 import {
@@ -17,8 +22,13 @@ import {
   verifyAndActivatePayment,
 } from "../services/subscriptions.js";
 import {
+  approvePrintedOrderQuoteCustomer,
   createBulkOrder,
+  createPrintedOrder,
+  getPrintedOrderById,
+  initiatePrintedOrderPayment,
   verifyAndActivateDigitalPurchase,
+  verifyPrintedOrderPayment,
 } from "../services/commerce.js";
 import type { PaymentProvider } from "../services/payments.js";
 import type { EmailService } from "../services/email.js";
@@ -98,6 +108,7 @@ export function registerPublicRoutes(
   paymentProvider: PaymentProvider,
   emailService: EmailService,
   pushProvider?: WebPushProvider,
+  appOrigin = "http://localhost:5173",
 ) {
   const { db } = store;
 
@@ -296,6 +307,73 @@ export function registerPublicRoutes(
   );
 
   app.post(
+    prefix + "/printed-orders",
+    { config: { rateLimit: { max: 15, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = printedOrderCreateSchema.parse(req.body);
+      return createPrintedOrder(store, input, req.user?.id ?? null);
+    },
+  );
+
+  app.get(prefix + "/printed-orders/lookup", async (req) => {
+    const input = printedOrderLookupSchema.parse(req.query || {});
+    const row = db
+      .select({ id: s.printedOrders.id, email: s.printedOrders.email })
+      .from(s.printedOrders)
+      .where(eq(s.printedOrders.orderNumber, input.orderNumber.toUpperCase()))
+      .get();
+    if (!row || row.email.toLowerCase() !== input.email.toLowerCase()) {
+      throw new HttpError(
+        404,
+        "No printed book order matched that order number and email address.",
+      );
+    }
+    return getPrintedOrderById(store, row.id);
+  });
+
+  app.post(
+    prefix + "/printed-orders/:id/approve-quote",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const orderId = idOf(req);
+      const input = printedOrderQuoteApproveSchema.parse(req.body || {});
+      return approvePrintedOrderQuoteCustomer(store, orderId, {
+        userId: req.user?.id,
+        email: input.email || req.user?.email,
+      });
+    },
+  );
+
+  app.post(
+    prefix + "/printed-orders/:id/pay",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const orderId = idOf(req);
+      const input = printedOrderPayInitiateSchema.parse(req.body || {});
+      return initiatePrintedOrderPayment(
+        store,
+        orderId,
+        {
+          ...input,
+          email: input.email || req.user?.email,
+        },
+        paymentProvider,
+        appOrigin,
+        req.user?.id ?? null,
+      );
+    },
+  );
+
+  app.post(
+    prefix + "/printed-orders/verify",
+    { config: { rateLimit: { max: 30, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const { reference } = printedOrderVerifySchema.parse(req.body);
+      return verifyPrintedOrderPayment(store, reference, paymentProvider);
+    },
+  );
+
+  app.post(
     prefix + "/webhooks/paystack",
     { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
     async (req) => {
@@ -328,6 +406,16 @@ export function registerPublicRoutes(
           paymentProvider,
         );
         return { received: true, processed: true, kind: "digital_edition" };
+      }
+
+      const printedOrder = db
+        .select()
+        .from(s.printedOrders)
+        .where(eq(s.printedOrders.paymentReference, reference))
+        .get();
+      if (printedOrder) {
+        await verifyPrintedOrderPayment(store, reference, paymentProvider);
+        return { received: true, processed: true, kind: "printed_order" };
       }
 
       const subscriptionPayment = db

@@ -159,6 +159,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     paymentProvider,
     emailService,
     pushProvider,
+    env.appOrigin,
   );
   registerAuthRoutes(app, prefix, store, emailService, {
     isProduction,

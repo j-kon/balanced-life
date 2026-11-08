@@ -8,6 +8,7 @@ import { api } from "../../api";
 export function AuthPage({ register = false }: { register?: boolean }) {
   const { refresh } = useApp();
   const navigate = useNavigate();
+  const location = useLocation();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [ageGroup, setAgeGroup] = useState<
@@ -36,8 +37,11 @@ export function AuthPage({ register = false }: { register?: boolean }) {
           password: f.get("password"),
         });
       }
-      await refresh();
-      navigate("/dashboard");
+      const loggedIn = await refresh();
+      const redirectTarget =
+        (location.state as { from?: string })?.from ||
+        (loggedIn?.role === "admin" ? "/admin" : "/dashboard");
+      navigate(redirectTarget);
     } catch (e) {
       setError((e as Error).message);
     } finally {

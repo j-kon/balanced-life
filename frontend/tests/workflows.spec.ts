@@ -52,6 +52,12 @@ function cleanupTestRecords(sqlite: Database.Database) {
   sqlite
     .prepare(`DELETE FROM hardcover_inquiries WHERE email = ?`)
     .run(readerEmail);
+  sqlite
+    .prepare(
+      `DELETE FROM printed_order_items WHERE order_id IN (SELECT id FROM printed_orders WHERE email = ?)`,
+    )
+    .run(readerEmail);
+  sqlite.prepare(`DELETE FROM printed_orders WHERE email = ?`).run(readerEmail);
   sqlite.prepare(`DELETE FROM bulk_orders WHERE email = ?`).run(readerEmail);
   sqlite
     .prepare(
@@ -172,26 +178,36 @@ test.describe("End-to-End Production Workflows", () => {
       page.getByRole("heading", { name: /Forgot password/i }),
     ).toBeVisible();
 
-    // Submit printed copy inquiry on /bookstore
+    // Submit printed book order on /bookstore
     await page.goto("/bookstore");
     await expect(
       page.getByRole("heading", { name: /The printed companion/i }),
     ).toBeVisible();
     await expect(page.getByText(/₦5,000/i).first()).toBeVisible();
-    await page.getByLabel(/Your full name/i).fill("E2E Reader");
-    await page.getByLabel(/Email address/i).fill(readerEmail);
-    await page.getByLabel(/Phone \/ WhatsApp number/i).fill("+2348000000001");
-    await page.getByLabel(/Number of copies/i).fill("3");
-    await page.getByLabel(/City \/ Delivery location/i).fill("Lagos, Nigeria");
-    await page
-      .getByLabel(/Additional notes/i)
+    const orderForm = page
+      .locator("form")
+      .filter({ hasText: /Order Printed Copies/i });
+    await orderForm.getByLabel(/Full name/i).fill("E2E Reader");
+    await orderForm.getByLabel(/Email address/i).fill(readerEmail);
+    await orderForm
+      .getByLabel(/Phone \/ WhatsApp number/i)
+      .fill("+2348000000001");
+    await orderForm.getByLabel(/Quantity \(copies\)/i).fill("3");
+    await orderForm
+      .getByLabel(/Delivery street address/i)
+      .fill("15 Victoria Island Way");
+    await orderForm.getByLabel(/City \/ Town/i).fill("Lagos");
+    await orderForm.getByLabel(/State \/ Province/i).fill("Lagos");
+    await orderForm
+      .getByLabel(/Delivery instructions/i)
       .fill("Requesting 3 printed copies for youth fellowship.");
-    await page
-      .getByRole("button", { name: /Submit printed copy inquiry/i })
+    await orderForm
+      .getByRole("button", { name: /Place Printed Book Order/i })
       .click();
     await expect(
-      page.getByText(/Printed copy inquiry received/i),
+      page.getByRole("heading", { name: /Order BLD-PRT-/i }),
     ).toBeVisible();
+    await expect(page.getByText(/₦15,000/i).first()).toBeVisible();
 
     // Verify /bulk-orders redirects to /contact
     await page.goto("/bulk-orders");
@@ -362,14 +378,9 @@ test.describe("End-to-End Production Workflows", () => {
     await entryRow.getByRole("button", { name: /Approve & publish/i }).click();
     await expect(page.getByText(/Changes saved/i)).toBeVisible();
 
-    // Bookstore tab: verify printed copy inquiry from test 1 and update its status
-    await page.getByRole("button", { name: /^Bookstore$/i }).click();
+    // Printed Orders tab: verify printed order from test 1
+    await page.getByRole("button", { name: /^Printed Orders$/i }).click();
     await expect(page.getByText(readerEmail).first()).toBeVisible();
-    await page
-      .getByRole("button", { name: /Mark contacted/i })
-      .first()
-      .click();
-    await expect(page.getByText(/Changes saved/i)).toBeVisible();
   });
 
   test("4. Complimentary subscriber accesses published archive, bookmarks, reading progress, and 5-step accountability journal CRUD", async ({

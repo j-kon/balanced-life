@@ -153,11 +153,19 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   digitalEditionPriceKobo: "350000",
   digitalEditionAvailability: "available",
   digitalEditionScope: "edition_2027",
+  digitalAccessDurationMonths: "12",
   digitalEditionNote:
-    "One-time purchase (₦3,500) granting persistent online reading access to the 2027 edition inside your reader dashboard.",
+    "One payment of ₦3,500 grants 12 calendar months of online reading access to the 2027 edition of The Balanced Life Devotional (starting January 1, 2027 for early purchases, or from payment verification thereafter). Manual 12-month renewal is supported with no automatic recurring charges.",
+  printedBookStockCount: "500",
+  deliveryPricingMode: "quotation_required",
+  defaultDeliveryFeeKobo: "",
+  deliveryPolicyNote:
+    "Delivery charges depend on your delivery address and quantity. Submit your order details to receive a delivery quotation for your approval before payment.",
   bulkDiscountNote:
     "Bulk orders for parents, schools, churches, youth groups, and organizations qualify for a custom discount approved by the author.",
   bankTransferEnabled: "false",
+  bankTransferInstructions:
+    "Transfer the exact approved amount to one of the official Cossy Teens Consult Access Bank accounts below, then submit your payment reference. Orders are activated or dispatched only after an administrator confirms settled funds.",
   bankAccountsJson: JSON.stringify(DEFAULT_BANK_ACCOUNTS),
   allowRegistration: "true",
   enableAutoRenewal: "false",

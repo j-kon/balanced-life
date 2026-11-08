@@ -88,7 +88,7 @@ export const defaultConfig: AppConfig = {
 
 export type AppContextValue = {
   user: User | null;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<User | null>;
   refreshConfig: () => Promise<void>;
   config: AppConfig;
   toast: (message: string) => void;
@@ -96,7 +96,7 @@ export type AppContextValue = {
 
 export const AppContext = createContext<AppContextValue>({
   user: null,
-  refresh: async () => {},
+  refresh: async () => null,
   refreshConfig: async () => {},
   config: defaultConfig,
   toast: () => {},

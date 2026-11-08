@@ -146,6 +146,12 @@ export const digitalPurchases = sqliteTable("digital_purchases", {
   transferReference: text("transfer_reference").notNull().default(""),
   payerNote: text("payer_note").notNull().default(""),
   status: text("status").notNull(),
+  durationMonths: integer("duration_months").notNull().default(12),
+  isRenewal: integer("is_renewal", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  periodStartAt: text("period_start_at"),
+  periodEndAt: text("period_end_at"),
   adminNotes: text("admin_notes").notNull().default(""),
   verifiedByAdminId: integer("verified_by_admin_id").references(
     () => users.id,
@@ -161,17 +167,100 @@ export const digitalEntitlements = sqliteTable("digital_entitlements", {
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
-  purchaseId: integer("purchase_id")
-    .notNull()
-    .unique()
-    .references(() => digitalPurchases.id, { onDelete: "cascade" }),
+  purchaseId: integer("purchase_id").references(() => digitalPurchases.id, {
+    onDelete: "set null",
+  }),
   editionYear: integer("edition_year").notNull().default(2027),
+  accessType: text("access_type").notNull().default("paid"),
   accessScope: text("access_scope").notNull().default("edition_2027"),
   status: text("status").notNull().default("active"),
+  startsAt: text("starts_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  durationMonths: integer("duration_months").notNull().default(12),
+  renewalCount: integer("renewal_count").notNull().default(0),
+  legacyPersistent: integer("legacy_persistent", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  legacyReviewRequired: integer("legacy_review_required", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  grantedByAdminId: integer("granted_by_admin_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  grantReason: text("grant_reason").notNull().default(""),
   grantedAt: text("granted_at").notNull(),
   revokedAt: text("revoked_at"),
   revokeReason: text("revoke_reason").notNull().default(""),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const printedOrders = sqliteTable("printed_orders", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  orderNumber: text("order_number").notNull().unique(),
+  userId: integer("user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  bulkOrderId: integer("bulk_order_id"),
+  fullName: text("full_name").notNull(),
+  email: text("email").notNull(),
+  phone: text("phone").notNull(),
+  streetAddress: text("street_address").notNull(),
+  city: text("city").notNull(),
+  state: text("state").notNull(),
+  country: text("country").notNull().default("Nigeria"),
+  deliveryLandmark: text("delivery_landmark").notNull().default(""),
+  quantity: integer("quantity").notNull().default(1),
+  unitPriceKobo: integer("unit_price_kobo").notNull().default(500000),
+  subtotalKobo: integer("subtotal_kobo").notNull(),
+  deliveryFeeKobo: integer("delivery_fee_kobo"),
+  deliveryQuoteStatus: text("delivery_quote_status")
+    .notNull()
+    .default("pending_quote"),
+  deliveryQuoteNote: text("delivery_quote_note").notNull().default(""),
+  finalTotalKobo: integer("final_total_kobo"),
+  customerApprovedQuoteAt: text("customer_approved_quote_at"),
+  currency: text("currency").notNull().default("NGN"),
+  paymentMethod: text("payment_method").notNull().default("unselected"),
+  paymentReference: text("payment_reference"),
+  authorizationUrl: text("authorization_url"),
+  providerTransactionId: text("provider_transaction_id"),
+  transferReference: text("transfer_reference").notNull().default(""),
+  payerNote: text("payer_note").notNull().default(""),
+  paymentStatus: text("payment_status").notNull().default("pending"),
+  fulfillmentStatus: text("fulfillment_status")
+    .notNull()
+    .default("awaiting_delivery_quotation"),
+  dispatchExceptionNote: text("dispatch_exception_note").notNull().default(""),
+  courierName: text("courier_name").notNull().default(""),
+  trackingReference: text("tracking_reference").notNull().default(""),
+  customerDeliveryNotes: text("customer_delivery_notes").notNull().default(""),
+  adminNotes: text("admin_notes").notNull().default(""),
+  verifiedByAdminId: integer("verified_by_admin_id").references(
+    () => users.id,
+    { onDelete: "set null" },
+  ),
+  paidAt: text("paid_at"),
+  shippedAt: text("shipped_at"),
+  deliveredAt: text("delivered_at"),
+  cancelledAt: text("cancelled_at"),
+  refundedAt: text("refunded_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const printedOrderItems = sqliteTable("printed_order_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  orderId: integer("order_id")
+    .notNull()
+    .references(() => printedOrders.id, { onDelete: "cascade" }),
+  productCode: text("product_code").notNull().default("printed_2027"),
+  productTitle: text("product_title")
+    .notNull()
+    .default("The Balanced Life Devotional — 2027 Printed Book"),
+  quantity: integer("quantity").notNull().default(1),
+  unitPriceKobo: integer("unit_price_kobo").notNull(),
+  lineTotalKobo: integer("line_total_kobo").notNull(),
+  createdAt: text("created_at").notNull(),
 });
 
 export const bulkOrders = sqliteTable("bulk_orders", {
@@ -196,6 +285,8 @@ export const bulkOrders = sqliteTable("bulk_orders", {
   quotationSummary: text("quotation_summary").notNull().default(""),
   fulfillmentStatus: text("fulfillment_status").notNull().default("pending"),
   trackingNote: text("tracking_note").notNull().default(""),
+  contactHistory: text("contact_history").notNull().default(""),
+  linkedPrintedOrderId: integer("linked_printed_order_id"),
   adminNotes: text("admin_notes").notNull().default(""),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),

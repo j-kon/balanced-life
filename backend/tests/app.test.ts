@@ -2,6 +2,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { buildApp } from "../src/app.js";
 import { addMonths } from "../src/services/subscriptions.js";
+import {
+  addCalendarMonths,
+  computeDigitalTermWindow,
+} from "../src/services/commerce.js";
 import { openDatabase } from "../src/db.js";
 import { hashPassword } from "../src/auth.js";
 import { users } from "../src/schema.js";
@@ -1190,3 +1194,444 @@ test("Web Push subscriptions, background scheduler, timezone/quiet-hours/access 
     workerStore.sqlite.close();
   }
 });
+
+test("Product A: 12-month calendar calculation, pre-2027 start anchor, manual renewal extension, and expiration gating while preserving user progress/journals", async () => {
+  // 1. Calendar calculation tests
+  const pre2027Date = new Date("2026-11-08T12:00:00.000Z");
+  const earlyWindow = computeDigitalTermWindow(pre2027Date, null, 12);
+  assert.equal(earlyWindow.startsAt, "2027-01-01T00:00:00.000Z");
+  assert.equal(earlyWindow.expiresAt, "2028-01-01T00:00:00.000Z");
+
+  const mid2027Date = new Date("2027-06-15T10:00:00.000Z");
+  const midWindow = computeDigitalTermWindow(mid2027Date, null, 12);
+  assert.equal(midWindow.startsAt, "2027-06-15T10:00:00.000Z");
+  assert.equal(midWindow.expiresAt, "2028-06-15T10:00:00.000Z");
+
+  // Renewal extends from existing expiration if active
+  const renewalWindow = computeDigitalTermWindow(
+    new Date("2027-10-01T10:00:00.000Z"),
+    {
+      status: "active",
+      startsAt: "2027-06-15T10:00:00.000Z",
+      expiresAt: "2028-06-15T10:00:00.000Z",
+    },
+    12,
+  );
+  assert.equal(renewalWindow.startsAt, "2027-06-15T10:00:00.000Z");
+  assert.equal(renewalWindow.expiresAt, "2029-06-15T10:00:00.000Z");
+
+  // Month-end clamping
+  assert.equal(
+    addCalendarMonths("2027-01-31T00:00:00.000Z", 1),
+    "2027-02-28T00:00:00.000Z",
+  );
+  assert.equal(
+    addCalendarMonths("2028-01-31T00:00:00.000Z", 1),
+    "2028-02-29T00:00:00.000Z",
+  );
+
+  // 2. Reader buys 12-month access
+  const termReaderReg = await send("POST", "/auth/register", {
+    name: "Term Reader",
+    email: "term-reader@example.org",
+    password: "Term-Reader-Pass-2027!",
+  });
+  assert.equal(termReaderReg.statusCode, 200);
+  const termCookie = String(termReaderReg.headers["set-cookie"]).split(";")[0];
+  const termUserId = termReaderReg.json().user.id;
+
+  const checkoutRes = await send(
+    "POST",
+    "/digital-purchases/checkout",
+    { paymentMethod: "paystack", currency: "NGN" },
+    termCookie,
+  );
+  assert.equal(checkoutRes.statusCode, 200);
+  const ref = checkoutRes.json().reference;
+
+  const verifyRes = await send(
+    "POST",
+    "/digital-purchases/verify",
+    { reference: ref },
+    termCookie,
+  );
+  assert.equal(verifyRes.statusCode, 200);
+  const ent = verifyRes.json().entitlement;
+  assert.equal(ent.status, "active");
+  assert.equal(ent.durationMonths, 12);
+  assert.ok(ent.startsAt);
+  assert.ok(ent.expiresAt);
+
+  // Reader creates journal reflections, progress, and bookmarks
+  const devList = (await send("GET", "/devotionals")).json();
+  const sampleEntry = devList.find((d: { sample: boolean }) => d.sample);
+  const lockedEntry = devList.find((d: { sample: boolean }) => !d.sample);
+
+  await send(
+    "POST",
+    `/me/progress/${lockedEntry.id}`,
+    { completed: true },
+    termCookie,
+  );
+  await send(
+    "POST",
+    `/me/bookmarks/${lockedEntry.id}`,
+    { saved: true },
+    termCookie,
+  );
+  const journalRes = await send(
+    "POST",
+    "/me/journal",
+    {
+      devotionalId: lockedEntry.id,
+      title: "My 12-Month Reflection",
+      body: "Saved during my active 12-month access.",
+      completed: true,
+    },
+    termCookie,
+  );
+  assert.equal(journalRes.statusCode, 200);
+
+  // Can read locked entry while access is active
+  const readActive = await send(
+    "GET",
+    `/devotionals/${lockedEntry.id}`,
+    undefined,
+    termCookie,
+  );
+  assert.equal(readActive.statusCode, 200);
+
+  // 3. Simulate access expiring (manually adjust expiresAt to the past in SQLite)
+  const db = openDatabase(databasePath);
+  try {
+    db.sqlite
+      .prepare(
+        `UPDATE digital_entitlements
+         SET expires_at = '2026-01-01T00:00:00.000Z',
+             starts_at = '2025-01-01T00:00:00.000Z',
+             status = 'expired'
+         WHERE user_id = ?`,
+      )
+      .run(termUserId);
+  } finally {
+    db.sqlite.close();
+  }
+
+  // Attempting to read locked non-sample devotional now returns 403
+  const readExpired = await send(
+    "GET",
+    `/devotionals/${lockedEntry.id}`,
+    undefined,
+    termCookie,
+  );
+  assert.equal(readExpired.statusCode, 403);
+  assert.match(readExpired.json().message, /active membership or 2027 Digital Edition purchase/);
+
+  // But free sample reading remains accessible!
+  const readSample = await send(
+    "GET",
+    `/devotionals/${sampleEntry.id}`,
+    undefined,
+    termCookie,
+  );
+  assert.equal(readSample.statusCode, 200);
+
+  // Reader account, progress, bookmarks, and private journals remain completely preserved and accessible!
+  const progRes = await send("GET", "/me/progress", undefined, termCookie);
+  assert.equal(progRes.statusCode, 200);
+  assert.equal(progRes.json().totalCompleted, 1);
+
+  const bmRes = await send("GET", "/me/bookmarks", undefined, termCookie);
+  assert.equal(bmRes.statusCode, 200);
+  assert.equal(bmRes.json().length, 1);
+
+  const jRes = await send("GET", "/me/journal", undefined, termCookie);
+  assert.equal(jRes.statusCode, 200);
+  assert.equal(jRes.json().length, 1);
+  assert.equal(jRes.json()[0].title, "My 12-Month Reflection");
+
+  // 4. Reader manually renews 12-month access -> access restores immediately!
+  const renewCheckout = await send(
+    "POST",
+    "/digital-purchases/checkout",
+    { paymentMethod: "paystack", currency: "NGN" },
+    termCookie,
+  );
+  assert.equal(renewCheckout.statusCode, 200);
+  const renewRef = renewCheckout.json().reference;
+
+  const renewVerify = await send(
+    "POST",
+    "/digital-purchases/verify",
+    { reference: renewRef },
+    termCookie,
+  );
+  assert.equal(renewVerify.statusCode, 200);
+  assert.equal(renewVerify.json().entitlement.status, "active");
+  assert.equal(renewVerify.json().entitlement.renewalCount, 1);
+
+  // Access to locked entry is restored!
+  const readRestored = await send(
+    "GET",
+    `/devotionals/${lockedEntry.id}`,
+    undefined,
+    termCookie,
+  );
+  assert.equal(readRestored.statusCode, 200);
+});
+
+test("Product A: Preserving legacy persistent entitlements so existing paying customers never silently lose rights", async () => {
+  const legacyReaderReg = await send("POST", "/auth/register", {
+    name: "Legacy Entitlement Reader",
+    email: "legacy-reader@example.org",
+    password: "Legacy-Reader-Pass-2027!",
+  });
+  assert.equal(legacyReaderReg.statusCode, 200);
+  const legacyCookie = String(legacyReaderReg.headers["set-cookie"]).split(";")[0];
+  const legacyUserId = legacyReaderReg.json().user.id;
+
+  // Insert a preserved legacy row (legacy_persistent = 1, legacy_review_required = 1)
+  const now = new Date().toISOString();
+  const db = openDatabase(databasePath);
+  try {
+    db.sqlite
+      .prepare(
+        `INSERT INTO digital_entitlements (
+          user_id, edition_year, access_type, access_scope, status,
+          starts_at, expires_at, duration_months, renewal_count,
+          legacy_persistent, legacy_review_required, grant_reason,
+          granted_at, updated_at
+        ) VALUES (
+          ?, 2027, 'paid', 'edition_2027', 'active',
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 12, 0,
+          1, 1, 'Preserved legacy persistent entitlement from pre-business-model migration',
+          ?, ?
+        )`,
+      )
+      .run(legacyUserId, now, now);
+  } finally {
+    db.sqlite.close();
+  }
+
+  // Legacy persistent entitlement reader STILL has active access despite past expires_at!
+  const devList = (await send("GET", "/devotionals")).json();
+  const lockedEntry = devList.find((d: { sample: boolean }) => !d.sample);
+  const readRes = await send(
+    "GET",
+    `/devotionals/${lockedEntry.id}`,
+    undefined,
+    legacyCookie,
+  );
+  assert.equal(readRes.statusCode, 200);
+
+  // Admin overview flags legacy persistent entitlement for review
+  const adminOverview = (
+    await send("GET", "/admin/overview", undefined, adminCookie)
+  ).json();
+  const userRecord = adminOverview.users.find(
+    (u: { id: number }) => u.id === legacyUserId,
+  );
+  assert.equal(userRecord.digitalEntitlement.legacyPersistent, true);
+  assert.equal(userRecord.digitalEntitlement.legacyReviewRequired, true);
+
+  const alertFound = adminOverview.operationalAlerts.some(
+    (al: { category: string; description: string }) =>
+      al.category === "online_access" &&
+      al.description.includes("legacy-reader@example.org"),
+  );
+  assert.equal(alertFound, true);
+});
+
+test("Product B: Printed Book orders, quantity & subtotal math, quotation approval, unpaid dispatch guard, and fulfillment lifecycle", async () => {
+  // 1. Customer creates printed order with full delivery information
+  const createRes = await send("POST", "/printed-orders", {
+    fullName: "Chinedu Okafor",
+    email: "chinedu@example.org",
+    phone: "+2348021112233",
+    streetAddress: "14 Awolowo Way, Ikeja",
+    city: "Ikeja",
+    state: "Lagos",
+    country: "Nigeria",
+    deliveryLandmark: "Beside General Hospital",
+    quantity: 2,
+    customerDeliveryNotes: "Please deliver between 9am and 2pm on weekdays.",
+  });
+  assert.equal(createRes.statusCode, 200);
+  const order = createRes.json();
+  assert.ok(order.orderNumber.startsWith("BLD-PRT-"));
+  assert.equal(order.quantity, 2);
+  assert.equal(order.unitPriceKobo, 500000); // ₦5,000 per copy
+  assert.equal(order.subtotalKobo, 1000000); // ₦10,000
+  assert.equal(order.deliveryFeeKobo, null); // Uninvented: null until quoted
+  assert.equal(order.deliveryQuoteStatus, "pending_quote");
+  assert.equal(order.finalTotalKobo, null);
+  assert.equal(order.paymentStatus, "pending");
+  assert.equal(order.fulfillmentStatus, "awaiting_delivery_quotation");
+
+  // Lookup order by orderNumber + email
+  const lookupRes = await send(
+    "GET",
+    `/printed-orders/lookup?orderNumber=${order.orderNumber}&email=chinedu@example.org`,
+  );
+  assert.equal(lookupRes.statusCode, 200);
+  assert.equal(lookupRes.json().id, order.id);
+
+  // 2. Admin quotes delivery fee of ₦2,500 (250,000 kobo)
+  const quoteRes = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    {
+      deliveryFeeKobo: 250000,
+    },
+    adminCookie,
+  );
+  assert.equal(quoteRes.statusCode, 200);
+  assert.equal(quoteRes.json().deliveryFeeKobo, 250000);
+  assert.equal(quoteRes.json().finalTotalKobo, 1250000); // 1,000,000 + 250,000 = ₦12,500
+  assert.equal(quoteRes.json().deliveryQuoteStatus, "quoted");
+
+  // 3. Customer approves delivery quotation
+  const approveRes = await send(
+    "POST",
+    `/printed-orders/${order.id}/approve-quote`,
+    { email: "chinedu@example.org" },
+  );
+  assert.equal(approveRes.statusCode, 200);
+  assert.equal(approveRes.json().deliveryQuoteStatus, "customer_approved");
+  assert.equal(approveRes.json().fulfillmentStatus, "awaiting_payment");
+
+  // 4. Unpaid dispatch guard: attempting to mark order ready_for_dispatch, shipped, or delivered while unpaid fails with 400
+  const guardRes1 = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { fulfillmentStatus: "ready_for_dispatch" },
+    adminCookie,
+  );
+  assert.equal(guardRes1.statusCode, 400);
+  assert.match(guardRes1.json().message, /Cannot mark unpaid printed order as ready_for_dispatch/);
+
+  const guardRes2 = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { fulfillmentStatus: "shipped" },
+    adminCookie,
+  );
+  assert.equal(guardRes2.statusCode, 400);
+
+  // 5. Customer initiates Paystack payment and payment is verified
+  const payInit = await send(
+    "POST",
+    `/printed-orders/${order.id}/pay`,
+    { paymentMethod: "paystack", email: "chinedu@example.org" },
+  );
+  assert.equal(payInit.statusCode, 200);
+  const payRef = payInit.json().reference;
+  assert.ok(payRef.startsWith("BLD_PRT_"));
+
+  const verifyPay = await send(
+    "POST",
+    "/printed-orders/verify",
+    { reference: payRef },
+  );
+  assert.equal(verifyPay.statusCode, 200);
+  assert.equal(verifyPay.json().order.paymentStatus, "paid");
+  assert.equal(verifyPay.json().order.fulfillmentStatus, "processing");
+
+  // 6. Admin assigns courier, tracking reference, and marks shipped
+  const shipRes = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    {
+      fulfillmentStatus: "shipped",
+      courierName: "GIG Logistics",
+      trackingReference: "GIG-LAG-2027-1092",
+    },
+    adminCookie,
+  );
+  assert.equal(shipRes.statusCode, 200);
+  assert.equal(shipRes.json().fulfillmentStatus, "shipped");
+  assert.equal(shipRes.json().courierName, "GIG Logistics");
+  assert.equal(shipRes.json().trackingReference, "GIG-LAG-2027-1092");
+
+  // Mark delivered
+  const deliverRes = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { fulfillmentStatus: "delivered" },
+    adminCookie,
+  );
+  assert.equal(deliverRes.statusCode, 200);
+  assert.equal(deliverRes.json().fulfillmentStatus, "delivered");
+  assert.ok(deliverRes.json().deliveredAt);
+
+  // 7. Verify printed order appears in admin overview and revenue increases accurately
+  const adminOverview = (
+    await send("GET", "/admin/overview", undefined, adminCookie)
+  ).json();
+  assert.equal(adminOverview.metrics.deliveredOrders >= 1, true);
+  assert.equal(adminOverview.metrics.printedBookRevenueKobo >= 1250000, true);
+  assert.ok(adminOverview.metrics.totalSalesKobo >= 1250000);
+});
+
+test("Admin Dashboard Overview: 12 KPIs, chart series, webhook idempotency, and privacy integrity", async () => {
+  const overview = (
+    await send("GET", "/admin/overview", undefined, adminCookie)
+  ).json();
+
+  // 1. Verify all 12 KPI metrics are returned
+  assert.ok(typeof overview.metrics.readers === "number");
+  assert.ok(typeof overview.metrics.totalRegisteredReaders === "number");
+  assert.ok(typeof overview.metrics.activeOnlineReaders === "number");
+  assert.ok(typeof overview.metrics.expiringOnlineAccessSoon === "number");
+  assert.ok(typeof overview.metrics.expiredOnlineAccess === "number");
+  assert.ok(typeof overview.metrics.pendingDigitalPurchases === "number");
+  assert.ok(typeof overview.metrics.pendingPrintedOrders === "number");
+  assert.ok(typeof overview.metrics.ordersAwaitingDelivery === "number");
+  assert.ok(typeof overview.metrics.deliveredOrders === "number");
+  assert.ok(typeof overview.metrics.digitalAccessRevenueKobo === "number");
+  assert.ok(typeof overview.metrics.printedBookRevenueKobo === "number");
+  assert.ok(typeof overview.metrics.totalSalesKobo === "number");
+
+  // 2. Verify charts structure
+  assert.ok(Array.isArray(overview.charts.salesByPeriod.daily));
+  assert.ok(Array.isArray(overview.charts.salesByPeriod.weekly));
+  assert.ok(Array.isArray(overview.charts.salesByPeriod.monthly));
+  assert.ok(typeof overview.charts.digitalVsPrinted.digitalKobo === "number");
+  assert.ok(typeof overview.charts.digitalVsPrinted.printedKobo === "number");
+  assert.ok(Array.isArray(overview.charts.registrationsByMonth));
+  assert.ok(Array.isArray(overview.charts.ordersByFulfillmentStatus));
+
+  // 3. Webhook idempotency test for printed order and digital purchase references
+  const webhookKey = "mock-secret";
+  const printedOrder = overview.printedOrders.find(
+    (po: { paymentStatus: string }) => po.paymentStatus === "paid",
+  );
+  if (printedOrder && printedOrder.paymentReference) {
+    const replayPayload = {
+      event: "charge.success",
+      data: { reference: printedOrder.paymentReference },
+    };
+    const replayRes = await send(
+      "POST",
+      "/webhooks/paystack",
+      replayPayload,
+      undefined,
+      {
+        "x-paystack-signature": webhookKey,
+      },
+    );
+    assert.equal(replayRes.statusCode, 200);
+    assert.equal(replayRes.json().received, true);
+    assert.equal(replayRes.json().processed, true);
+    assert.equal(replayRes.json().kind, "printed_order");
+  }
+
+  // 4. Privacy integrity: overview payload NEVER leaks reader journal contents
+  const overviewText = JSON.stringify(overview);
+  assert.equal(overviewText.includes("My 12-Month Reflection"), false);
+  assert.equal(
+    overviewText.includes("Saved during my active 12-month access."),
+    false,
+  );
+});
+

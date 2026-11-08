@@ -53,6 +53,7 @@ export default function App() {
   const refresh = async () => {
     const u = await api<{ user: User | null }>("/auth/me");
     setUser(u.user);
+    return u.user;
   };
 
   const refreshConfig = async () => {

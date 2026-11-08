@@ -4,6 +4,7 @@ import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import { publicUser } from "../auth.js";
 import { getSubscriptionDetails, hasPremiumAccess } from "./subscriptions.js";
+import { getUserDigitalEntitlement } from "./commerce.js";
 import { getAppSettings } from "./settings.js";
 import { HttpError } from "../errors.js";
 
@@ -34,6 +35,7 @@ export type NotificationCategory =
   | "unread_reminder"
   | "subscription"
   | "digital_purchase"
+  | "printed_order"
   | "account"
   | "system";
 
@@ -666,7 +668,7 @@ export function evaluateUserScheduledReminders(
   const nowIso = now.toISOString();
   const user = publicUser(userRow);
 
-  // 1. Subscription renewal / expiration reminder (deduplicated per expiry state)
+  // 1. Subscription / 12-Month Online Access renewal / expiration reminder (deduplicated per expiry state)
   if (prefs.subscriptionAlertsEnabled) {
     const sub = getSubscriptionDetails(
       store,
@@ -690,6 +692,38 @@ export function evaluateUserScheduledReminders(
         store.db
           .update(s.notificationPreferences)
           .set({ lastExpiryReminderFor: expiryKey, updatedAt: nowIso })
+          .where(eq(s.notificationPreferences.userId, userId))
+          .run();
+        generated.push(dedupeKey);
+      }
+    }
+
+    const entitlement = getUserDigitalEntitlement(store, userId, 2027, nowIso);
+    if (
+      entitlement &&
+      !entitlement.legacyPersistent &&
+      entitlement.expiresAt &&
+      (entitlement.status === "expired" || entitlement.expiringSoon)
+    ) {
+      const isEntExpired = entitlement.status === "expired";
+      const entKey = `ent_${entitlement.id}_${entitlement.expiresAt.slice(0, 10)}_${isEntExpired ? "expired" : "due"}`;
+      if (prefs.lastExpiryReminderFor !== entKey) {
+        const dedupeKey = `digital_ent_reminder_${userId}_${entKey}`;
+        createNotificationEvent(store, {
+          userId,
+          category: "subscription",
+          title: isEntExpired
+            ? "2027 Digital Access Expired"
+            : "2027 Digital Access Expiring Soon",
+          body: isEntExpired
+            ? `Your 12-month 2027 Digital Devotional access expired on ${new Date(entitlement.expiresAt).toLocaleDateString("en-GB")}. Your journals and progress are safely preserved — renew your 12-month access anytime.`
+            : `Your 12-month 2027 Digital Devotional access expires in ${entitlement.daysRemaining} day${entitlement.daysRemaining === 1 ? "" : "s"} (${new Date(entitlement.expiresAt).toLocaleDateString("en-GB")}). Renew anytime to extend by 12 calendar months.`,
+          actionUrl: "/digital-edition",
+          dedupeKey,
+        });
+        store.db
+          .update(s.notificationPreferences)
+          .set({ lastExpiryReminderFor: entKey, updatedAt: nowIso })
           .where(eq(s.notificationPreferences.userId, userId))
           .run();
         generated.push(dedupeKey);

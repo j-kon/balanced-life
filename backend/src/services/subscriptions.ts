@@ -270,21 +270,46 @@ export function revokeSubscriptionAccess(
       .from(s.subscriptions)
       .where(eq(s.subscriptions.userId, targetUserId))
       .get();
-    if (!current) {
+    const currentDigital = db
+      .select()
+      .from(s.digitalEntitlements)
+      .where(
+        and(
+          eq(s.digitalEntitlements.userId, targetUserId),
+          eq(s.digitalEntitlements.editionYear, 2027),
+        ),
+      )
+      .get();
+
+    if (!current && !currentDigital) {
       throw new HttpError(404, "This reader does not have a membership record.");
     }
 
     const now = new Date().toISOString();
-    db.update(s.subscriptions)
-      .set({
-        status: "revoked",
-        expiresAt: now,
-        cancelAtPeriodEnd: true,
-        grantReason: reason || current.grantReason,
-        updatedAt: now,
-      })
-      .where(eq(s.subscriptions.userId, targetUserId))
-      .run();
+    if (current) {
+      db.update(s.subscriptions)
+        .set({
+          status: "revoked",
+          expiresAt: now,
+          cancelAtPeriodEnd: true,
+          grantReason: reason || current.grantReason,
+          updatedAt: now,
+        })
+        .where(eq(s.subscriptions.userId, targetUserId))
+        .run();
+    }
+
+    if (currentDigital && currentDigital.status !== "revoked") {
+      db.update(s.digitalEntitlements)
+        .set({
+          status: "revoked",
+          revokedAt: now,
+          grantReason: reason || currentDigital.grantReason,
+          updatedAt: now,
+        })
+        .where(eq(s.digitalEntitlements.id, currentDigital.id))
+        .run();
+    }
 
     db.insert(s.auditLogs)
       .values({

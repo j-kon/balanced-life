@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { NavLink, Navigate, useNavigate } from "react-router-dom";
+import { NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import {
   BookOpen,
   Bookmark,
@@ -124,7 +124,10 @@ export function Protected({
   admin?: boolean;
 }) {
   const { user } = useApp();
-  if (!user) return <Navigate to="/login" replace />;
+  const location = useLocation();
+  if (!user) {
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+  }
   if (admin && user.role !== "admin") {
     return (
       <div className="container section">

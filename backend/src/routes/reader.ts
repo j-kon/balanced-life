@@ -26,6 +26,7 @@ import {
 import {
   getUserDigitalEntitlement,
   getUserDigitalPurchases,
+  getUserPrintedOrders,
   hasActiveDigitalEntitlement,
   initiateDigitalPurchase,
   submitBankTransferProof,
@@ -140,9 +141,15 @@ export function registerReaderRoutes(
         user.id,
         settings.renewalReminderDays,
       ),
+      printedOrders: getUserPrintedOrders(store, user),
       notifications,
       notificationPreferences,
     };
+  });
+
+  app.get(prefix + "/me/printed-orders", async (req) => {
+    const user = requireUser(req);
+    return getUserPrintedOrders(store, user);
   });
 
   app.get(prefix + "/me/progress", async (req) => {
@@ -419,8 +426,12 @@ export function registerReaderRoutes(
       user.id,
       settings.renewalReminderDays,
     );
+    const digitalEntitlement = getUserDigitalEntitlement(store, user.id, 2027);
     return {
       subscription,
+      digitalEntitlement,
+      digitalPurchases: getUserDigitalPurchases(store, user.id),
+      printedOrders: getUserPrintedOrders(store, user),
       active: hasPremiumAccess(store, user),
       payments: getUserPayments(store, user.id),
       paymentProvider: {
@@ -505,6 +516,7 @@ export function registerReaderRoutes(
       product: {
         editionYear: 2027,
         amountKobo: settings.digitalEditionPriceKobo,
+        durationMonths: settings.digitalAccessDurationMonths,
         available: settings.digitalEditionAvailability === "available",
         accessScope: settings.digitalEditionScope,
         note: settings.digitalEditionNote,
@@ -516,6 +528,7 @@ export function registerReaderRoutes(
       },
       bankTransfer: {
         enabled: settings.bankTransferEnabled,
+        instructions: settings.bankTransferInstructions,
         accounts: settings.bankTransferEnabled ? settings.bankAccounts : [],
       },
     };

@@ -92,12 +92,18 @@ export type AppSettings = {
   hardcoverPriceKobo: number;
   hardcoverAvailability: "available" | "preorder" | "out_of_stock";
   hardcoverNote: string;
+  printedBookStockCount?: number;
+  deliveryPricingMode?: "quotation_required" | "fixed_fee";
+  defaultDeliveryFeeKobo?: number | null;
+  deliveryPolicyNote?: string;
   digitalEditionPriceKobo: number;
+  digitalAccessDurationMonths?: number;
   digitalEditionAvailability: "available" | "unavailable";
   digitalEditionScope: "edition_2027" | "includes_membership_updates";
   digitalEditionNote: string;
   bulkDiscountNote: string;
   bankTransferEnabled: boolean;
+  bankTransferInstructions?: string;
   bankAccounts: BankAccountSetting[];
   allowRegistration: boolean;
   enableAutoRenewal: boolean;
@@ -174,10 +180,20 @@ export type PaymentRecord = {
 export type DigitalEntitlementRecord = {
   id: number;
   userId: number;
-  purchaseId: number;
+  purchaseId: number | null;
   editionYear: number;
+  accessType?: "paid" | "complimentary";
   accessScope: "edition_2027" | "includes_membership_updates";
-  status: "active" | "revoked" | "refunded";
+  status: "active" | "expired" | "revoked" | "refunded";
+  startsAt?: string;
+  expiresAt?: string | null;
+  durationMonths?: number;
+  renewalCount?: number;
+  legacyPersistent?: boolean;
+  legacyReviewRequired?: boolean;
+  daysRemaining?: number | null;
+  expiringSoon?: boolean;
+  grantReason?: string;
   grantedAt: string;
   revokedAt: string | null;
   revokeReason: string;
@@ -194,9 +210,9 @@ export type DigitalPurchaseRecord = {
   editionYear?: number;
   amountKobo: number;
   currency: "NGN" | "USD" | "GBP";
-  paymentMethod: "paystack" | "bank_transfer";
+  paymentMethod: "paystack" | "bank_transfer" | "complimentary";
   reference: string;
-  authorizationUrl: string | null;
+  authorizationUrl?: string | null;
   providerTransactionId?: string | null;
   transferReference: string;
   payerNote: string;
@@ -209,10 +225,92 @@ export type DigitalPurchaseRecord = {
     | "revoked";
   accessScope?: "edition_2027" | "includes_membership_updates";
   entitlementStatus?: string;
+  accessStatus?: "active" | "pending" | "expired" | "refunded" | "revoked" | "failed" | "none";
+  startsAt?: string | null;
+  expiresAt?: string | null;
+  daysRemaining?: number | null;
+  expiringSoon?: boolean;
+  renewalCount?: number;
+  legacyPersistent?: boolean;
+  legacyReviewRequired?: boolean;
   adminNotes: string;
   verifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type PrintedOrderItemRecord = {
+  id: number;
+  orderId: number;
+  productCode: string;
+  productTitle: string;
+  quantity: number;
+  unitPriceKobo: number;
+  lineTotalKobo: number;
+  createdAt: string;
+};
+
+export type PrintedOrderRecord = {
+  id: number;
+  orderNumber: string;
+  userId: number | null;
+  bulkOrderId: number | null;
+  fullName: string;
+  email: string;
+  phone: string;
+  streetAddress: string;
+  city: string;
+  state: string;
+  country: string;
+  deliveryLandmark: string;
+  quantity: number;
+  unitPriceKobo: number;
+  subtotalKobo: number;
+  deliveryFeeKobo: number | null;
+  deliveryQuoteStatus:
+    | "pending_quote"
+    | "quoted"
+    | "customer_approved"
+    | "fixed_applied";
+  deliveryQuoteNote: string;
+  finalTotalKobo: number | null;
+  customerApprovedQuoteAt: string | null;
+  currency: "NGN" | "USD" | "GBP";
+  paymentMethod: "unselected" | "paystack" | "bank_transfer";
+  paymentReference: string | null;
+  authorizationUrl: string | null;
+  providerTransactionId: string | null;
+  transferReference: string;
+  payerNote: string;
+  paymentStatus:
+    | "pending"
+    | "awaiting_verification"
+    | "paid"
+    | "failed"
+    | "refunded";
+  fulfillmentStatus:
+    | "new"
+    | "awaiting_delivery_quotation"
+    | "awaiting_payment"
+    | "processing"
+    | "ready_for_dispatch"
+    | "shipped"
+    | "delivered"
+    | "cancelled";
+  dispatchExceptionNote: string;
+  courierName: string;
+  trackingReference: string;
+  customerDeliveryNotes: string;
+  adminNotes: string;
+  verifiedByAdminId: number | null;
+  paidAt: string | null;
+  shippedAt: string | null;
+  deliveredAt: string | null;
+  cancelledAt: string | null;
+  refundedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  items?: PrintedOrderItemRecord[];
 };
 
 export type BulkOrderRecord = {
@@ -252,6 +350,8 @@ export type BulkOrderRecord = {
     | "delivered"
     | "cancelled";
   trackingNote: string;
+  contactHistory?: string;
+  linkedPrintedOrderId?: number | null;
   adminNotes: string;
   createdAt: string;
   updatedAt: string;
@@ -311,6 +411,7 @@ export type NotificationEventRecord = {
     | "unread_reminder"
     | "subscription"
     | "digital_purchase"
+    | "printed_order"
     | "account"
     | "system";
   title: string;
