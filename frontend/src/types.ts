@@ -116,10 +116,15 @@ export type AppConfig = {
   payments: {
     configured: boolean;
     provider: "paystack";
+    mode?: "test" | "live" | "unconfigured";
     publicKey: string | null;
   };
   email: {
     configured: boolean;
+  };
+  webPush?: {
+    configured: boolean;
+    publicKey: string | null;
   };
 };
 
@@ -269,24 +274,55 @@ export type InquiryRecord = {
 
 export type NotificationPreferences = {
   userId: number;
+  notificationsEnabled: boolean;
   dailyReminderEnabled: boolean;
+  unreadReminderEnabled: boolean;
   reminderTime: string;
   timezone: string;
+  quietHoursStart: string;
+  quietHoursEnd: string;
   subscriptionAlertsEnabled: boolean;
   purchaseAlertsEnabled: boolean;
   lastDailyReminderDate: string | null;
+  lastUnreadReminderDate: string | null;
   lastExpiryReminderFor: string | null;
+  updatedAt: string;
+};
+
+export type PushDeviceRecord = {
+  id: number;
+  userId: number;
+  endpoint: string;
+  userAgent: string;
+  deviceLabel: string;
+  status: "active" | "expired" | "unsubscribed";
+  lastSuccessAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string;
+  createdAt: string;
   updatedAt: string;
 };
 
 export type NotificationEventRecord = {
   id: number;
   userId: number;
-  category: "daily_reminder" | "subscription" | "digital_purchase" | "system";
+  category:
+    | "daily_reminder"
+    | "unread_reminder"
+    | "subscription"
+    | "digital_purchase"
+    | "account"
+    | "system";
   title: string;
   body: string;
   actionUrl: string;
   dedupeKey: string;
+  deliveryStatus?: string;
+  attempts?: number;
+  maxAttempts?: number;
+  nextAttemptAt?: string | null;
+  deliveredAt?: string | null;
+  lastError?: string;
   readAt: string | null;
   createdAt: string;
 };

@@ -5,7 +5,6 @@ import * as s from "../schema.js";
 import { requireUser } from "../auth.js";
 import { HttpError } from "../errors.js";
 import {
-  checkoutInitiateSchema,
   checkoutVerifySchema,
   digitalPurchaseInitiateSchema,
   digitalTransferProofSchema,
@@ -22,7 +21,6 @@ import {
   getUserPayments,
   hasPremiumAccess,
   hasSubscriptionAccess,
-  initiatePaystackCheckout,
   verifyAndActivatePayment,
 } from "../services/subscriptions.js";
 import {
@@ -34,14 +32,18 @@ import {
   verifyAndActivateDigitalPurchase,
 } from "../services/commerce.js";
 import {
-  evaluateUserReminders,
+  SUPPORTED_TIMEZONES,
   getNotificationPreferences,
   getUserNotifications,
+  getUserPushDevices,
   getUserPushSubscriptionsCount,
   markNotificationRead,
   removePushSubscription,
+  removePushSubscriptionById,
   savePushSubscription,
+  sendUserTestNotification,
   updateNotificationPreferences,
+  type WebPushProvider,
 } from "../services/notifications.js";
 import type { PaymentProvider } from "../services/payments.js";
 import { formatEntryMetadata, getAuthorizedEntry } from "./public.js";
@@ -53,6 +55,7 @@ export function registerReaderRoutes(
   store: Store,
   paymentProvider: PaymentProvider,
   appOrigin: string,
+  pushProvider: WebPushProvider,
 ) {
   const { db } = store;
 
@@ -67,7 +70,6 @@ export function registerReaderRoutes(
       user.role === "admin" || hasActiveDigitalEntitlement(store, user.id, 2027);
     const digitalEntitlement = getUserDigitalEntitlement(store, user.id, 2027);
 
-    evaluateUserReminders(store, user.id, currentDate);
     const notifications = getUserNotifications(store, user.id, 10);
     const notificationPreferences = getNotificationPreferences(store, user.id);
 
@@ -472,15 +474,8 @@ export function registerReaderRoutes(
     prefix + "/subscriptions/checkout",
     { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
     async (req) => {
-      const user = requireUser(req);
-      const input = checkoutInitiateSchema.parse(req.body);
-      return initiatePaystackCheckout(
-        store,
-        user,
-        input,
-        paymentProvider,
-        appOrigin,
-      );
+      requireUser(req);
+      throw new HttpError(410, "Recurring memberships are no longer offered. Get one-time 2027 online access for ₦3,500.");
     },
   );
 
@@ -576,46 +571,88 @@ export function registerReaderRoutes(
 
   app.get(prefix + "/me/notifications", async (req) => {
     const user = requireUser(req);
-    const currentDate = new Date().toISOString().slice(0, 10);
-    evaluateUserReminders(store, user.id, currentDate);
     return {
       preferences: getNotificationPreferences(store, user.id),
       pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
+      devices: getUserPushDevices(store, user.id),
       events: getUserNotifications(store, user.id, 30),
+      webPush: {
+        configured: pushProvider.configured,
+        publicKey: pushProvider.publicKey,
+      },
+      supportedTimezones: SUPPORTED_TIMEZONES,
     };
   });
 
-  app.patch(prefix + "/me/notifications/preferences", async (req) => {
-    const user = requireUser(req);
-    const input = notificationPreferencesSchema.parse(req.body);
-    return {
-      ok: true,
-      preferences: updateNotificationPreferences(store, user.id, input),
-    };
-  });
+  app.patch(
+    prefix + "/me/notifications/preferences",
+    { config: { rateLimit: { max: 30, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      const input = notificationPreferencesSchema.parse(req.body);
+      return {
+        ok: true,
+        preferences: updateNotificationPreferences(store, user.id, input),
+      };
+    },
+  );
 
-  app.post(prefix + "/me/notifications/push-subscribe", async (req) => {
-    const user = requireUser(req);
-    const input = pushSubscriptionSchema.parse(req.body);
-    const saved = savePushSubscription(store, user.id, input);
-    return {
-      ok: true,
-      subscriptionId: saved.id,
-      pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
-    };
-  });
+  app.post(
+    prefix + "/me/notifications/push-subscribe",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      const input = pushSubscriptionSchema.parse(req.body);
+      const saved = savePushSubscription(store, user.id, input);
+      return {
+        ok: true,
+        subscriptionId: saved.id,
+        pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
+        devices: getUserPushDevices(store, user.id),
+      };
+    },
+  );
 
-  app.post(prefix + "/me/notifications/push-unsubscribe", async (req) => {
-    const user = requireUser(req);
-    const { endpoint } = z
-      .object({ endpoint: z.string().trim().optional() })
-      .parse(req.body || {});
-    removePushSubscription(store, user.id, endpoint);
-    return {
-      ok: true,
-      pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
-    };
-  });
+  app.post(
+    prefix + "/me/notifications/push-unsubscribe",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      const { endpoint } = z
+        .object({ endpoint: z.string().trim().optional() })
+        .parse(req.body || {});
+      removePushSubscription(store, user.id, endpoint);
+      return {
+        ok: true,
+        pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
+        devices: getUserPushDevices(store, user.id),
+      };
+    },
+  );
+
+  app.delete(
+    prefix + "/me/notifications/devices/:id",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      const deviceId = idOf(req);
+      removePushSubscriptionById(store, user.id, deviceId);
+      return {
+        ok: true,
+        pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
+        devices: getUserPushDevices(store, user.id),
+      };
+    },
+  );
+
+  app.post(
+    prefix + "/me/notifications/test",
+    { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const user = requireUser(req);
+      return sendUserTestNotification(store, user.id, pushProvider);
+    },
+  );
 
   app.post(prefix + "/me/notifications/:id/read", async (req) => {
     const user = requireUser(req);

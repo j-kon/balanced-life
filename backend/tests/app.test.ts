@@ -13,6 +13,13 @@ import type {
   EmailService,
   PasswordResetEmailInput,
 } from "../src/services/email.js";
+import {
+  runNotificationWorkerCycle,
+  type PushMessagePayload,
+  type WebPushProvider,
+  type WebPushSendResult,
+  type WebPushSubscriptionTarget,
+} from "../src/services/notifications.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,11 +75,55 @@ class MockEmailService implements EmailService {
   }
 }
 
+class MockWebPushProvider implements WebPushProvider {
+  readonly configured = true;
+  readonly publicKey =
+    "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U";
+  public deliveries: Array<{
+    endpoint: string;
+    payload: PushMessagePayload;
+  }> = [];
+  public expiredEndpoints = new Set<string>();
+  public transientFailureEndpoints = new Set<string>();
+
+  async sendNotification(
+    subscription: WebPushSubscriptionTarget,
+    payload: PushMessagePayload,
+  ): Promise<WebPushSendResult> {
+    if (this.expiredEndpoints.has(subscription.endpoint)) {
+      return {
+        ok: false,
+        statusCode: 410,
+        expired: true,
+        errorMessage: "Push subscription has unsubscribed or expired (410).",
+      };
+    }
+    if (this.transientFailureEndpoints.has(subscription.endpoint)) {
+      return {
+        ok: false,
+        statusCode: 503,
+        expired: false,
+        errorMessage: "Temporary push gateway error (503).",
+      };
+    }
+    this.deliveries.push({
+      endpoint: subscription.endpoint,
+      payload,
+    });
+    return {
+      ok: true,
+      statusCode: 201,
+      expired: false,
+    };
+  }
+}
+
 let folder = "";
 let databasePath = "";
 let app: Awaited<ReturnType<typeof buildApp>>;
 let paystackProvider: MockPaystackProvider;
 let emailService: MockEmailService;
+let pushProvider: MockWebPushProvider;
 let adminCookie = "";
 let subscriberCookie = "";
 let subscriberId = 0;
@@ -116,10 +167,12 @@ before(async () => {
 
   paystackProvider = new MockPaystackProvider();
   emailService = new MockEmailService();
+  pushProvider = new MockWebPushProvider();
   app = await buildApp({
     databasePath,
     paymentProvider: paystackProvider,
     emailService,
+    pushProvider,
   });
   await app.ready();
 
@@ -452,7 +505,7 @@ test("private journals are scoped to owners, including update and deletion", asy
   assert.equal((await send("GET", "/me/journal")).statusCode, 401);
 });
 
-test("complimentary access never counts as verified revenue; verified Paystack checkout is idempotent and extends access", async () => {
+test("complimentary access never counts as verified revenue; retired recurring checkout returns 410 and complimentary grants preserve access", async () => {
   // Before any paid checkout, subscriber has complimentary access; verified revenue must be 0
   const overviewBefore = (
     await send("GET", "/admin/overview", undefined, adminCookie)
@@ -460,52 +513,27 @@ test("complimentary access never counts as verified revenue; verified Paystack c
   assert.equal(overviewBefore.metrics.verifiedRevenueKobo, 0);
   assert.equal(overviewBefore.metrics.complimentaryMemberships, 1);
 
-  // Initiate Paystack checkout for guest
+  // Retired recurring subscription checkout must return 410
   const initRes = await send(
     "POST",
     "/subscriptions/checkout",
     { planId: 1, renewalMode: "automatic" },
     guestCookie,
   );
-  assert.equal(initRes.statusCode, 200);
-  const reference = initRes.json().reference;
-  assert.ok(reference.startsWith("BLD_"));
+  assert.equal(initRes.statusCode, 410);
 
-  // Cross-user verification must be rejected
-  assert.equal(
-    (
-      await send(
-        "POST",
-        "/subscriptions/verify",
-        { reference },
-        subscriberCookie,
-      )
-    ).statusCode,
-    403,
-  );
-
-  // Verify transaction as guest
-  const verifyRes = await send(
+  // Grant complimentary access to guest so cancellation and revocation can be verified
+  const grantGuest = await send(
     "POST",
-    "/subscriptions/verify",
-    { reference },
-    guestCookie,
+    `/admin/users/${guestId}/complimentary`,
+    { planId: 1, reason: "Complimentary test pass" },
+    adminCookie,
   );
-  assert.equal(verifyRes.statusCode, 200);
-  const expiry = verifyRes.json().subscription.expiresAt;
-  assert.equal(verifyRes.json().subscription.accessType, "paid");
+  assert.equal(grantGuest.statusCode, 200);
+  const expiry = grantGuest.json().subscription.expiresAt;
+  assert.equal(grantGuest.json().subscription.accessType, "complimentary");
 
-  // Replaying verification is idempotent
-  const replayRes = await send(
-    "POST",
-    "/subscriptions/verify",
-    { reference },
-    guestCookie,
-  );
-  assert.equal(replayRes.json().replayed, true);
-  assert.equal(replayRes.json().subscription.expiresAt, expiry);
-
-  // Cancel renewal preserves paid-through access
+  // Cancel renewal preserves active-through access
   await send(
     "PATCH",
     "/me/subscription",
@@ -518,14 +546,14 @@ test("complimentary access never counts as verified revenue; verified Paystack c
   assert.equal(state.active, true);
   assert.equal(state.subscription.effectiveStatus, "cancelling");
   assert.equal(state.subscription.expiresAt, expiry);
-  assert.equal(state.payments.length, 1);
+  assert.equal(state.payments.length, 0);
 
-  // Verified revenue now equals the 1 verified Paystack payment (100000 kobo)
+  // Complimentary grants still report 0 verified revenue
   const overviewAfter = (
     await send("GET", "/admin/overview", undefined, adminCookie)
   ).json();
-  assert.equal(overviewAfter.metrics.verifiedRevenueKobo, 100000);
-  assert.equal(overviewAfter.metrics.paidMemberships, 1);
+  assert.equal(overviewAfter.metrics.verifiedRevenueKobo, 0);
+  assert.equal(overviewAfter.metrics.complimentaryMemberships, 2);
 });
 
 test("admin can revoke access and suspend/reactivate reader accounts", async () => {
@@ -782,12 +810,12 @@ test("dedicated Digital Edition purchase (Paystack + webhook + failed verificati
   assert.equal(unlockedRes.statusCode, 200);
   assert.equal(unlockedRes.json().reflection, entryFixture.reflection);
 
-  // Overview revenue includes 100,000 kobo subscription + 350,000 kobo digital edition = 450,000 kobo
+  // Overview revenue equals the 350,000 kobo digital edition purchase
   const overview = (
     await send("GET", "/admin/overview", undefined, adminCookie)
   ).json();
   assert.equal(overview.metrics.digitalRevenueKobo, 350000);
-  assert.equal(overview.metrics.verifiedRevenueKobo, 450000);
+  assert.equal(overview.metrics.verifiedRevenueKobo, 350000);
   assert.equal(overview.metrics.digitalEditionsSold, 1);
 
   // 3. Bank-transfer workflow when enabled by admin
@@ -906,21 +934,30 @@ test("bulk-order workflow stores null discount by default and supports admin quo
   assert.equal(patched.json().quotedTotalKobo, 22500000);
 });
 
-test("PWA notification preferences, push subscriptions, and daily reminders deduplicate cleanly", async () => {
+test("Web Push subscriptions, background scheduler, timezone/quiet-hours/access guards, expired 410 cleanup, and concurrent worker deduplication work reliably", async () => {
   const initNotifs = (
     await send("GET", "/me/notifications", undefined, subscriberCookie)
   ).json();
+  assert.equal(initNotifs.preferences.notificationsEnabled, true);
   assert.equal(initNotifs.preferences.dailyReminderEnabled, false);
+  assert.equal(initNotifs.preferences.unreadReminderEnabled, false);
   assert.equal(initNotifs.pushSubscriptionsCount, 0);
+  assert.equal(initNotifs.webPush.configured, true);
+  assert.ok(initNotifs.webPush.publicKey);
+  assert.ok(Array.isArray(initNotifs.supportedTimezones));
 
-  // Enable daily reminder
+  // Enable daily + unread reminders for subscriber (Africa/Lagos, 06:30)
   const prefRes = await send(
     "PATCH",
     "/me/notifications/preferences",
     {
+      notificationsEnabled: true,
       dailyReminderEnabled: true,
+      unreadReminderEnabled: true,
       reminderTime: "06:30",
       timezone: "Africa/Lagos",
+      quietHoursStart: "22:00",
+      quietHoursEnd: "05:30",
       subscriptionAlertsEnabled: true,
       purchaseAlertsEnabled: true,
     },
@@ -928,41 +965,228 @@ test("PWA notification preferences, push subscriptions, and daily reminders dedu
   );
   assert.equal(prefRes.statusCode, 200);
   assert.equal(prefRes.json().preferences.dailyReminderEnabled, true);
+  assert.equal(prefRes.json().preferences.unreadReminderEnabled, true);
 
-  // Register push subscription
-  const subPush = await send(
+  // Also enable daily reminder for guest (whose access was revoked earlier) to verify access guard
+  const guestLogin = await send("POST", "/auth/login", {
+    email: "alex@example.org",
+    password: "Brand-New-Password-2027!",
+  });
+  assert.equal(guestLogin.statusCode, 200);
+  guestCookie = String(guestLogin.headers["set-cookie"]).split(";")[0];
+
+  await send(
+    "PATCH",
+    "/me/notifications/preferences",
+    {
+      notificationsEnabled: true,
+      dailyReminderEnabled: true,
+      unreadReminderEnabled: true,
+      reminderTime: "06:30",
+      timezone: "Africa/Lagos",
+      quietHoursStart: "22:00",
+      quietHoursEnd: "05:30",
+      subscriptionAlertsEnabled: true,
+      purchaseAlertsEnabled: true,
+    },
+    guestCookie,
+  );
+
+  // Register two push devices for subscriber: one active, one that will expire (HTTP 410)
+  const validEndpoint = "https://fcm.googleapis.com/fcm/send/mock-endpoint-valid";
+  const expiredEndpoint =
+    "https://fcm.googleapis.com/fcm/send/mock-endpoint-expired-410";
+
+  const subPush1 = await send(
     "POST",
     "/me/notifications/push-subscribe",
     {
-      endpoint: "https://fcm.googleapis.com/fcm/send/mock-endpoint-1",
-      p256dhKey: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQ",
-      authKey: "tBHItJI5svbpez7KI4CCXg",
-      userAgent: "Playwright Mobile PWA Test",
+      endpoint: validEndpoint,
+      p256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQ",
+      auth: "tBHItJI5svbpez7KI4CCXg",
+      userAgent: "Playwright Android Chrome",
+      deviceLabel: "Android Chrome",
     },
     subscriberCookie,
   );
-  assert.equal(subPush.statusCode, 200);
-  assert.equal(subPush.json().pushSubscriptionsCount, 1);
+  assert.equal(subPush1.statusCode, 200);
+  assert.equal(subPush1.json().pushSubscriptionsCount, 1);
 
-  // Unmark progress on devotional #1 so today's daily reading reminder is eligible
+  const subPush2 = await send(
+    "POST",
+    "/me/notifications/push-subscribe",
+    {
+      endpoint: expiredEndpoint,
+      p256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQ",
+      auth: "tBHItJI5svbpez7KI4CCXg",
+      userAgent: "Old Browser Device",
+      deviceLabel: "Stale Browser",
+    },
+    subscriberCookie,
+  );
+  assert.equal(subPush2.statusCode, 200);
+  assert.equal(subPush2.json().pushSubscriptionsCount, 2);
+
+  // Mark the second endpoint as expired (HTTP 410) in MockWebPushProvider
+  pushProvider.expiredEndpoints.add(expiredEndpoint);
+  pushProvider.deliveries = [];
+
+  // User-initiated test notification delivers to valid device and cleans up 410 endpoint
+  const testPushRes = await send(
+    "POST",
+    "/me/notifications/test",
+    {},
+    subscriberCookie,
+  );
+  assert.equal(testPushRes.statusCode, 200);
+  assert.equal(testPushRes.json().deliveredCount, 1);
+  const testDeliveries = pushProvider.deliveries.filter((d) =>
+    d.payload.title.includes("Test Notification"),
+  );
+  assert.equal(testDeliveries.length, 1);
+  assert.equal(testDeliveries[0].endpoint, validEndpoint);
+  assert.ok(
+    !JSON.stringify(testDeliveries[0].payload).includes(
+      "PRIVATE JOURNAL",
+    ),
+  );
+
+  // Expired 410 endpoint is now deactivated; active count is 1
+  const after410 = (
+    await send("GET", "/me/notifications", undefined, subscriberCookie)
+  ).json();
+  assert.equal(after410.pushSubscriptionsCount, 1);
+
+  // Unmark progress on 2027-01-01 (non-sample) so subscriber is eligible for reminder
   const devList = (await send("GET", "/devotionals")).json();
+  const jan1Entry = devList.find((d: { date: string }) => d.date === "2027-01-01");
   await send(
     "POST",
-    `/me/progress/${devList[0].id}`,
+    `/me/progress/${jan1Entry.id}`,
     { completed: false },
     subscriberCookie,
   );
 
-  // Calling GET /me/notifications twice on the same day must not create duplicate daily reminders
-  const firstFetch = (
+  // Calling GET /me/notifications does NOT evaluate or create reminders as a side effect
+  const fetchBeforeWorker = (
     await send("GET", "/me/notifications", undefined, subscriberCookie)
   ).json();
-  const secondFetch = (
-    await send("GET", "/me/notifications", undefined, subscriberCookie)
-  ).json();
-  const dailyReminders = secondFetch.events.filter(
-    (e: { category: string }) => e.category === "daily_reminder",
+  assert.equal(
+    fetchBeforeWorker.events.filter(
+      (e: { category: string }) => e.category === "daily_reminder",
+    ).length,
+    0,
   );
-  assert.equal(dailyReminders.length, 1);
-  assert.equal(firstFetch.events.length, secondFetch.events.length);
+
+  const workerStore = openDatabase(databasePath);
+  try {
+    pushProvider.deliveries = [];
+
+    // 1. Pre-2027 guard: running worker on 2026-12-31T08:00:00Z must NOT send 2027 daily devotional reminders
+    const pre2027Run = await runNotificationWorkerCycle(
+      workerStore,
+      pushProvider,
+      new Date("2026-12-31T08:00:00.000Z"),
+    );
+    assert.equal(pre2027Run.createdEvents, 0);
+
+    // 2. Timezone & reminderTime guard: at 2027-01-01T05:00:00Z, Africa/Lagos is 06:00 (< 06:30 reminderTime)
+    const earlyRun = await runNotificationWorkerCycle(
+      workerStore,
+      pushProvider,
+      new Date("2027-01-01T05:00:00.000Z"),
+    );
+    assert.equal(earlyRun.createdEvents, 0);
+
+    // 3. Simultaneous worker runs at 2027-01-01T05:30:00Z (06:30 Africa/Lagos):
+    //    - Subscriber (entitled) gets exactly 1 daily_reminder event and 1 Web Push delivery.
+    //    - Guest (revoked access, non-sample entry) gets 0 daily_reminder events.
+    const [runA, runB] = await Promise.all([
+      runNotificationWorkerCycle(
+        workerStore,
+        pushProvider,
+        new Date("2027-01-01T05:30:00.000Z"),
+      ),
+      runNotificationWorkerCycle(
+        workerStore,
+        pushProvider,
+        new Date("2027-01-01T05:30:00.000Z"),
+      ),
+    ]);
+    assert.equal(runA.createdEvents + runB.createdEvents, 1);
+    assert.equal(pushProvider.deliveries.length, 1);
+    assert.match(pushProvider.deliveries[0].payload.title, /Daily Devotional/);
+
+    const guestNotifs = (
+      await send("GET", "/me/notifications", undefined, guestCookie)
+    ).json();
+    assert.equal(
+      guestNotifs.events.filter(
+        (e: { category: string }) => e.category === "daily_reminder",
+      ).length,
+      0,
+    );
+
+    // 4. Evening unread devotional reminder at 2027-01-01T17:30:00Z (18:30 Africa/Lagos) while reading is still incomplete
+    pushProvider.deliveries = [];
+    const eveningRun = await runNotificationWorkerCycle(
+      workerStore,
+      pushProvider,
+      new Date("2027-01-01T17:30:00.000Z"),
+    );
+    assert.equal(eveningRun.createdEvents, 1);
+    assert.equal(pushProvider.deliveries.length, 1);
+    assert.match(pushProvider.deliveries[0].payload.title, /Unread Today:/);
+
+    // 5. Complete 2027-01-02 reading for subscriber before 06:30 on Jan 2 ->
+    //    subscriber (completed) receives 0 reminders & 0 push deliveries for Jan 2,
+    //    while guest (uncompleted, and Jan 2 is sample=true) receives 1 daily_reminder event.
+    const jan2Entry = devList.find((d: { date: string }) => d.date === "2027-01-02");
+    await send(
+      "POST",
+      `/me/progress/${jan2Entry.id}`,
+      { completed: true },
+      subscriberCookie,
+    );
+    pushProvider.deliveries = [];
+    const jan2Run = await runNotificationWorkerCycle(
+      workerStore,
+      pushProvider,
+      new Date("2027-01-02T06:00:00.000Z"),
+    );
+    assert.equal(
+      jan2Run.generatedKeys.includes(`daily_reminder_${subscriberId}_2027-01-02`),
+      false,
+    );
+    assert.equal(
+      jan2Run.generatedKeys.includes(`daily_reminder_${guestId}_2027-01-02`),
+      true,
+    );
+    assert.equal(pushProvider.deliveries.length, 0);
+
+    // 6. Master opt-out (notificationsEnabled = false) prevents test notifications and future reminders
+    await send(
+      "PATCH",
+      "/me/notifications/preferences",
+      {
+        notificationsEnabled: false,
+        dailyReminderEnabled: true,
+        unreadReminderEnabled: true,
+        reminderTime: "06:30",
+        timezone: "Africa/Lagos",
+        quietHoursStart: "22:00",
+        quietHoursEnd: "05:30",
+        subscriptionAlertsEnabled: true,
+        purchaseAlertsEnabled: true,
+      },
+      subscriberCookie,
+    );
+    assert.equal(
+      (await send("POST", "/me/notifications/test", {}, subscriberCookie))
+        .statusCode,
+      400,
+    );
+  } finally {
+    workerStore.sqlite.close();
+  }
 });

@@ -99,7 +99,7 @@ test.describe("End-to-End Production Workflows", () => {
     await expect(page.locator(".preview-bar")).toHaveCount(0);
     await expect(page.getByText(/quick-login|demo mode/i)).toHaveCount(0);
 
-    // Verify owner's approved homepage headline, supporting message, and sections A-H
+    // Verify owner's approved homepage headline, organization, and simplified 2-option offering
     await expect(
       page.getByRole("heading", {
         level: 1,
@@ -107,40 +107,11 @@ test.describe("End-to-End Production Workflows", () => {
       }),
     ).toBeVisible();
     await expect(
-      page
-        .getByText(
-          /365 Days of Connecting with Jesus with holistic development\./i,
-        )
-        .first(),
-    ).toBeVisible();
-    await expect(
       page.getByText(/Cossy Teens Consult Enterprises/i).first(),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: /Why The Balanced Life Devotional\?/i }),
+      page.getByRole("heading", { name: /One devotional\. Two ways to grow\./i }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: /Why Stay Connected with Jesus\?/i }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", {
-        name: /What Makes the Devotional Different\?/i,
-      }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", {
-        name: /More Than Reading: A Daily Growth Experience/i,
-      }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", {
-        name: /A Resource for Parents, Schools and Churches/i,
-      }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: /Our Vision/i }),
-    ).toBeVisible();
-    await expect(page.getByText(/Get Your Copy Today!/i).first()).toBeVisible();
 
     // Navigate public pages
     await page.goto("/about");
@@ -166,14 +137,14 @@ test.describe("End-to-End Production Workflows", () => {
     await page.goto("/pricing");
     await expect(
       page.getByRole("heading", {
-        name: /Choose your membership/i,
+        name: /One devotional\. Two ways to grow\./i,
       }),
     ).toBeVisible();
 
     await page.goto("/digital-edition");
     await expect(
       page.getByRole("heading", {
-        name: /The 2027 Digital Edition/i,
+        name: /Your 2027 online access/i,
       }),
     ).toBeVisible();
     await expect(page.getByText(/₦3,500/i).first()).toBeVisible();
@@ -222,34 +193,12 @@ test.describe("End-to-End Production Workflows", () => {
       page.getByText(/Printed copy inquiry received/i),
     ).toBeVisible();
 
-    // Submit bulk-order inquiry on /bulk-orders
+    // Verify /bulk-orders redirects to /contact
     await page.goto("/bulk-orders");
+    await expect(page).toHaveURL(/\/contact$/);
     await expect(
-      page.getByRole("heading", {
-        name: /Bulk & Institutional Orders/i,
-      }),
+      page.getByRole("heading", { name: /Connect with/i }),
     ).toBeVisible();
-    await page
-      .getByLabel(/Contact person name/i)
-      .fill("Pastor Samuel E2E");
-    await page
-      .getByLabel(/Organization \/ Group \/ Family name/i)
-      .fill("Grace Youth Church");
-    await page.getByLabel(/Organization type/i).selectOption("church");
-    await page.getByLabel(/Email address/i).fill(readerEmail);
-    await page.getByLabel(/Phone \/ WhatsApp number/i).fill("+2348000000002");
-    await page.getByLabel(/Quantity needed/i).fill("40");
-    await page.getByLabel(/Preferred format/i).selectOption("printed");
-    await page
-      .getByLabel(/City \/ Delivery location/i)
-      .fill("Port Harcourt, Nigeria");
-    await page
-      .getByLabel(/Additional notes or timeline/i)
-      .fill("Needed for annual teen conference.");
-    await page
-      .getByRole("button", { name: /Submit Bulk Order Inquiry/i })
-      .click();
-    await expect(page.getByText(/Bulk order inquiry recorded/i)).toBeVisible();
 
     // Mobile PWA & Tablet responsive verification across 768px, 430px, 390px, and 360px
     for (const width of [768, 430, 390, 360]) {
@@ -296,13 +245,14 @@ test.describe("End-to-End Production Workflows", () => {
       page.getByRole("link", { name: /Buy 2027 Digital Copy/i }),
     ).toBeVisible();
 
-    // Visit checkout page and verify Paystack unconfigured state does not fabricate payment
+    // Visit /checkout/1 -> redirects to /digital-edition and shows honest Paystack configuration state
     await page.goto("/checkout/1");
+    await expect(page).toHaveURL(/\/digital-edition$/);
     await expect(
-      page.getByText(/Paystack checkout is not yet enabled/i),
+      page.getByText(/Online checkout is not available yet/i),
     ).toBeVisible();
 
-    // Update profile and password on Account page
+    // Update profile, password, and notification preferences + test notification on Account page
     await page.goto("/account");
     const profileForm = page.locator("form").first();
     await profileForm.getByLabel(/Full name/i).fill("Grace Updated Reader");
@@ -319,6 +269,34 @@ test.describe("End-to-End Production Workflows", () => {
       .click();
     await expect(
       page.getByText(/Your password has been changed/i),
+    ).toBeVisible();
+
+    // Configure notification & reminder preferences and send a test notification
+    const notifForm = page.locator("form").nth(2);
+    await expect(
+      notifForm.getByRole("heading", {
+        name: /Mobile & Daily Devotional Reminders/i,
+      }),
+    ).toBeVisible();
+    await notifForm
+      .getByLabel(/Enable daily devotional reading reminder/i)
+      .check();
+    await notifForm
+      .getByLabel(/Send an evening reminder/i)
+      .check();
+    await notifForm.locator('select[name="timezone"]').selectOption("Africa/Lagos");
+    await notifForm
+      .getByRole("button", { name: /Save reminder preferences/i })
+      .click();
+    await expect(
+      page.getByText(/Reminder & notification preferences saved/i),
+    ).toBeVisible();
+
+    await notifForm
+      .getByRole("button", { name: /Send test notification/i })
+      .click();
+    await expect(
+      page.getByText(/Test Notification · The Balanced Life Devotional/i).first(),
     ).toBeVisible();
 
     // Sign out and sign back in with updated password
@@ -383,10 +361,6 @@ test.describe("End-to-End Production Workflows", () => {
     await expect(entryRow).toBeVisible();
     await entryRow.getByRole("button", { name: /Approve & publish/i }).click();
     await expect(page.getByText(/Changes saved/i)).toBeVisible();
-
-    // Bulk Orders tab: verify bulk inquiry from test 1
-    await page.getByRole("button", { name: /^Bulk Orders$/i }).click();
-    await expect(page.getByText(/Grace Youth Church/i).first()).toBeVisible();
 
     // Bookstore tab: verify printed copy inquiry from test 1 and update its status
     await page.getByRole("button", { name: /^Bookstore$/i }).click();
@@ -456,10 +430,10 @@ test.describe("End-to-End Production Workflows", () => {
       page.getByText(/Set aside 15 minutes before school/i),
     ).toBeVisible();
 
-    // Visit Subscription page and verify Complimentary Access status is clearly shown
+    // Visit Subscription page and verify active access status is clearly shown
     await page.goto("/subscription");
     await expect(
-      page.getByText(/Complimentary Access/i).first(),
+      page.getByText(/Access active/i).first(),
     ).toBeVisible();
 
     // Verify mobile reader navigation at 390px has no horizontal overflow

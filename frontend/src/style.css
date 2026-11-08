@@ -2647,3 +2647,15 @@ tr:last-child td {
     text-overflow: ellipsis;
   }
 }
+
+/* Two clear products and comfortable mobile controls. */
+.purchase-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;max-width:920px;margin:auto}
+.purchase-option{display:flex;flex-direction:column;gap:20px;padding:35px}
+.purchase-option>svg{color:var(--wine)}
+.purchase-option .button{margin-top:auto;align-self:stretch}
+.purchase-option .price{font-size:2.8rem}
+.install-invite{display:flex;align-items:center;gap:30px}
+.install-invite>div{flex:1}.install-invite p{margin-top:16px;max-width:640px}
+.install-guide-page{max-width:800px}.install-guide-page>h1{margin:20px 0}.install-guide-page>.lead{margin-bottom:30px}
+@media(max-width:800px){input,textarea,select{font-size:16px}.mobile-bottom{gap:2px}.mobile-bottom a{min-width:0;flex:1;min-height:44px}.icon-button{min-width:44px;min-height:44px}}
+@media(max-width:600px){.purchase-options{grid-template-columns:1fr}.purchase-option{padding:26px}.install-invite{flex-direction:column;align-items:flex-start}.hero .actions{align-items:stretch}.hero .button{min-height:48px}.install-guide-page h1{font-size:2.6rem}}

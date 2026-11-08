@@ -61,6 +61,9 @@ npm run build                    # Typecheck and build both frontend and backend
 npm run test                     # Run backend unit, integration, security, and subscription test suites
 npm run lint                     # Run TypeScript compiler checks and ESLint across workspaces
 npm run test:e2e                 # Run Playwright browser E2E and privacy tests (with npm run dev running)
+npm run notifications:run        # Run one background reminder & Web Push dispatch cycle (cron-compatible)
+npm run notifications:worker     # Run continuous background reminder & Web Push worker
+npm run push:generate-vapid      # Generate a fresh VAPID public/private key pair for Web Push
 npm run import:manuscript        # Inspect extracted 2027 devotional entries from private/manuscript/
 npm run import:manuscript -- --write  # Import missing manuscript entries as unreviewed drafts
 ```
@@ -115,3 +118,29 @@ Copy `backend/.env.example` to `backend/.env` (and optionally `frontend/.env.exa
 | `PAYSTACK_WEBHOOK_SECRET` | *(empty)* | Optional webhook signing secret (defaults to `PAYSTACK_SECRET_KEY`) |
 | `PASSWORD_RESET_WEBHOOK_URL` | *(empty)* | Transactional email webhook URL to enable password-reset emails |
 | `EMAIL_FROM` | `no-reply@cossyteens.org` | Sender address for transactional emails |
+| `VAPID_PUBLIC_KEY` | *(empty)* | URL-safe Base64 VAPID public key for Web Push subscriptions |
+| `VAPID_PRIVATE_KEY` | *(empty)* | Server-only VAPID private key (never exposed to browser) |
+| `VAPID_SUBJECT` | `mailto:cossyteensconsult@gmail.com` | Contact URI (`mailto:` or `https://`) for Web Push services |
+| `ENABLE_NOTIFICATION_SCHEDULER` | `false` | Set `true` to run the periodic reminder scheduler inside the API process |
+| `NOTIFICATION_WORKER_INTERVAL_MS` | `60000` | Polling interval in milliseconds when in-process scheduler or worker loop runs |
+
+## Web Push & Background Notification Scheduler
+
+1. **Generate VAPID Keys**:
+   ```bash
+   npm run push:generate-vapid
+   ```
+   Copy `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` into `backend/.env`.
+2. **Run Background Scheduler Locally or via Cron**:
+   - **One-shot cron execution** (evaluates due reminders across all active users and dispatches pending Web Push messages):
+     ```bash
+     npm run notifications:run
+     ```
+   - **Continuous background worker**:
+     ```bash
+     npm run notifications:worker
+     ```
+   - **In-process API scheduler**: set `ENABLE_NOTIFICATION_SCHEDULER=true` in `backend/.env`.
+3. **Testing Push Notifications on Android & iPhone**:
+   - **Android (Chrome / Edge)**: Over `localhost` (development) or `HTTPS` (production), sign in and open **Account & reminders** (`/account`), click **Enable push on this device**, accept the browser prompt, and click **Send test notification**.
+   - **iPhone / iPad (iOS 16.4+ Safari)**: Apple requires Web Push to run inside an installed Home Screen web app served over **HTTPS**. Open the site in Safari over HTTPS, tap **Share → Add to Home Screen**, launch the app from the Home Screen icon, open **Account & reminders** (`/account`), tap **Enable push on this device**, and tap **Send test notification**.

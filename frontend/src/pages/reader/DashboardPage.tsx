@@ -82,7 +82,7 @@ export function DashboardPage() {
             <strong>Membership Notice</strong>
             <p>{data.subscription.renewalReminder.message}</p>
             <Link className="text-link" to="/subscription">
-              Manage membership <ArrowRight size={15} />
+              My online access <ArrowRight size={15} />
             </Link>
           </div>
         </div>
@@ -243,7 +243,7 @@ export function DashboardPage() {
                   <span className="eyebrow">Your Reading Access</span>
                   <h3>
                     {data.digitalEntitlement?.status === "active"
-                      ? "2027 Digital Edition Owner"
+                      ? "2027 online access Owner"
                       : data.subscription?.active
                         ? `${data.subscription.planName} (${data.subscription.accessType === "complimentary" ? "Complimentary" : "Paid"})`
                         : "Free Sample Reader"}
@@ -278,19 +278,19 @@ export function DashboardPage() {
                         Digital Copy (
                         {money(config.settings.digitalEditionPriceKobo)})
                       </strong>{" "}
-                      or a recurring membership plan.
+                      for one payment of ₦3,500.
                     </p>
                   )}
                   <div className="stack" style={{ gap: "10px", marginTop: "12px" }}>
                     <Link to="/digital-edition">
                       <ShoppingBag size={15} />{" "}
                       {data.digitalEntitlement?.status === "active"
-                        ? "View 2027 Digital Edition"
+                        ? "View 2027 online access"
                         : `Buy 2027 Digital Copy (${money(config.settings.digitalEditionPriceKobo)})`}{" "}
                       <ArrowUpRight size={14} />
                     </Link>
                     <Link to="/subscription">
-                      Manage membership <ArrowUpRight size={14} />
+                      My online access <ArrowUpRight size={14} />
                     </Link>
                   </div>
                 </div>

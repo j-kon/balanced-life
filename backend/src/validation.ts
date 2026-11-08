@@ -258,23 +258,64 @@ export const adminBulkOrderUpdateSchema = z.object({
   adminNotes: z.string().trim().max(3000).optional(),
 });
 
+const hhmmRegex = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 export const notificationPreferencesSchema = z.object({
+  notificationsEnabled: z.boolean().optional(),
   dailyReminderEnabled: z.boolean().optional(),
+  unreadReminderEnabled: z.boolean().optional(),
   reminderTime: z
     .string()
-    .regex(/^\d{2}:\d{2}$/, "Use HH:MM format.")
+    .regex(hhmmRegex, "Use HH:MM 24-hour format.")
     .optional(),
   timezone: z.string().trim().min(2).max(80).optional(),
+  quietHoursStart: z
+    .string()
+    .regex(hhmmRegex, "Use HH:MM 24-hour format.")
+    .optional(),
+  quietHoursEnd: z
+    .string()
+    .regex(hhmmRegex, "Use HH:MM 24-hour format.")
+    .optional(),
   subscriptionAlertsEnabled: z.boolean().optional(),
   purchaseAlertsEnabled: z.boolean().optional(),
 });
 
-export const pushSubscriptionSchema = z.object({
-  endpoint: z.url().max(2000),
-  p256dhKey: z.string().trim().min(8).max(500),
-  authKey: z.string().trim().min(4).max(500),
-  userAgent: z.string().trim().max(500).optional(),
-});
+export const pushSubscriptionSchema = z
+  .object({
+    endpoint: z.url().max(2000),
+    p256dhKey: z.string().trim().min(8).max(500).optional(),
+    authKey: z.string().trim().min(4).max(500).optional(),
+    p256dh: z.string().trim().min(8).max(500).optional(),
+    auth: z.string().trim().min(4).max(500).optional(),
+    keys: z
+      .object({
+        p256dh: z.string().trim().min(8).max(500),
+        auth: z.string().trim().min(4).max(500),
+      })
+      .optional(),
+    userAgent: z.string().trim().max(500).optional(),
+    deviceLabel: z.string().trim().max(80).optional(),
+  })
+  .transform((val, ctx) => {
+    const p256dhKey =
+      val.p256dhKey || val.p256dh || val.keys?.p256dh || "";
+    const authKey = val.authKey || val.auth || val.keys?.auth || "";
+    if (!p256dhKey || !authKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Push subscription keys (p256dh and auth) are required.",
+      });
+      return z.NEVER;
+    }
+    return {
+      endpoint: val.endpoint,
+      p256dhKey,
+      authKey,
+      userAgent: val.userAgent || "",
+      deviceLabel: val.deviceLabel,
+    };
+  });
 
 export const complimentaryGrantSchema = z.object({
   planId: z.number().int().positive(),

@@ -9,10 +9,10 @@ import * as schema from "./schema.js";
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 export const DEFAULT_PLANS = [
-  { name: "Monthly", months: 1, amountKobo: 100000, active: true },
-  { name: "Quarterly", months: 3, amountKobo: 270000, active: true },
-  { name: "Six months", months: 6, amountKobo: 480000, active: true },
-  { name: "Yearly", months: 12, amountKobo: 850000, active: true },
+  { name: "Monthly", months: 1, amountKobo: 100000, active: false },
+  { name: "Quarterly", months: 3, amountKobo: 270000, active: false },
+  { name: "Six months", months: 6, amountKobo: 480000, active: false },
+  { name: "Yearly", months: 12, amountKobo: 850000, active: false },
 ] as const;
 
 export const DEFAULT_MONTHLY_THEMES = [
@@ -160,7 +160,7 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   bankTransferEnabled: "false",
   bankAccountsJson: JSON.stringify(DEFAULT_BANK_ACCOUNTS),
   allowRegistration: "true",
-  enableAutoRenewal: "true",
+  enableAutoRenewal: "false",
   renewalReminderDays: "7",
 };
 

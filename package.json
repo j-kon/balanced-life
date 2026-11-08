@@ -14,6 +14,9 @@
     "db:migrate": "npm run db:migrate -w backend",
     "admin:create": "npm run admin:create -w backend --",
     "import:manuscript": "npm run import:manuscript -w backend --",
+    "notifications:run": "npm run notifications:run -w backend --",
+    "notifications:worker": "npm run notifications:worker -w backend --",
+    "push:generate-vapid": "npm run push:generate-vapid -w backend",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

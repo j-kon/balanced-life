@@ -74,10 +74,15 @@ export const defaultConfig: AppConfig = {
   payments: {
     configured: false,
     provider: "paystack",
+    mode: "unconfigured",
     publicKey: null,
   },
   email: {
     configured: false,
+  },
+  webPush: {
+    configured: false,
+    publicKey: null,
   },
 };
 

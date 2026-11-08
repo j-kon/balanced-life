@@ -19,101 +19,28 @@ import {
   Users,
 } from "lucide-react";
 import { useApp } from "../../context/AppContext";
-import { useData } from "../../hooks/useData";
 import { Cover, ErrorBox, Loading } from "../../components/Common";
 import { api, money } from "../../api";
 import type {
   BankAccountSetting,
   DigitalEntitlementRecord,
   DigitalPurchaseRecord,
-  Plan,
 } from "../../types";
 
 export function PricingSection({ embedded = false }: { embedded?: boolean }) {
-  const { data, error } = useData<Plan[]>("/plans");
   const { config } = useApp();
-
-  return (
-    <section
-      className={embedded ? "pricing-section section" : "container section"}
-    >
-      <div className={embedded ? "container" : ""}>
-        <div className="center-heading">
-          <span className="eyebrow">Digital Membership Plans</span>
-          <h2>
-            {embedded
-              ? "A rhythm that fits your life."
-              : "Choose your membership."}
-          </h2>
-          <p>
-            Every membership unlocks all published 2027 devotionals, your
-            private Growth Journal, 5-step daily accountability, bookmarks, and
-            reading progress tracking.
-          </p>
-          <div className="actions" style={{ justifyContent: "center" }}>
-            <span className="pill">
-              2027 Edition · Provisional membership plans
-            </span>
-            <Link className="text-link" to="/digital-edition">
-              Prefer a one-time purchase? Get the 2027 Digital Copy (
-              {money(config.settings.digitalEditionPriceKobo)}){" "}
-              <ArrowUpRight size={15} />
-            </Link>
-          </div>
-        </div>
-        <ErrorBox message={error} />
-        {!data && !error ? (
-          <Loading />
-        ) : (
-          <div className="plans">
-            {data?.map((p) => (
-              <article
-                className={"plan " + (p.months === 12 ? "featured" : "")}
-                key={p.id}
-              >
-                {p.months === 12 && (
-                  <div className="plan-ribbon">
-                    Full year of intentional growth
-                  </div>
-                )}
-                <h3>{p.name}</h3>
-                <div className="price">{money(p.amountKobo)}</div>
-                <p>for {p.months === 1 ? "one month" : p.months + " months"}</p>
-                <ul>
-                  <li>
-                    <Check size={16} /> All published 2027 devotionals
-                  </li>
-                  <li>
-                    <Check size={16} /> Private Growth Journal &amp; 5-step
-                    accountability
-                  </li>
-                  <li>
-                    <Check size={16} /> Bookmarks &amp; reading progress
-                  </li>
-                </ul>
-                <Link
-                  className={"button " + (p.months === 12 ? "" : "outline")}
-                  to={"/checkout/" + p.id}
-                >
-                  Choose {p.name.toLowerCase()} <ArrowRight size={16} />
-                </Link>
-              </article>
-            ))}
-          </div>
-        )}
-        <p className="fine-print">
-          {config.payments.configured
-            ? "Secure online payments are processed via Paystack in Nigerian Naira (NGN)."
-            : "Online Paystack checkout is currently awaiting production merchant credentials. Registered readers may also purchase the Digital Edition when enabled or receive administrator-granted complimentary access."}
-        </p>
+  return <section id="get-your-copy" className={embedded ? "pricing-section section" : "container section"}>
+    <div className={embedded ? "container" : ""}>
+      <div className="center-heading"><span className="eyebrow">Choose your reading experience</span><h2>One devotional. Two ways to grow.</h2><p>Keep the printed book close, or carry your daily reading on your phone.</p></div>
+      <div className="purchase-options">
+        <article className="panel purchase-option"><ShoppingBag size={26}/><h3>Printed book</h3><div className="price">{money(config.settings.hardcoverPriceKobo)}</div><p>One hardcover copy of the 2027 devotional.</p><ul className="check-list"><li><Check size={16}/>All 365 daily readings in print</li><li><Check size={16}/>Scripture, reflections and prayers</li><li><Check size={16}/>Delivery arranged with Cossy Teens Consult</li></ul><Link className="button outline" to="/bookstore">Get the printed book <ArrowRight size={16}/></Link></article>
+        <article className="panel purchase-option featured-option"><BookOpen size={26}/><h3>Online reading access</h3><div className="price">{money(config.settings.digitalEditionPriceKobo)}</div><p>One payment for the full 2027 edition. No monthly renewal.</p><ul className="check-list"><li><Check size={16}/>All published 2027 readings, including those added later</li><li><Check size={16}/>Your private journal, bookmarks and progress</li><li><Check size={16}/>Read on Android, iPhone, tablet or computer</li></ul><Link className="button" to="/digital-edition">Get online access <ArrowRight size={16}/></Link></article>
       </div>
-    </section>
-  );
+      <p className="fine-print">The printed book and online access are separate purchases. Online access covers the 2027 edition; future editions are not included.</p>
+    </div>
+  </section>;
 }
-
-export function PricingPage() {
-  return <PricingSection embedded={false} />;
-}
+export function PricingPage() { return <PricingSection/>; }
 
 type DigitalEditionResponse = {
   entitlement: DigitalEntitlementRecord | null;
@@ -145,9 +72,7 @@ export function DigitalEditionPage() {
   const [loading, setLoading] = useState(Boolean(user));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [transferCurrency, setTransferCurrency] = useState<
-    "NGN" | "USD" | "GBP"
-  >("NGN");
+  const transferCurrency = "NGN";
   const [transferRef, setTransferRef] = useState("");
   const [payerNote, setPayerNote] = useState("");
   const [proofInput, setProofInput] = useState<Record<number, string>>({});
@@ -203,14 +128,14 @@ export function DigitalEditionPage() {
           <Cover />
         </div>
         <div>
-          <span className="eyebrow">One-Time Digital Edition Purchase</span>
+          <span className="eyebrow">Read on your phone</span>
           <h1>
-            The 2027 Digital
+            Your 2027
             <br />
-            Edition.
+            online access.
           </h1>
           <p className="lead">
-            {config.settings.siteTitle} · Persistent Online Edition
+            {config.settings.siteTitle} · Online reading · 2027 edition
           </p>
           <div className="actions">
             <span className="pill">
@@ -224,7 +149,7 @@ export function DigitalEditionPage() {
           <p>{config.settings.digitalEditionNote}</p>
 
           <div className="panel stack" style={{ marginTop: "20px" }}>
-            <h3>What your Digital Copy includes</h3>
+            <h3>Everything you need for your daily reading</h3>
             <ul className="check-list">
               <li>
                 <CheckCircle2 size={16} /> Persistent online reading access to
@@ -240,8 +165,7 @@ export function DigitalEditionPage() {
                 bookmarks across phone, tablet, and computer
               </li>
               <li>
-                <CheckCircle2 size={16} /> Protected in-app reading (to protect
-                author copyright, unrestricted PDF downloads are not provided)
+                <CheckCircle2 size={16} /> Read in the app with your account on any device
               </li>
             </ul>
           </div>
@@ -254,7 +178,7 @@ export function DigitalEditionPage() {
             <div className="panel stack">
               <h3>Sign in or create an account to purchase</h3>
               <p>
-                Your 2027 Digital Edition entitlement is linked directly to your
+                Your online reading access is linked to your
                 personal reader account so you can read on any device.
               </p>
               <div className="actions">
@@ -298,7 +222,7 @@ export function DigitalEditionPage() {
               {/* OPTION 1: PAYSTACK ONLINE CHECKOUT */}
               <div className="panel stack">
                 <div className="section-title" style={{ margin: 0 }}>
-                  <h3>Option 1: Instant Online Checkout (Paystack)</h3>
+                  <h3>Secure payment</h3>
                   <CreditCard size={20} />
                 </div>
                 {config.payments.configured ? (
@@ -343,7 +267,7 @@ export function DigitalEditionPage() {
                     >
                       {busy
                         ? "Connecting to Paystack…"
-                        : `Buy Digital Copy via Paystack · ${money(priceKobo)}`}{" "}
+                        : `Get online access · ${money(priceKobo)}`}{" "}
                       <ArrowRight size={17} />
                     </button>
                   </>
@@ -351,11 +275,9 @@ export function DigitalEditionPage() {
                   <div className="notice">
                     <AlertCircle size={20} />
                     <div>
-                      <strong>Paystack online checkout is not yet enabled</strong>
+                      <strong>Online checkout is not available yet</strong>
                       <p>
-                        Live/test Paystack keys (<code>PAYSTACK_SECRET_KEY</code>
-                        ) are not yet configured in this environment. No fake or
-                        unverified payments are generated.
+                        Online payments are not available yet. Please contact us for help getting access; no payment has been taken.
                       </p>
                     </div>
                   </div>
@@ -367,7 +289,7 @@ export function DigitalEditionPage() {
                 <div className="panel stack">
                   <div className="section-title" style={{ margin: 0 }}>
                     <h3>
-                      Option 2: Direct Bank Transfer (Admin Reconciliation)
+                      Pay by bank transfer
                     </h3>
                     <Landmark size={20} />
                   </div>
@@ -381,7 +303,7 @@ export function DigitalEditionPage() {
                     </strong>
                   </p>
                   <div className="bank-accounts-grid">
-                    {config.settings.bankAccounts.map((acc) => (
+                    {config.settings.bankAccounts.filter(acc => acc.currency === "NGN").map((acc) => (
                       <div className="bank-account-card" key={acc.currency}>
                         <span className="pill">{acc.label}</span>
                         <strong>{acc.bankName}</strong>
@@ -419,21 +341,7 @@ export function DigitalEditionPage() {
                     }}
                   >
                     <div className="form-row-2">
-                      <label>
-                        Account currency used
-                        <select
-                          value={transferCurrency}
-                          onChange={(e) =>
-                            setTransferCurrency(
-                              e.target.value as "NGN" | "USD" | "GBP",
-                            )
-                          }
-                        >
-                          <option value="NGN">NGN — Naira Account</option>
-                          <option value="USD">USD — Dollar Account</option>
-                          <option value="GBP">GBP — Pound Account</option>
-                        </select>
-                      </label>
+
                       <label>
                         Transfer reference / session ID
                         <input
@@ -624,9 +532,7 @@ export function BookstorePage() {
             <strong>Ordering for a School, Church, Youth Group, or Family?</strong>
             <p>
               {config.settings.bulkDiscountNote}{" "}
-              <Link className="text-link" to="/bulk-orders">
-                Use the Dedicated Bulk Order Form <ArrowRight size={15} />
-              </Link>
+              
             </p>
           </div>
         </div>
@@ -640,7 +546,7 @@ export function BookstorePage() {
               administrator before dispatch.
             </p>
             <div className="bank-accounts-grid">
-              {config.settings.bankAccounts.map((acc) => (
+              {config.settings.bankAccounts.filter(acc => acc.currency === "NGN").map((acc) => (
                 <div className="bank-account-card" key={acc.currency}>
                   <span className="pill">{acc.label}</span>
                   <strong>{acc.bankName}</strong>

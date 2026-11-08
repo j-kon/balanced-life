@@ -9,7 +9,10 @@
     "admin:create": "node --import tsx scripts/create-admin.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "lint": "tsc --noEmit && eslint src tests scripts",
-    "import:manuscript": "node --import tsx scripts/import-manuscript.ts"
+    "import:manuscript": "node --import tsx scripts/import-manuscript.ts",
+    "notifications:run": "node --import tsx scripts/run-notifications.ts",
+    "notifications:worker": "node --import tsx scripts/run-notifications.ts --watch",
+    "push:generate-vapid": "node --import tsx scripts/run-notifications.ts --generate-vapid"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.0",
@@ -20,11 +23,13 @@
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.6.0",
     "pdfjs-dist": "^6.5.438",
+    "web-push": "^4.0.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.10.0",
+    "@types/web-push": "^3.6.4",
     "tsx": "^4.20.0"
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, Route, Routes, useLocation } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { CheckCircle2, ChevronRight, X } from "lucide-react";
 import { api } from "./api";
 import type { AppConfig, User } from "./types";
@@ -15,7 +15,6 @@ import {
 } from "./pages/public/AboutPages";
 import {
   BookstorePage,
-  BulkOrdersPage,
   ContactPage,
   DigitalEditionPage,
   PricingPage,
@@ -31,7 +30,6 @@ import { LibraryPage } from "./pages/reader/LibraryPage";
 import { ReadingPage, SamplePage } from "./pages/reader/ReadingPage";
 import { JournalPage } from "./pages/reader/JournalPage";
 import {
-  CheckoutPage,
   SubscriptionPage,
 } from "./pages/reader/SubscriptionPage";
 import { AccountPage } from "./pages/reader/AccountPage";
@@ -110,7 +108,7 @@ export default function App() {
             <Route path="/pricing" element={<PricingPage />} />
             <Route path="/digital-edition" element={<DigitalEditionPage />} />
             <Route path="/bookstore" element={<BookstorePage />} />
-            <Route path="/bulk-orders" element={<BulkOrdersPage />} />
+            <Route path="/bulk-orders" element={<Navigate to="/contact" replace />} />
             <Route path="/contact" element={<ContactPage />} />
             <Route path="/privacy" element={<PrivacyPage />} />
             <Route path="/terms" element={<TermsPage />} />
@@ -183,7 +181,7 @@ export default function App() {
               path="/checkout/:id"
               element={
                 <Protected>
-                  <CheckoutPage />
+                  <Navigate to="/digital-edition" replace />
                 </Protected>
               }
             />

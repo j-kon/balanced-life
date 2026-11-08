@@ -8,7 +8,6 @@ import {
   LogOut,
   PenLine,
   Shield,
-  ShoppingBag,
   UserCheck,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
@@ -41,16 +40,9 @@ export const readerLinks = [
     icon: PenLine,
   },
   {
-    to: "/digital-edition",
-    label: "2027 Digital Edition",
-    shortLabel: "Edition",
-    icon: ShoppingBag,
-    desktopOnly: true,
-  },
-  {
     to: "/subscription",
-    label: "Membership",
-    shortLabel: "Plan",
+    label: "My online access",
+    shortLabel: "Access",
     icon: CreditCard,
   },
   {
@@ -113,14 +105,12 @@ export function ReaderShell({ children }: { children: ReactNode }) {
         {children}
       </div>
       <nav className="mobile-bottom" aria-label="Mobile reader navigation">
-        {readerLinks
-          .filter((l) => !l.desktopOnly)
-          .map(({ to, label, shortLabel, icon: Icon }) => (
-            <NavLink key={to} to={to} aria-label={label}>
-              <Icon size={20} />
-              <span>{shortLabel}</span>
-            </NavLink>
-          ))}
+        {readerLinks.map(({ to, label, shortLabel, icon: Icon }) => (
+          <NavLink key={to} to={to} aria-label={label}>
+            <Icon size={20} />
+            <span>{shortLabel}</span>
+          </NavLink>
+        ))}
       </nav>
     </div>
   );

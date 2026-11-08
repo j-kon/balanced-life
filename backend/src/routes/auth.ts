@@ -21,6 +21,7 @@ import {
   resetPasswordSchema,
 } from "../validation.js";
 import { getAppSettings } from "../services/settings.js";
+import { createNotificationEvent } from "../services/notifications.js";
 import type { EmailService } from "../services/email.js";
 
 export function registerAuthRoutes(
@@ -247,14 +248,24 @@ export function registerAuthRoutes(
       throw new HttpError(401, "Your current password is incorrect.");
     }
 
+    const now = new Date().toISOString();
     const newHash = await hashPassword(input.newPassword);
     db.update(s.users)
       .set({
         passwordHash: newHash,
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
       })
       .where(eq(s.users.id, currentUser.id))
       .run();
+
+    createNotificationEvent(store, {
+      userId: currentUser.id,
+      category: "account",
+      title: "Account Password Updated",
+      body: "Your Balanced Life Devotional account password was changed.",
+      actionUrl: "/account",
+      dedupeKey: `pwd_change_${currentUser.id}_${now.slice(0, 16)}`,
+    });
 
     return { ok: true };
   });

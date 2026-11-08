@@ -22,12 +22,9 @@ export function Header() {
         >
           <NavLink to="/about">The devotional</NavLink>
           <NavLink to="/about-author">The author</NavLink>
-          <NavLink to="/themes">Monthly themes</NavLink>
           <NavLink to="/library">Library</NavLink>
-          <NavLink to="/digital-edition">Digital Edition</NavLink>
-          <NavLink to="/pricing">Membership</NavLink>
+          <NavLink to="/pricing">Get access</NavLink>
           <NavLink to="/bookstore">Printed Book</NavLink>
-          <NavLink to="/bulk-orders">Bulk Orders</NavLink>
           <NavLink to="/contact">Contact</NavLink>
           {user?.role === "admin" && (
             <NavLink to="/admin">Author's desk</NavLink>
@@ -84,10 +81,9 @@ export function Footer() {
           <Link to="/about">About the devotional</Link>
           <Link to="/about-author">About the author</Link>
           <Link to="/themes">2027 themes</Link>
-          <Link to="/digital-edition">Digital Edition</Link>
-          <Link to="/pricing">Membership</Link>
+          <Link to="/digital-edition">Online access · ₦3,500</Link>
+          <Link to="/install">Install the app</Link>
           <Link to="/bookstore">Printed Book</Link>
-          <Link to="/bulk-orders">Bulk Orders</Link>
           <Link to="/contact">Contact</Link>
           <Link to="/privacy">Privacy policy</Link>
           <Link to="/terms">Terms of use</Link>

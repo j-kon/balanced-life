@@ -27,6 +27,7 @@ export type PaymentVerificationResult = {
 export interface PaymentProvider {
   readonly name: "paystack";
   readonly configured: boolean;
+  readonly mode?: "test" | "live" | "unconfigured";
   readonly publicKey: string | null;
   initializeTransaction(
     input: PaymentInitializeInput,
@@ -38,18 +39,27 @@ export interface PaymentProvider {
 export class PaystackPaymentProvider implements PaymentProvider {
   readonly name = "paystack" as const;
   readonly configured: boolean;
+  readonly mode: "test" | "live" | "unconfigured";
   readonly publicKey: string | null;
   private readonly secretKey: string;
+  private readonly webhookSecret: string;
   private readonly baseUrl: string;
 
   constructor(options: {
     secretKey?: string;
     publicKey?: string | null;
+    webhookSecret?: string | null;
     baseUrl?: string;
   }) {
     this.secretKey = options.secretKey?.trim() || "";
+    this.webhookSecret = options.webhookSecret?.trim() || this.secretKey;
     this.publicKey = options.publicKey?.trim() || null;
     this.configured = Boolean(this.secretKey);
+    this.mode = !this.configured
+      ? "unconfigured"
+      : this.secretKey.startsWith("sk_live_")
+        ? "live"
+        : "test";
     this.baseUrl = options.baseUrl || "https://api.paystack.co";
   }
 
@@ -163,8 +173,8 @@ export class PaystackPaymentProvider implements PaymentProvider {
   }
 
   verifyWebhookSignature(rawBody: string, signature?: string): boolean {
-    if (!this.configured || !signature) return false;
-    const expected = createHmac("sha512", this.secretKey)
+    if (!this.webhookSecret || !signature) return false;
+    const expected = createHmac("sha512", this.webhookSecret)
       .update(rawBody)
       .digest("hex");
     const expectedBuf = Buffer.from(expected, "utf8");

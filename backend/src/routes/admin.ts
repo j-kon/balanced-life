@@ -31,12 +31,18 @@ import {
   updateBulkOrderAdmin,
 } from "../services/commerce.js";
 import type { PaymentProvider } from "../services/payments.js";
+import {
+  LiveWebPushProvider,
+  runNotificationWorkerCycle,
+  type WebPushProvider,
+} from "../services/notifications.js";
 
 export function registerAdminRoutes(
   app: FastifyInstance,
   prefix: string,
   store: Store,
   paymentProvider: PaymentProvider,
+  pushProvider: WebPushProvider = new LiveWebPushProvider({}),
 ) {
   const { db, sqlite } = store;
 
@@ -654,5 +660,19 @@ export function registerAdminRoutes(
     audit(user.id, "Updated application and organization settings");
     return settings;
   });
+
+  app.post(
+    prefix + "/admin/notifications/run-worker",
+    { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const admin = requireAdmin(req);
+      const result = await runNotificationWorkerCycle(store, pushProvider);
+      audit(
+        admin.id,
+        `Executed notification worker cycle (generated: ${result.generatedCount}, sent: ${result.sentEvents})`,
+      );
+      return { ok: true, result };
+    },
+  );
 }
 

@@ -265,11 +265,19 @@ export const notificationPreferences = sqliteTable("notification_preferences", {
   userId: integer("user_id")
     .primaryKey()
     .references(() => users.id, { onDelete: "cascade" }),
+  notificationsEnabled: integer("notifications_enabled", { mode: "boolean" })
+    .notNull()
+    .default(true),
   dailyReminderEnabled: integer("daily_reminder_enabled", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  unreadReminderEnabled: integer("unread_reminder_enabled", { mode: "boolean" })
     .notNull()
     .default(false),
   reminderTime: text("reminder_time").notNull().default("06:30"),
   timezone: text("timezone").notNull().default("Africa/Lagos"),
+  quietHoursStart: text("quiet_hours_start").notNull().default("22:00"),
+  quietHoursEnd: text("quiet_hours_end").notNull().default("05:00"),
   subscriptionAlertsEnabled: integer("subscription_alerts_enabled", {
     mode: "boolean",
   })
@@ -279,6 +287,7 @@ export const notificationPreferences = sqliteTable("notification_preferences", {
     .notNull()
     .default(true),
   lastDailyReminderDate: text("last_daily_reminder_date"),
+  lastUnreadReminderDate: text("last_unread_reminder_date"),
   lastExpiryReminderFor: text("last_expiry_reminder_for"),
   updatedAt: text("updated_at").notNull(),
 });
@@ -292,6 +301,11 @@ export const pushSubscriptions = sqliteTable("push_subscriptions", {
   p256dhKey: text("p256dh_key").notNull(),
   authKey: text("auth_key").notNull(),
   userAgent: text("user_agent").notNull().default(""),
+  deviceLabel: text("device_label").notNull().default("Browser Device"),
+  status: text("status").notNull().default("active"),
+  failureCount: integer("failure_count").notNull().default(0),
+  lastError: text("last_error").notNull().default(""),
+  lastSuccessAt: text("last_success_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -306,8 +320,29 @@ export const notificationEvents = sqliteTable("notification_events", {
   body: text("body").notNull(),
   actionUrl: text("action_url").notNull().default("/dashboard"),
   dedupeKey: text("dedupe_key").notNull().unique(),
+  pushStatus: text("push_status").notNull().default("pending"),
+  deliveryAttempts: integer("delivery_attempts").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(3),
+  nextAttemptAt: text("next_attempt_at"),
+  lockedUntil: text("locked_until"),
+  lastError: text("last_error").notNull().default(""),
+  pushSentAt: text("push_sent_at"),
   readAt: text("read_at"),
   createdAt: text("created_at").notNull(),
+});
+
+export const notificationDeliveries = sqliteTable("notification_deliveries", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  notificationEventId: integer("notification_event_id")
+    .notNull()
+    .references(() => notificationEvents.id, { onDelete: "cascade" }),
+  pushSubscriptionId: integer("push_subscription_id")
+    .notNull()
+    .references(() => pushSubscriptions.id, { onDelete: "cascade" }),
+  status: text("status").notNull(),
+  statusCode: integer("status_code"),
+  errorMessage: text("error_message").notNull().default(""),
+  deliveredAt: text("delivered_at").notNull(),
 });
 
 export const auditLogs = sqliteTable("admin_audit_logs", {

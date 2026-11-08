@@ -13,6 +13,11 @@ import {
   type PaymentProvider,
 } from "./services/payments.js";
 import { WebhookEmailService, type EmailService } from "./services/email.js";
+import {
+  LiveWebPushProvider,
+  runNotificationWorkerCycle,
+  type WebPushProvider,
+} from "./services/notifications.js";
 import { registerPublicRoutes } from "./routes/public.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerReaderRoutes } from "./routes/reader.js";
@@ -23,6 +28,7 @@ export type BuildAppOptions = {
   environment?: string;
   paymentProvider?: PaymentProvider;
   emailService?: EmailService;
+  pushProvider?: WebPushProvider;
 };
 
 export async function buildApp(options: BuildAppOptions = {}) {
@@ -38,6 +44,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     new PaystackPaymentProvider({
       secretKey: env.paystack.secretKey,
       publicKey: env.paystack.publicKey,
+      webhookSecret: env.paystack.webhookSecret,
     });
 
   const emailService =
@@ -45,6 +52,14 @@ export async function buildApp(options: BuildAppOptions = {}) {
     new WebhookEmailService({
       webhookUrl: env.email.webhookUrl,
       from: env.email.from,
+    });
+
+  const pushProvider =
+    options.pushProvider ||
+    new LiveWebPushProvider({
+      publicKey: env.webPush.publicKey,
+      privateKey: env.webPush.privateKey,
+      subject: env.webPush.subject,
     });
 
   const app = Fastify({
@@ -118,18 +133,46 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   app.setErrorHandler(handleError);
 
+  let schedulerTimer: ReturnType<typeof setInterval> | null = null;
+  if (env.scheduler.enabled && environment !== "test") {
+    schedulerTimer = setInterval(() => {
+      runNotificationWorkerCycle(store, pushProvider).catch(() => {
+        // Logged via notification_events.last_error
+      });
+    }, env.scheduler.intervalMs);
+    schedulerTimer.unref?.();
+  }
+
   app.addHook("onClose", async () => {
+    if (schedulerTimer) {
+      clearInterval(schedulerTimer);
+      schedulerTimer = null;
+    }
     sqlite.close();
   });
 
   const prefix = "/api/v1";
-  registerPublicRoutes(app, prefix, store, paymentProvider, emailService);
+  registerPublicRoutes(
+    app,
+    prefix,
+    store,
+    paymentProvider,
+    emailService,
+    pushProvider,
+  );
   registerAuthRoutes(app, prefix, store, emailService, {
     isProduction,
     appOrigin: env.appOrigin,
   });
-  registerReaderRoutes(app, prefix, store, paymentProvider, env.appOrigin);
-  registerAdminRoutes(app, prefix, store, paymentProvider);
+  registerReaderRoutes(
+    app,
+    prefix,
+    store,
+    paymentProvider,
+    env.appOrigin,
+    pushProvider,
+  );
+  registerAdminRoutes(app, prefix, store, paymentProvider, pushProvider);
 
   return app;
 }

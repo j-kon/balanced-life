@@ -294,6 +294,15 @@ export function revokeSubscriptionAccess(
       })
       .run();
 
+    createNotificationEvent(store, {
+      userId: targetUserId,
+      category: "account",
+      title: "Membership Access Updated",
+      body: `Your membership access was revoked by an administrator${reason ? ` (${reason})` : ""}.`,
+      actionUrl: "/subscription",
+      dedupeKey: `sub_revoked_${targetUserId}_${now.slice(0, 16)}`,
+    });
+
     return getSubscriptionDetails(store, targetUserId);
   })();
 }

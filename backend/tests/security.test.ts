@@ -56,7 +56,7 @@ test("expired memberships and sessions are denied; unconfigured Paystack safely 
       403,
     );
 
-    // Unconfigured Paystack must return 503 and record 0 payments
+    // Retired recurring checkout returns 410; unconfigured Paystack on digital purchase returns 503 and records 0 purchases
     assert.equal(
       (
         await app.inject({
@@ -69,12 +69,29 @@ test("expired memberships and sessions are denied; unconfigured Paystack safely 
           },
         })
       ).statusCode,
+      410,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/digital-purchases/checkout",
+          headers,
+          payload: {
+            paymentMethod: "paystack",
+          },
+        })
+      ).statusCode,
       503,
     );
     const paymentCount = store.sqlite
       .prepare("SELECT count(*) AS n FROM payments")
       .get() as { n: number };
     assert.equal(paymentCount.n, 0);
+    const purchaseCount = store.sqlite
+      .prepare("SELECT count(*) AS n FROM digital_purchases")
+      .get() as { n: number };
+    assert.equal(purchaseCount.n, 0);
 
     // Expired session is rejected
     store.sqlite

@@ -1,6 +1,14 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { Bell, CheckCircle2, Smartphone, UserCheck } from "lucide-react";
+import {
+  Bell,
+  CheckCircle2,
+  Clock,
+  Send,
+  Smartphone,
+  Trash2,
+  UserCheck,
+} from "lucide-react";
 import { useApp } from "../../context/AppContext";
 import { useData } from "../../hooks/useData";
 import { ErrorBox, Loading } from "../../components/Common";
@@ -8,13 +16,69 @@ import { api } from "../../api";
 import type {
   NotificationEventRecord,
   NotificationPreferences,
+  PushDeviceRecord,
 } from "../../types";
 
 type NotificationsData = {
   preferences: NotificationPreferences;
+  supportedTimezones: string[];
+  webPush: {
+    configured: boolean;
+    publicKey: string | null;
+  };
   pushSubscriptionsCount: number;
+  devices: PushDeviceRecord[];
   events: NotificationEventRecord[];
 };
+
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+function arrayBufferToBase64Url(buffer: ArrayBuffer | null): string {
+  if (!buffer) return "";
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window
+    .btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function detectDeviceLabel(): string {
+  if (typeof navigator === "undefined") return "Web Browser";
+  const ua = navigator.userAgent || "";
+  if (/iPhone|iPad|iPod/i.test(ua)) return "iPhone / iPad (iOS)";
+  if (/Android/i.test(ua)) return "Android Device";
+  if (/Macintosh/i.test(ua)) return "Mac Browser";
+  if (/Windows/i.test(ua)) return "Windows Browser";
+  if (/Linux/i.test(ua)) return "Linux Browser";
+  return "Web Browser";
+}
+
+function isIosRequiresStandalone(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return false;
+  }
+  const ua = navigator.userAgent || "";
+  const isIos = /iPad|iPhone|iPod/.test(ua);
+  if (!isIos) return false;
+  const isStandalone =
+    window.matchMedia?.("(display-mode: standalone)").matches ||
+    (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  return !isStandalone;
+}
 
 export function AccountPage() {
   const { user, refresh, toast } = useApp();
@@ -26,11 +90,46 @@ export function AccountPage() {
   const [profileError, setProfileError] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [selectedTimezone, setSelectedTimezone] = useState<string>("");
+  const [currentEndpoint, setCurrentEndpoint] = useState<string | null>(null);
   const [browserPermission, setBrowserPermission] = useState<string>(() =>
     typeof window !== "undefined" && "Notification" in window
       ? window.Notification.permission
       : "unsupported",
   );
+
+  useEffect(() => {
+    if (notifData?.preferences?.timezone && !selectedTimezone) {
+      setSelectedTimezone(notifData.preferences.timezone);
+    }
+  }, [notifData?.preferences?.timezone, selectedTimezone]);
+
+  useEffect(() => {
+    let active = true;
+    async function inspectCurrentPushSubscription() {
+      if (
+        typeof window === "undefined" ||
+        !("serviceWorker" in navigator) ||
+        !("PushManager" in window)
+      ) {
+        return;
+      }
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        const sub = await reg?.pushManager?.getSubscription();
+        if (active && sub?.endpoint) {
+          setCurrentEndpoint(sub.endpoint);
+        }
+      } catch {
+        // Ignore in environments without active service worker
+      }
+    }
+    inspectCurrentPushSubscription();
+    return () => {
+      active = false;
+    };
+  }, [notifData?.pushSubscriptionsCount]);
 
   async function saveProfile(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -83,8 +182,15 @@ export function AccountPage() {
       await api(
         "/me/notifications/preferences",
         {
+          notificationsEnabled: f.get("notificationsEnabled") === "on",
           dailyReminderEnabled: f.get("dailyReminderEnabled") === "on",
+          unreadReminderEnabled: f.get("unreadReminderEnabled") === "on",
           reminderTime: String(f.get("reminderTime") || "06:30"),
+          timezone: String(
+            selectedTimezone || f.get("timezone") || "Africa/Lagos",
+          ),
+          quietHoursStart: String(f.get("quietHoursStart") || "22:00"),
+          quietHoursEnd: String(f.get("quietHoursEnd") || "05:30"),
           subscriptionAlertsEnabled:
             f.get("subscriptionAlertsEnabled") === "on",
           purchaseAlertsEnabled: f.get("purchaseAlertsEnabled") === "on",
@@ -100,23 +206,163 @@ export function AccountPage() {
     }
   }
 
-  async function requestDeviceNotifications() {
+  async function subscribeCurrentDevice() {
+    if (isIosRequiresStandalone()) {
+      toast(
+        "On iPhone/iPad, tap Share → Add to Home Screen first, then enable push notifications from the installed app.",
+      );
+      return;
+    }
     if (typeof window === "undefined" || !("Notification" in window)) {
       toast("Browser notifications are not supported on this device.");
       return;
     }
+
+    setPushBusy(true);
     try {
-      const result = await window.Notification.requestPermission();
-      setBrowserPermission(result);
-      if (result === "granted") {
-        toast("Device notification permission granted.");
-      } else {
-        toast(`Notification permission status: ${result}.`);
+      const permission = await window.Notification.requestPermission();
+      setBrowserPermission(permission);
+      if (permission !== "granted") {
+        toast(`Notification permission status: ${permission}.`);
+        return;
       }
-    } catch (e) {
-      toast((e as Error).message);
+
+      const vapidPublicKey = notifData?.webPush?.publicKey;
+      let endpoint = "";
+      let p256dh = "";
+      let auth = "";
+
+      if (
+        "serviceWorker" in navigator &&
+        "PushManager" in window &&
+        vapidPublicKey
+      ) {
+        const registration = await navigator.serviceWorker.ready;
+        let sub = await registration.pushManager.getSubscription();
+        if (!sub) {
+          const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey);
+          sub = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey:
+              applicationServerKey.buffer as ArrayBuffer,
+          });
+        }
+        endpoint = sub.endpoint;
+        p256dh = arrayBufferToBase64Url(sub.getKey("p256dh"));
+        auth = arrayBufferToBase64Url(sub.getKey("auth"));
+      } else {
+        throw new Error(
+          !vapidPublicKey
+            ? "Browser permission granted. Server VAPID keys are not configured yet for background push subscription."
+            : "PushManager or Service Worker is not available in this browser.",
+        );
+      }
+
+      await api("/me/notifications/push-subscribe", {
+        endpoint,
+        p256dh,
+        auth,
+        userAgent: navigator.userAgent,
+        deviceLabel: detectDeviceLabel(),
+      });
+      setCurrentEndpoint(endpoint);
+      reloadNotifs();
+      toast("This device is now subscribed to Web Push notifications.");
+    } catch (err) {
+      toast((err as Error).message);
+    } finally {
+      setPushBusy(false);
     }
   }
+
+  async function unsubscribeCurrentDevice() {
+    setPushBusy(true);
+    try {
+      let endpointToRemove = currentEndpoint;
+      if ("serviceWorker" in navigator && "PushManager" in window) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        const sub = await reg?.pushManager?.getSubscription();
+        if (sub) {
+          endpointToRemove = sub.endpoint;
+          await sub.unsubscribe();
+        }
+      }
+      if (endpointToRemove) {
+        await api("/me/notifications/push-unsubscribe", {
+          endpoint: endpointToRemove,
+        });
+      }
+      setCurrentEndpoint(null);
+      reloadNotifs();
+      toast("This device has been unsubscribed from push notifications.");
+    } catch (err) {
+      toast((err as Error).message);
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function removeRegisteredDevice(device: PushDeviceRecord) {
+    setPushBusy(true);
+    try {
+      if (currentEndpoint && device.endpoint === currentEndpoint) {
+        await unsubscribeCurrentDevice();
+        return;
+      }
+      await api(
+        `/me/notifications/devices/${device.id}`,
+        undefined,
+        "DELETE",
+      );
+      reloadNotifs();
+      toast(`Removed ${device.deviceLabel || "device"} from push notifications.`);
+    } catch (err) {
+      toast((err as Error).message);
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function sendTestNotification() {
+    setPushBusy(true);
+    try {
+      const res = await api<{
+        eventId: number;
+        webPushConfigured: boolean;
+        activeDevicesCount: number;
+        deliveredCount: number;
+        message: string;
+      }>("/me/notifications/test", {});
+      reloadNotifs();
+      toast(res.message);
+    } catch (err) {
+      toast((err as Error).message);
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  function detectBrowserTimezone() {
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) {
+        setSelectedTimezone(tz);
+        toast(`Detected timezone: ${tz}`);
+      }
+    } catch {
+      toast("Unable to detect timezone automatically.");
+    }
+  }
+
+  const activeDevices =
+    notifData?.devices?.filter((d) => d.status === "active") || [];
+  const iosRequiresInstall = isIosRequiresStandalone();
+  const timezoneOptions = Array.from(
+    new Set([
+      ...(notifData?.supportedTimezones || ["Africa/Lagos", "UTC"]),
+      selectedTimezone || notifData?.preferences?.timezone || "Africa/Lagos",
+    ]),
+  );
 
   return (
     <>
@@ -216,10 +462,25 @@ export function AccountPage() {
                 <Bell size={22} />
               </div>
               <p>
-                Configure battery-conscious daily devotional reminders and
-                important account alerts. Reminders are deduplicated so you
-                never receive duplicate alerts on the same day.
+                Configure battery-conscious daily devotional reminders, timezone
+                scheduling, quiet hours, and important account alerts. Reminders
+                are evaluated by the background scheduler and deduplicated per
+                day.
               </p>
+
+              <label className="check-label">
+                <input
+                  type="checkbox"
+                  name="notificationsEnabled"
+                  defaultChecked={
+                    notifData.preferences.notificationsEnabled ?? true
+                  }
+                />
+                <span>
+                  <strong>Enable notifications &amp; reminders</strong> (master
+                  switch for this account)
+                </span>
+              </label>
 
               <label className="check-label">
                 <input
@@ -232,14 +493,86 @@ export function AccountPage() {
                 </span>
               </label>
 
-              <label>
-                Preferred daily reminder time
+              <label className="check-label">
                 <input
-                  type="time"
-                  name="reminderTime"
-                  defaultValue={notifData.preferences.reminderTime || "06:30"}
+                  type="checkbox"
+                  name="unreadReminderEnabled"
+                  defaultChecked={
+                    notifData.preferences.unreadReminderEnabled ?? false
+                  }
                 />
+                <span>
+                  Send an evening reminder (6:30 PM local time) if today&apos;s
+                  devotional is still unread
+                </span>
               </label>
+
+              <div className="two-col" style={{ gap: "12px" }}>
+                <label>
+                  Preferred daily reminder time
+                  <input
+                    type="time"
+                    name="reminderTime"
+                    defaultValue={notifData.preferences.reminderTime || "06:30"}
+                  />
+                </label>
+
+                <label>
+                  <span>
+                    Your timezone{" "}
+                    <button
+                      type="button"
+                      className="text-link"
+                      style={{ marginLeft: "6px", fontSize: "0.85rem" }}
+                      onClick={detectBrowserTimezone}
+                    >
+                      Detect automatically
+                    </button>
+                  </span>
+                  <select
+                    name="timezone"
+                    value={
+                      selectedTimezone ||
+                      notifData.preferences.timezone ||
+                      "Africa/Lagos"
+                    }
+                    onChange={(e) => setSelectedTimezone(e.target.value)}
+                  >
+                    {timezoneOptions.map((tz) => (
+                      <option key={tz} value={tz}>
+                        {tz}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="two-col" style={{ gap: "12px" }}>
+                <label>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                    <Clock size={14} /> Quiet hours start
+                  </span>
+                  <input
+                    type="time"
+                    name="quietHoursStart"
+                    defaultValue={
+                      notifData.preferences.quietHoursStart || "22:00"
+                    }
+                  />
+                </label>
+                <label>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                    <Clock size={14} /> Quiet hours end
+                  </span>
+                  <input
+                    type="time"
+                    name="quietHoursEnd"
+                    defaultValue={
+                      notifData.preferences.quietHoursEnd || "05:30"
+                    }
+                  />
+                </label>
+              </div>
 
               <label className="check-label">
                 <input
@@ -267,26 +600,118 @@ export function AccountPage() {
 
               <div className="notice">
                 <Smartphone size={18} />
-                <div>
+                <div style={{ flex: 1 }}>
                   <strong>
-                    Device Notification Permission: {browserPermission}
+                    Push Notification Status:{" "}
+                    {iosRequiresInstall
+                      ? "Install to iOS Home Screen required"
+                      : browserPermission === "granted"
+                        ? currentEndpoint
+                          ? "Subscribed on this device"
+                          : "Permission granted (ready to subscribe)"
+                        : browserPermission === "denied"
+                          ? "Blocked in browser settings"
+                          : browserPermission === "unsupported"
+                            ? "Unsupported by this browser"
+                            : "Permission not yet requested"}
                   </strong>
                   <p>
-                    On Android Chrome and installed iOS 16.4+ Home Screen web
-                    apps, you can grant browser notification permission for
-                    system alerts.
+                    {iosRequiresInstall
+                      ? "On iPhone and iPad (iOS 16.4+), Safari requires adding The Balanced Life to your Home Screen before Web Push permissions can be granted."
+                      : browserPermission === "denied"
+                        ? "Notifications are currently blocked in your browser site settings. Re-enable notifications for this site in your browser settings to subscribe."
+                        : notifData.webPush?.configured
+                          ? `Web Push delivery is active (${activeDevices.length} registered device${activeDevices.length === 1 ? "" : "s"}).`
+                          : "In-app notifications are active. Configure server VAPID keys in production to enable background Web Push delivery."}
                   </p>
-                  {browserPermission === "default" && (
+                  <div
+                    className="actions"
+                    style={{ marginTop: "8px", flexWrap: "wrap", gap: "10px" }}
+                  >
+                    {!iosRequiresInstall &&
+                      browserPermission !== "unsupported" &&
+                      browserPermission !== "denied" && (
+                        <button
+                          type="button"
+                          className="button small outline"
+                          disabled={pushBusy}
+                          onClick={subscribeCurrentDevice}
+                        >
+                          {currentEndpoint
+                            ? "Refresh device push subscription"
+                            : "Enable push on this device"}
+                        </button>
+                      )}
+                    {currentEndpoint && (
+                      <button
+                        type="button"
+                        className="text-link"
+                        disabled={pushBusy}
+                        onClick={unsubscribeCurrentDevice}
+                      >
+                        Unsubscribe this device
+                      </button>
+                    )}
                     <button
                       type="button"
-                      className="text-link"
-                      onClick={requestDeviceNotifications}
+                      className="button small outline"
+                      disabled={
+                        pushBusy || !notifData.preferences.notificationsEnabled
+                      }
+                      onClick={sendTestNotification}
                     >
-                      Request device notification permission
+                      <Send size={14} /> Send test notification
                     </button>
-                  )}
+                  </div>
                 </div>
               </div>
+
+              {activeDevices.length > 0 && (
+                <div className="stack" style={{ gap: "8px" }}>
+                  <strong>
+                    Registered Push Devices ({activeDevices.length})
+                  </strong>
+                  {activeDevices.map((dev) => (
+                    <div
+                      key={dev.id}
+                      className="notice"
+                      style={{
+                        padding: "10px 12px",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <div>
+                        <strong>{dev.deviceLabel || "Browser Device"}</strong>
+                        {currentEndpoint === dev.endpoint && (
+                          <span
+                            className="pill"
+                            style={{ marginLeft: "8px", fontSize: "0.75rem" }}
+                          >
+                            This device
+                          </span>
+                        )}
+                        <p className="muted" style={{ margin: "2px 0 0" }}>
+                          Registered{" "}
+                          {new Date(dev.createdAt).toLocaleDateString("en-GB")}
+                          {dev.lastSuccessAt
+                            ? ` · Last push delivered ${new Date(dev.lastSuccessAt).toLocaleDateString("en-GB")}`
+                            : ""}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="text-link"
+                        disabled={pushBusy}
+                        onClick={() => removeRegisteredDevice(dev)}
+                        title="Remove device"
+                      >
+                        <Trash2 size={15} /> Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <button className="button" disabled={busy}>
                 Save reminder preferences
@@ -312,6 +737,9 @@ export function AccountPage() {
                         <div className="actions" style={{ marginTop: "6px" }}>
                           <small>
                             {new Date(ev.createdAt).toLocaleDateString("en-GB")}
+                            {ev.deliveryStatus
+                              ? ` · ${ev.deliveryStatus.replace(/_/g, " ")}`
+                              : ""}
                           </small>
                           <Link className="text-link" to={ev.actionUrl}>
                             Open
@@ -338,8 +766,8 @@ export function AccountPage() {
                 </div>
               ) : (
                 <p className="muted">
-                  No notifications yet. Enable daily reminders or complete a
-                  purchase to see alerts here.
+                  No notifications yet. Enable daily reminders, send a test
+                  notification, or complete a purchase to see alerts here.
                 </p>
               )}
             </div>

@@ -87,7 +87,7 @@ export function TermsPage() {
         school or youth ministry use. Unrestricted PDF downloads, scraping, or
         commercial redistribution of the manuscript are strictly prohibited.
       </p>
-      <h2>2. One-Time Digital Edition Purchase vs. Recurring Memberships</h2>
+      <h2>2. Online Access and the Printed Book</h2>
       <p>
         We offer distinct ways to access {config.settings.siteTitle}:
       </p>
@@ -100,19 +100,7 @@ export function TermsPage() {
         recurring billing and does not include future annual editions unless
         explicitly stated.
       </p>
-      <p>
-        <strong>b) Digital Membership Plans:</strong> Recurring or fixed-term
-        subscriptions (Monthly, Quarterly, Six Months, or Yearly) unlock online
-        access for the duration of the selected plan. You may select manual or
-        automatic renewal and may cancel future renewals at any time while
-        retaining access through your current expiration date.
-      </p>
-      <p>
-        <strong>c) Printed Copy ({money(config.settings.hardcoverPriceKobo)}) &amp; Bulk Orders:</strong>{" "}
-        Physical book inquiries and institutional bulk orders for schools,
-        churches, and youth groups are coordinated and fulfilled by{" "}
-        {config.settings.organizationName}.
-      </p>
+      <p><strong>b) Printed book ({money(config.settings.hardcoverPriceKobo)}):</strong> One physical copy, ordered separately from online reading access. Delivery arrangements are confirmed by {config.settings.organizationName}.</p>
       <h2>3. Payment Verification, Refunds &amp; Access Revocation</h2>
       <p>
         Online Paystack transactions activate entitlements only after cryptographic
@@ -131,7 +119,7 @@ export function TermsPage() {
       </p>
       <h2>5. Contact Information</h2>
       <p>
-        Questions regarding these terms, digital purchases, or bulk orders may
+        Questions regarding these terms, online access, or printed book orders may
         be directed to <strong>{config.settings.organizationName}</strong> at{" "}
         <strong>{config.settings.contactEmail}</strong> or{" "}
         <strong>{config.settings.contactPhone}</strong>.

@@ -22,6 +22,7 @@ import {
 } from "../services/commerce.js";
 import type { PaymentProvider } from "../services/payments.js";
 import type { EmailService } from "../services/email.js";
+import type { WebPushProvider } from "../services/notifications.js";
 
 export function formatEntryMetadata(
   store: Store,
@@ -96,6 +97,7 @@ export function registerPublicRoutes(
   store: Store,
   paymentProvider: PaymentProvider,
   emailService: EmailService,
+  pushProvider?: WebPushProvider,
 ) {
   const { db } = store;
 
@@ -138,23 +140,24 @@ export function registerPublicRoutes(
       },
       payments: {
         configured: paymentProvider.configured,
+        mode:
+          paymentProvider.mode ||
+          (paymentProvider.configured ? "test" : "unconfigured"),
         provider: paymentProvider.name,
         publicKey: paymentProvider.publicKey,
       },
       email: {
         configured: emailService.configured,
       },
+      webPush: {
+        configured: Boolean(pushProvider?.configured),
+        publicKey: pushProvider?.publicKey || null,
+      },
     };
   });
 
-  app.get(prefix + "/plans", async () =>
-    db
-      .select()
-      .from(s.plans)
-      .where(eq(s.plans.active, true))
-      .orderBy(s.plans.months)
-      .all(),
-  );
+  // Kept as an empty compatibility endpoint; recurring plans are no longer sold.
+  app.get(prefix + "/plans", async () => []);
 
   app.get(prefix + "/themes", async () => {
     const themes = db
