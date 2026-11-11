@@ -24,7 +24,7 @@
     if (themeColorMeta) {
       themeColorMeta.setAttribute("content", isDark ? "#1a1114" : "#570008");
     }
-  } catch (err) {
+  } catch {
     // Ignore restricted storage environments; CSS media queries still apply.
   }
 })();

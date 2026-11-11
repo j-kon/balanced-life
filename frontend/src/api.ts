@@ -26,48 +26,52 @@ export const daysUntil2027 = (currentDate: string) => {
 
 const inflightGets = new Map<string, Promise<unknown>>();
 
+async function executeRequest<T>(
+  path: string,
+  body: unknown,
+  method: string,
+): Promise<T> {
+  const res = await fetch("/api/v1" + path, {
+    method,
+    credentials: "same-origin",
+    headers:
+      body === undefined
+        ? {}
+        : {
+            "Content-Type": "application/json",
+            "X-Requested-With": "BalancedLife",
+          },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || "Something went wrong. Please try again.");
+  }
+  return data as T;
+}
+
 export async function api<T = any>(
   path: string,
   body?: unknown,
   method = body === undefined ? "GET" : "POST",
 ): Promise<T> {
-  if (method === "GET" && body === undefined) {
+  const normalizedMethod = method.toUpperCase();
+  if (normalizedMethod === "GET" && body === undefined) {
     const existing = inflightGets.get(path);
     if (existing) {
-      return existing as Promise<T>;
+      return (await existing) as T;
     }
-  }
 
-  const requestPromise = (async () => {
-    const res = await fetch("/api/v1" + path, {
-      method,
-      credentials: "same-origin",
-      headers:
-        body === undefined
-          ? {}
-          : {
-              "Content-Type": "application/json",
-              "X-Requested-With": "BalancedLife",
-            },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(
-        data.message || "Something went wrong. Please try again.",
-      );
-    }
-    return data as T;
-  })();
-
-  if (method === "GET" && body === undefined) {
+    const requestPromise = executeRequest<T>(path, body, normalizedMethod);
     inflightGets.set(path, requestPromise);
-    requestPromise.finally(() => {
+    try {
+      return await requestPromise;
+    } finally {
       if (inflightGets.get(path) === requestPromise) {
         inflightGets.delete(path);
       }
-    });
+    }
   }
 
-  return requestPromise;
+  return executeRequest<T>(path, body, normalizedMethod);
 }
