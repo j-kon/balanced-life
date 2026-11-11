@@ -2,10 +2,15 @@ import { and, desc, eq, inArray, lte, or, sql } from "drizzle-orm";
 import * as webpush from "web-push";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
-import { publicUser } from "../auth.js";
+import { logAdminAudit, publicUser, type AdminActor } from "../auth.js";
 import { getSubscriptionDetails, hasPremiumAccess } from "./subscriptions.js";
 import { getUserDigitalEntitlement } from "./commerce.js";
 import { getAppSettings } from "./settings.js";
+import {
+  getReaderAccessSummary,
+  userMatchesAudienceSegment,
+  type ReaderAudienceSegment,
+} from "./access.js";
 import { HttpError } from "../errors.js";
 
 export const SUPPORTED_TIMEZONES = [
@@ -36,8 +41,40 @@ export type NotificationCategory =
   | "subscription"
   | "digital_purchase"
   | "printed_order"
+  | "announcement"
   | "account"
   | "system";
+
+export const ALLOWED_NOTIFICATION_PATH_PREFIXES = [
+  "/dashboard",
+  "/library",
+  "/read/",
+  "/journal",
+  "/saved",
+  "/subscription",
+  "/digital-edition",
+  "/bookstore",
+  "/account",
+  "/notifications",
+  "/install",
+  "/sample",
+  "/contact",
+  "/themes",
+  "/about",
+  "/pricing",
+] as const;
+
+export function isSafeInternalActionUrl(rawUrl: string): boolean {
+  const url = String(rawUrl || "").trim();
+  if (!url.startsWith("/") || url.startsWith("//")) return false;
+  if (/[\s<>'"\\]/.test(url)) return false;
+  const lower = url.toLowerCase();
+  if (lower.includes("javascript:") || lower.includes("data:")) return false;
+  const basePath = url.split("?")[0].split("#")[0];
+  return ALLOWED_NOTIFICATION_PATH_PREFIXES.some(
+    (prefix) => basePath === prefix || basePath.startsWith(prefix),
+  );
+}
 
 export type SafePushPayload = {
   title: string;
@@ -140,14 +177,17 @@ const SENSITIVE_PATTERNS = [
   /sk_test_[a-zA-Z0-9]+/i,
   /password_hash/i,
   /balanced_session/i,
+  /balanced_admin_session/i,
 ];
 
 export function sanitizePushPayload(input: SafePushPayload): SafePushPayload {
   const title = String(input.title || "The Balanced Life Devotional")
+    .replace(/[<>]/g, "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120);
   const body = String(input.body || "")
+    .replace(/[<>]/g, "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 240);
@@ -161,8 +201,7 @@ export function sanitizePushPayload(input: SafePushPayload): SafePushPayload {
   }
 
   const rawUrl = String(input.actionUrl || "/dashboard").trim();
-  const actionUrl =
-    rawUrl.startsWith("/") && !rawUrl.startsWith("//") ? rawUrl : "/dashboard";
+  const actionUrl = isSafeInternalActionUrl(rawUrl) ? rawUrl : "/dashboard";
 
   return {
     title,
@@ -284,6 +323,7 @@ export type NotificationPrefs = {
   quietHoursEnd: string;
   subscriptionAlertsEnabled: boolean;
   purchaseAlertsEnabled: boolean;
+  announcementsEnabled: boolean;
   lastDailyReminderDate: string | null;
   lastUnreadReminderDate: string | null;
   lastExpiryReminderFor: string | null;
@@ -318,6 +358,7 @@ export function getNotificationPreferences(
       quietHoursEnd: "05:00",
       subscriptionAlertsEnabled: true,
       purchaseAlertsEnabled: true,
+      announcementsEnabled: false,
       updatedAt: now,
     })
     .returning()
@@ -337,6 +378,7 @@ export function updateNotificationPreferences(
     quietHoursEnd: string;
     subscriptionAlertsEnabled: boolean;
     purchaseAlertsEnabled: boolean;
+    announcementsEnabled: boolean;
   }>,
 ): NotificationPrefs {
   const current = getNotificationPreferences(store, userId);
@@ -346,8 +388,10 @@ export function updateNotificationPreferences(
   const now = new Date().toISOString();
   const nextNotificationsEnabled =
     updates.notificationsEnabled ?? current.notificationsEnabled;
+  const nextAnnouncementsEnabled =
+    updates.announcementsEnabled ?? current.announcementsEnabled;
 
-  // If the user disables notifications overall, mark any pending optional events as skipped
+  // If the user disables notifications overall, mark any pending events as skipped for push
   if (!nextNotificationsEnabled) {
     store.db
       .update(s.notificationEvents)
@@ -358,6 +402,21 @@ export function updateNotificationPreferences(
       .where(
         and(
           eq(s.notificationEvents.userId, userId),
+          eq(s.notificationEvents.pushStatus, "pending"),
+        ),
+      )
+      .run();
+  } else if (!nextAnnouncementsEnabled) {
+    store.db
+      .update(s.notificationEvents)
+      .set({
+        pushStatus: "skipped",
+        lastError: "Optional announcements opted out by user.",
+      })
+      .where(
+        and(
+          eq(s.notificationEvents.userId, userId),
+          eq(s.notificationEvents.category, "announcement"),
           eq(s.notificationEvents.pushStatus, "pending"),
         ),
       )
@@ -380,6 +439,7 @@ export function updateNotificationPreferences(
         updates.subscriptionAlertsEnabled ?? current.subscriptionAlertsEnabled,
       purchaseAlertsEnabled:
         updates.purchaseAlertsEnabled ?? current.purchaseAlertsEnabled,
+      announcementsEnabled: nextAnnouncementsEnabled,
       updatedAt: now,
     })
     .where(eq(s.notificationPreferences.userId, userId))
@@ -530,32 +590,45 @@ export function createNotificationEvent(
     actionUrl?: string;
     dedupeKey: string;
     respectPreferences?: boolean;
+    campaignId?: number | null;
+    createdByAdminId?: number | null;
   },
 ) {
   const prefs = getNotificationPreferences(store, input.userId);
   const checkPrefs = input.respectPreferences !== false;
+  const isEssentialAccountNotice =
+    input.category === "account" || input.category === "system";
 
   if (checkPrefs) {
-    if (!prefs.notificationsEnabled) {
-      return null;
-    }
-    if (input.category === "daily_reminder" && !prefs.dailyReminderEnabled) {
-      return null;
-    }
-    if (input.category === "unread_reminder" && !prefs.unreadReminderEnabled) {
-      return null;
-    }
-    if (
-      input.category === "subscription" &&
-      !prefs.subscriptionAlertsEnabled
-    ) {
-      return null;
-    }
-    if (
-      input.category === "digital_purchase" &&
-      !prefs.purchaseAlertsEnabled
-    ) {
-      return null;
+    if (input.category === "announcement") {
+      if (!prefs.notificationsEnabled || !prefs.announcementsEnabled) {
+        return null;
+      }
+    } else if (!isEssentialAccountNotice) {
+      if (!prefs.notificationsEnabled) {
+        return null;
+      }
+      if (input.category === "daily_reminder" && !prefs.dailyReminderEnabled) {
+        return null;
+      }
+      if (
+        input.category === "unread_reminder" &&
+        !prefs.unreadReminderEnabled
+      ) {
+        return null;
+      }
+      if (
+        input.category === "subscription" &&
+        !prefs.subscriptionAlertsEnabled
+      ) {
+        return null;
+      }
+      if (
+        input.category === "digital_purchase" &&
+        !prefs.purchaseAlertsEnabled
+      ) {
+        return null;
+      }
     }
   }
 
@@ -568,6 +641,12 @@ export function createNotificationEvent(
     timestamp: new Date().toISOString(),
   });
 
+  const cleanBody = String(input.body || "")
+    .replace(/[<>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 600);
+
   const now = new Date().toISOString();
   const inserted = store.db
     .insert(s.notificationEvents)
@@ -575,10 +654,15 @@ export function createNotificationEvent(
       userId: input.userId,
       category: input.category,
       title: safe.title,
-      body: safe.body,
+      body: cleanBody || safe.body,
       actionUrl: safe.actionUrl,
       dedupeKey: input.dedupeKey,
+      campaignId: input.campaignId ?? null,
+      createdByAdminId: input.createdByAdminId ?? null,
       pushStatus: prefs.notificationsEnabled ? "pending" : "skipped",
+      lastError: prefs.notificationsEnabled
+        ? ""
+        : "Push notifications disabled; delivered in-app only.",
       deliveryAttempts: 0,
       maxAttempts: 3,
       createdAt: now,
@@ -1211,17 +1295,712 @@ export async function dispatchPendingPushNotifications(
   };
 }
 
+export function validateAdminNotificationPayload(input: {
+  targetType: "individual" | "all" | "segment";
+  targetSegment?: ReaderAudienceSegment;
+  targetUserId?: number;
+  category: "announcement" | "account" | "system" | "subscription";
+  title: string;
+  body: string;
+  actionUrl: string;
+  scheduledFor?: string | null;
+}) {
+  const rawTitle = String(input.title || "").trim();
+  const rawBody = String(input.body || "").trim();
+  const rawUrl = String(input.actionUrl || "/dashboard").trim();
+
+  if (/[<>]/.test(rawTitle) || /[<>]/.test(rawBody)) {
+    throw new HttpError(
+      400,
+      "Untrusted HTML tags or angle brackets are not allowed in notification titles or messages.",
+    );
+  }
+  for (const pattern of SENSITIVE_PATTERNS) {
+    if (pattern.test(rawTitle) || pattern.test(rawBody)) {
+      throw new HttpError(
+        400,
+        "Notification content must not contain credentials or private tokens.",
+      );
+    }
+  }
+  if (!isSafeInternalActionUrl(rawUrl)) {
+    throw new HttpError(
+      400,
+      "Notification destination must be a safe internal app route (e.g. /dashboard, /library, /digital-edition, or /account).",
+    );
+  }
+  if (input.targetType === "individual" && !input.targetUserId) {
+    throw new HttpError(
+      400,
+      "Select a target reader account for an individual notification.",
+    );
+  }
+  if (input.targetType === "segment" && !input.targetSegment) {
+    throw new HttpError(
+      400,
+      "Select an audience segment (free, pending_payment, scheduled, active, expired, or revoked).",
+    );
+  }
+
+  let scheduledForIso: string | null = null;
+  if (input.scheduledFor && input.scheduledFor.trim()) {
+    const parsed = new Date(input.scheduledFor.trim());
+    if (Number.isNaN(parsed.getTime())) {
+      throw new HttpError(400, "Scheduled delivery time must be a valid ISO date.");
+    }
+    scheduledForIso = parsed.toISOString();
+  }
+
+  const effectiveCategory: "announcement" | "account" | "system" | "subscription" =
+    input.targetType === "individual" ? input.category : "announcement";
+
+  return {
+    title: rawTitle.replace(/\s+/g, " ").slice(0, 120),
+    body: rawBody.replace(/\s+/g, " ").slice(0, 600),
+    actionUrl: rawUrl,
+    category: effectiveCategory,
+    scheduledFor: scheduledForIso,
+  };
+}
+
+export function searchNotificationReaders(
+  store: Store,
+  options: {
+    search?: string;
+    segment?: ReaderAudienceSegment | "all";
+    limit?: number;
+  } = {},
+) {
+  const readers = store.db
+    .select()
+    .from(s.users)
+    .where(and(eq(s.users.role, "reader"), eq(s.users.status, "active")))
+    .orderBy(desc(s.users.createdAt))
+    .all();
+
+  const searchLower = (options.search || "").trim().toLowerCase();
+  const limit = Math.min(Math.max(1, options.limit || 40), 100);
+  const nowIso = new Date().toISOString();
+
+  const rows: Array<{
+    id: number;
+    name: string;
+    email: string;
+    accessStatus: string;
+    notificationsEnabled: boolean;
+    announcementsEnabled: boolean;
+    pushDevicesCount: number;
+    createdAt: string;
+  }> = [];
+
+  for (const r of readers) {
+    if (
+      searchLower &&
+      !`${r.name} ${r.email}`.toLowerCase().includes(searchLower)
+    ) {
+      continue;
+    }
+    const pub = publicUser(r);
+    const access = getReaderAccessSummary(store, pub, nowIso);
+    if (
+      options.segment &&
+      options.segment !== "all" &&
+      !userMatchesAudienceSegment(access, options.segment)
+    ) {
+      continue;
+    }
+    const prefs = getNotificationPreferences(store, r.id);
+    const pushDevicesCount = getUserPushSubscriptionsCount(store, r.id);
+    rows.push({
+      id: r.id,
+      name: r.name,
+      email: r.email,
+      accessStatus: access.status,
+      notificationsEnabled: prefs.notificationsEnabled,
+      announcementsEnabled: prefs.announcementsEnabled,
+      pushDevicesCount,
+      createdAt: r.createdAt,
+    });
+    if (rows.length >= limit) break;
+  }
+
+  return rows;
+}
+
+function evaluateCampaignRecipients(
+  store: Store,
+  input: {
+    targetType: "individual" | "all" | "segment";
+    targetSegment?: ReaderAudienceSegment;
+    targetUserId?: number;
+    category: "announcement" | "account" | "system" | "subscription";
+  },
+) {
+  const nowIso = new Date().toISOString();
+  let matchedUsers: Array<typeof s.users.$inferSelect>;
+
+  if (input.targetType === "individual") {
+    const target = store.db
+      .select()
+      .from(s.users)
+      .where(eq(s.users.id, input.targetUserId!))
+      .get();
+    if (!target || target.role !== "reader" || target.status !== "active") {
+      throw new HttpError(
+        404,
+        "Active reader account not found for targeted notification.",
+      );
+    }
+    matchedUsers = [target];
+  } else {
+    const allReaders = store.db
+      .select()
+      .from(s.users)
+      .where(and(eq(s.users.role, "reader"), eq(s.users.status, "active")))
+      .orderBy(s.users.id)
+      .all();
+
+    if (input.targetType === "all") {
+      matchedUsers = allReaders;
+    } else {
+      matchedUsers = allReaders.filter((u) => {
+        const access = getReaderAccessSummary(store, publicUser(u), nowIso);
+        return userMatchesAudienceSegment(access, input.targetSegment!);
+      });
+    }
+  }
+
+  const requireAnnouncementConsent =
+    input.targetType !== "individual" || input.category === "announcement";
+
+  const eligible: Array<{
+    userId: number;
+    name: string;
+    accessStatus: string;
+    hasPushDevice: boolean;
+  }> = [];
+  let skippedOptOutCount = 0;
+
+  for (const u of matchedUsers) {
+    const prefs = getNotificationPreferences(store, u.id);
+    if (
+      requireAnnouncementConsent &&
+      (!prefs.notificationsEnabled || !prefs.announcementsEnabled)
+    ) {
+      skippedOptOutCount++;
+      continue;
+    }
+    const access = getReaderAccessSummary(store, publicUser(u), nowIso);
+    eligible.push({
+      userId: u.id,
+      name: u.name,
+      accessStatus: access.status,
+      hasPushDevice: getUserPushSubscriptionsCount(store, u.id) > 0,
+    });
+  }
+
+  return {
+    totalMatchedReaders: matchedUsers.length,
+    eligible,
+    skippedOptOutCount,
+    subscribedPushReadersCount: eligible.filter((e) => e.hasPushDevice).length,
+  };
+}
+
+export function previewNotificationCampaign(
+  store: Store,
+  input: {
+    targetType: "individual" | "all" | "segment";
+    targetSegment?: ReaderAudienceSegment;
+    targetUserId?: number;
+    category: "announcement" | "account" | "system" | "subscription";
+    title: string;
+    body: string;
+    actionUrl: string;
+    scheduledFor?: string | null;
+  },
+) {
+  const sanitized = validateAdminNotificationPayload(input);
+  const audience = evaluateCampaignRecipients(store, {
+    targetType: input.targetType,
+    targetSegment: input.targetSegment,
+    targetUserId: input.targetUserId,
+    category: sanitized.category,
+  });
+
+  return {
+    totalMatchedReaders: audience.totalMatchedReaders,
+    eligibleCount: audience.eligible.length,
+    skippedOptOutCount: audience.skippedOptOutCount,
+    subscribedPushReadersCount: audience.subscribedPushReadersCount,
+    sampleRecipients: audience.eligible.slice(0, 5).map((r) => ({
+      id: r.userId,
+      name: r.name,
+      accessStatus: r.accessStatus,
+    })),
+    sanitized,
+  };
+}
+
+export function processNotificationCampaignQueue(
+  store: Store,
+  options: {
+    campaignId?: number;
+    batchSize?: number;
+    now?: Date;
+  } = {},
+): {
+  processedCampaigns: number;
+  enqueuedEvents: number;
+  skippedOptOuts: number;
+} {
+  const now = options.now || new Date();
+  const nowIso = now.toISOString();
+  const batchSize = Math.min(Math.max(1, options.batchSize ?? 100), 250);
+
+  // Promote any due scheduled campaigns into the active queue
+  store.db
+    .update(s.adminNotificationCampaigns)
+    .set({ status: "queued", updatedAt: nowIso })
+    .where(
+      and(
+        eq(s.adminNotificationCampaigns.status, "scheduled"),
+        lte(s.adminNotificationCampaigns.scheduledFor, nowIso),
+      ),
+    )
+    .run();
+
+  const dueCampaigns = store.db
+    .select()
+    .from(s.adminNotificationCampaigns)
+    .where(
+      options.campaignId
+        ? and(
+            eq(s.adminNotificationCampaigns.id, options.campaignId),
+            inArray(s.adminNotificationCampaigns.status, [
+              "queued",
+              "enqueueing",
+            ]),
+          )
+        : inArray(s.adminNotificationCampaigns.status, [
+            "queued",
+            "enqueueing",
+          ]),
+    )
+    .orderBy(s.adminNotificationCampaigns.id)
+    .all();
+
+  let enqueuedEvents = 0;
+  let skippedOptOuts = 0;
+
+  for (const campaign of dueCampaigns) {
+    for (;;) {
+      const pendingBatch = store.db
+        .select()
+        .from(s.adminNotificationCampaignRecipients)
+        .where(
+          and(
+            eq(s.adminNotificationCampaignRecipients.campaignId, campaign.id),
+            eq(s.adminNotificationCampaignRecipients.status, "pending"),
+          ),
+        )
+        .orderBy(s.adminNotificationCampaignRecipients.id)
+        .limit(batchSize)
+        .all();
+
+      if (pendingBatch.length === 0) {
+        break;
+      }
+
+      store.sqlite.transaction(() => {
+        store.db
+          .update(s.adminNotificationCampaigns)
+          .set({
+            status: "enqueueing",
+            startedAt: campaign.startedAt || nowIso,
+            updatedAt: nowIso,
+          })
+          .where(eq(s.adminNotificationCampaigns.id, campaign.id))
+          .run();
+
+        for (const rec of pendingBatch) {
+          const recipientUser = store.db
+            .select()
+            .from(s.users)
+            .where(eq(s.users.id, rec.userId))
+            .get();
+          if (
+            !recipientUser ||
+            recipientUser.role !== "reader" ||
+            recipientUser.status !== "active"
+          ) {
+            store.db
+              .update(s.adminNotificationCampaignRecipients)
+              .set({
+                status: "skipped",
+                skipReason: "Reader account unavailable",
+                updatedAt: nowIso,
+              })
+              .where(eq(s.adminNotificationCampaignRecipients.id, rec.id))
+              .run();
+            skippedOptOuts++;
+            continue;
+          }
+
+          const created = createNotificationEvent(store, {
+            userId: rec.userId,
+            category: campaign.category as NotificationCategory,
+            title: campaign.title,
+            body: campaign.body,
+            actionUrl: campaign.actionUrl,
+            dedupeKey: `admin_campaign_${campaign.id}_user_${rec.userId}`,
+            respectPreferences: true,
+            campaignId: campaign.id,
+            createdByAdminId: campaign.createdByAdminId,
+          });
+
+          if (!created) {
+            store.db
+              .update(s.adminNotificationCampaignRecipients)
+              .set({
+                status: "skipped",
+                skipReason: "User opted out of optional announcements",
+                updatedAt: nowIso,
+              })
+              .where(eq(s.adminNotificationCampaignRecipients.id, rec.id))
+              .run();
+            skippedOptOuts++;
+            continue;
+          }
+
+          store.db
+            .update(s.adminNotificationCampaignRecipients)
+            .set({
+              status: "enqueued",
+              notificationEventId: created.id,
+              updatedAt: nowIso,
+            })
+            .where(eq(s.adminNotificationCampaignRecipients.id, rec.id))
+            .run();
+          enqueuedEvents++;
+        }
+      })();
+
+      if (options.campaignId && pendingBatch.length < batchSize) {
+        break;
+      }
+    }
+
+    // Recompute exact counts on the durable campaign record from SQLite
+    const pendingCount = Number(
+      (
+        store.db
+          .select({ count: sql<number>`count(*)` })
+          .from(s.adminNotificationCampaignRecipients)
+          .where(
+            and(
+              eq(s.adminNotificationCampaignRecipients.campaignId, campaign.id),
+              eq(s.adminNotificationCampaignRecipients.status, "pending"),
+            ),
+          )
+          .get()?.count || 0
+      ),
+    );
+    const enqueuedCount = Number(
+      (
+        store.db
+          .select({ count: sql<number>`count(*)` })
+          .from(s.notificationEvents)
+          .where(eq(s.notificationEvents.campaignId, campaign.id))
+          .get()?.count || 0
+      ),
+    );
+
+    const isDone = pendingCount === 0;
+    store.db
+      .update(s.adminNotificationCampaigns)
+      .set({
+        status: isDone ? "completed" : "enqueueing",
+        queuedCount: enqueuedCount,
+        inAppCreatedCount: enqueuedCount,
+        completedAt: isDone ? nowIso : null,
+        updatedAt: nowIso,
+      })
+      .where(eq(s.adminNotificationCampaigns.id, campaign.id))
+      .run();
+  }
+
+  return {
+    processedCampaigns: dueCampaigns.length,
+    enqueuedEvents,
+    skippedOptOuts,
+  };
+}
+
+export function createAndQueueNotificationCampaign(
+  store: Store,
+  actor: AdminActor,
+  input: {
+    targetType: "individual" | "all" | "segment";
+    targetSegment?: ReaderAudienceSegment;
+    targetUserId?: number;
+    category: "announcement" | "account" | "system" | "subscription";
+    title: string;
+    body: string;
+    actionUrl: string;
+    scheduledFor?: string | null;
+    confirmed?: boolean;
+    idempotencyKey?: string;
+  },
+) {
+  if (input.targetType !== "individual" && !input.confirmed) {
+    throw new HttpError(
+      400,
+      "Explicit administrator confirmation is required before queuing a multi-reader broadcast.",
+    );
+  }
+
+  const sanitized = validateAdminNotificationPayload(input);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const key =
+    input.idempotencyKey?.trim() ||
+    `camp_${actor.id ?? 0}_${now.getTime()}_${sanitized.title.slice(0, 24).replace(/\W+/g, "_")}`;
+
+  const existingCampaign = store.db
+    .select()
+    .from(s.adminNotificationCampaigns)
+    .where(eq(s.adminNotificationCampaigns.idempotencyKey, key))
+    .get();
+  if (existingCampaign) {
+    return {
+      deduplicated: true,
+      campaign: formatCampaignSummary(store, existingCampaign),
+    };
+  }
+
+  const audience = evaluateCampaignRecipients(store, {
+    targetType: input.targetType,
+    targetSegment: input.targetSegment,
+    targetUserId: input.targetUserId,
+    category: sanitized.category,
+  });
+
+  const isFutureSchedule = Boolean(
+    sanitized.scheduledFor && sanitized.scheduledFor > nowIso,
+  );
+  const initialStatus = isFutureSchedule ? "scheduled" : "queued";
+
+  const createdCampaign = store.sqlite.transaction(() => {
+    const campaignRow = store.db
+      .insert(s.adminNotificationCampaigns)
+      .values({
+        createdByAdminId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        targetType: input.targetType,
+        targetSegment:
+          input.targetType === "segment" ? input.targetSegment || "" : "",
+        targetUserId:
+          input.targetType === "individual" ? input.targetUserId ?? null : null,
+        category: sanitized.category,
+        title: sanitized.title,
+        body: sanitized.body,
+        actionUrl: sanitized.actionUrl,
+        idempotencyKey: key,
+        status: initialStatus,
+        scheduledFor: sanitized.scheduledFor,
+        eligibleCount: audience.eligible.length,
+        skippedOptOutCount: audience.skippedOptOutCount,
+        queuedCount: 0,
+        inAppCreatedCount: 0,
+        confirmedByAdmin: Boolean(input.confirmed),
+        startedAt: null,
+        completedAt: null,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      })
+      .returning()
+      .get();
+
+    // Insert recipient queue rows in bounded SQLite chunks of 100
+    for (let i = 0; i < audience.eligible.length; i += 100) {
+      const chunk = audience.eligible.slice(i, i + 100);
+      for (const rec of chunk) {
+        store.db
+          .insert(s.adminNotificationCampaignRecipients)
+          .values({
+            campaignId: campaignRow.id,
+            userId: rec.userId,
+            status: "pending",
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })
+          .onConflictDoNothing()
+          .run();
+      }
+    }
+
+    const audienceDesc =
+      input.targetType === "individual"
+        ? `reader #${input.targetUserId}`
+        : input.targetType === "segment"
+          ? `segment:${input.targetSegment}`
+          : "all eligible opted-in readers";
+
+    logAdminAudit(
+      store,
+      actor,
+      `${isFutureSchedule ? "Scheduled" : "Queued"} ${sanitized.category} notification campaign #${campaignRow.id} to ${audienceDesc} ("${sanitized.title}", eligible: ${audience.eligible.length}, opted-out skipped: ${audience.skippedOptOutCount})`,
+      "notifications_campaign",
+      campaignRow.id,
+      nowIso,
+    );
+
+    return campaignRow;
+  })();
+
+  // For immediate sends, enqueue bounded DB batches right away so in-app alerts exist
+  // without performing blocking external Web Push HTTP calls inside the request handler.
+  if (!isFutureSchedule) {
+    processNotificationCampaignQueue(store, {
+      campaignId: createdCampaign.id,
+      batchSize: 100,
+      now,
+    });
+  }
+
+  const latest = store.db
+    .select()
+    .from(s.adminNotificationCampaigns)
+    .where(eq(s.adminNotificationCampaigns.id, createdCampaign.id))
+    .get()!;
+
+  return {
+    deduplicated: false,
+    campaign: formatCampaignSummary(store, latest),
+  };
+}
+
+export function formatCampaignSummary(
+  store: Store,
+  campaign: typeof s.adminNotificationCampaigns.$inferSelect,
+) {
+  const events = store.db
+    .select({
+      id: s.notificationEvents.id,
+      pushStatus: s.notificationEvents.pushStatus,
+      deliveryAttempts: s.notificationEvents.deliveryAttempts,
+      readAt: s.notificationEvents.readAt,
+    })
+    .from(s.notificationEvents)
+    .where(eq(s.notificationEvents.campaignId, campaign.id))
+    .all();
+
+  const inAppCreatedCount = events.length;
+  const pushAttempts = events.reduce(
+    (sum, ev) => sum + Number(ev.deliveryAttempts || 0),
+    0,
+  );
+  const pushProviderAccepted = events.filter(
+    (ev) => ev.pushStatus === "sent",
+  ).length;
+  const pushFailedOrSkipped = events.filter(
+    (ev) => ev.pushStatus === "failed" || ev.pushStatus === "skipped",
+  ).length;
+  const readCount = events.filter((ev) => Boolean(ev.readAt)).length;
+
+  return {
+    ...campaign,
+    queuedCount: campaign.queuedCount || inAppCreatedCount,
+    inAppCreatedCount,
+    pushAttempts,
+    pushProviderAccepted,
+    pushFailedOrSkipped,
+    readCount,
+  };
+}
+
+export function getAdminNotificationCampaigns(
+  store: Store,
+  options: { page?: number; limit?: number } = {},
+) {
+  const page = Math.max(1, options.page || 1);
+  const limit = Math.min(Math.max(1, options.limit || 20), 50);
+  const all = store.db
+    .select()
+    .from(s.adminNotificationCampaigns)
+    .orderBy(desc(s.adminNotificationCampaigns.createdAt))
+    .all();
+
+  const total = all.length;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const slice = all.slice((page - 1) * limit, page * limit);
+
+  return {
+    items: slice.map((c) => formatCampaignSummary(store, c)),
+    total,
+    page,
+    totalPages,
+  };
+}
+
+export function cancelAdminNotificationCampaign(
+  store: Store,
+  actor: AdminActor,
+  campaignId: number,
+) {
+  const existing = store.db
+    .select()
+    .from(s.adminNotificationCampaigns)
+    .where(eq(s.adminNotificationCampaigns.id, campaignId))
+    .get();
+  if (!existing) {
+    throw new HttpError(404, "Notification campaign not found.");
+  }
+  if (existing.status !== "scheduled") {
+    throw new HttpError(
+      400,
+      "Only scheduled campaigns that have not started can be cancelled.",
+    );
+  }
+  const nowIso = new Date().toISOString();
+  const updated = store.db
+    .update(s.adminNotificationCampaigns)
+    .set({ status: "cancelled", updatedAt: nowIso })
+    .where(eq(s.adminNotificationCampaigns.id, campaignId))
+    .returning()
+    .get();
+
+  logAdminAudit(
+    store,
+    actor,
+    `Cancelled scheduled notification campaign #${campaignId} ("${existing.title}")`,
+    "notifications_campaign",
+    campaignId,
+    nowIso,
+  );
+
+  return formatCampaignSummary(store, updated);
+}
+
 /**
  * Runs a full background notification worker pass across all active users:
- * 1. Evaluates scheduled reminders (Daily Devotional, Unread Devotional, Subscription Expiry)
+ * 1. Promotes due scheduled admin campaigns and enqueues recipient batches cleanly.
+ * 2. Evaluates scheduled reminders (Daily Devotional, Unread Devotional, Subscription Expiry)
  *    respecting each user's timezone, reminderTime, quiet hours, completion state, and access.
- * 2. Dispatches pending Web Push notifications with concurrency locks and retry limits.
+ * 3. Dispatches pending Web Push notifications with concurrency locks and retry limits.
  */
 export async function runNotificationWorkerCycle(
   store: Store,
   pushProvider: WebPushProvider,
   now: Date = new Date(),
 ) {
+  const campaignEnqueue = processNotificationCampaignQueue(store, {
+    batchSize: 100,
+    now,
+  });
+
   const activeUsers = store.db
     .select({ id: s.users.id })
     .from(s.users)
@@ -1236,12 +2015,14 @@ export async function runNotificationWorkerCycle(
 
   const delivery = await dispatchPendingPushNotifications(store, pushProvider, {
     now,
+    batchSize: 100,
   });
 
   return {
     evaluatedUsers: activeUsers.length,
     generatedCount: generatedKeys.length,
-    createdEvents: generatedKeys.length,
+    createdEvents: generatedKeys.length + campaignEnqueue.enqueuedEvents,
+    campaignEnqueuedEvents: campaignEnqueue.enqueuedEvents,
     generatedKeys,
     ...delivery,
   };
@@ -1317,18 +2098,51 @@ export async function sendUserTestNotification(
   };
 }
 
+export function getUnreadNotificationCount(store: Store, userId: number): number {
+  const row = store.db
+    .select({ count: sql<number>`count(*)` })
+    .from(s.notificationEvents)
+    .where(
+      and(
+        eq(s.notificationEvents.userId, userId),
+        sql`${s.notificationEvents.readAt} IS NULL`,
+      ),
+    )
+    .get();
+  return Number(row?.count || 0);
+}
+
 export function getUserNotifications(
   store: Store,
   userId: number,
-  limit = 30,
+  limitOrOptions: number | { limit?: number; filter?: "all" | "unread" } = 30,
 ) {
+  const limit =
+    typeof limitOrOptions === "number"
+      ? limitOrOptions
+      : limitOrOptions.limit || 50;
+  const filter =
+    typeof limitOrOptions === "object" ? limitOrOptions.filter || "all" : "all";
+
+  const condition =
+    filter === "unread"
+      ? and(
+          eq(s.notificationEvents.userId, userId),
+          sql`${s.notificationEvents.readAt} IS NULL`,
+        )
+      : eq(s.notificationEvents.userId, userId);
+
   return store.db
     .select()
     .from(s.notificationEvents)
-    .where(eq(s.notificationEvents.userId, userId))
-    .orderBy(desc(s.notificationEvents.createdAt))
+    .where(condition)
+    .orderBy(desc(s.notificationEvents.createdAt), desc(s.notificationEvents.id))
     .limit(limit)
-    .all();
+    .all()
+    .map((ev) => ({
+      ...ev,
+      deliveryStatus: ev.pushStatus,
+    }));
 }
 
 export function markNotificationRead(
@@ -1347,5 +2161,24 @@ export function markNotificationRead(
       ),
     )
     .run();
-  return { ok: true };
+  return { ok: true, unreadCount: getUnreadNotificationCount(store, userId) };
+}
+
+export function markAllNotificationsRead(store: Store, userId: number) {
+  const now = new Date().toISOString();
+  const res = store.db
+    .update(s.notificationEvents)
+    .set({ readAt: now })
+    .where(
+      and(
+        eq(s.notificationEvents.userId, userId),
+        sql`${s.notificationEvents.readAt} IS NULL`,
+      ),
+    )
+    .run();
+  return {
+    ok: true,
+    updated: res.changes,
+    unreadCount: 0,
+  };
 }

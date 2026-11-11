@@ -8,14 +8,19 @@ import {
   CheckCircle2,
   Download,
   Heart,
+  Lock,
+  Monitor,
+  Moon,
   PenLine,
   Share2,
   Smartphone,
   Sparkles,
+  Sun,
   TrendingUp,
   X,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
+import { useTheme, type ThemePreference } from "../context/ThemeContext";
 import { dateLabel, daysUntil2027 } from "../api";
 import type { Entry } from "../types";
 
@@ -92,12 +97,23 @@ export function Cover() {
   );
 }
 
-export function EntryCard({ entry }: { entry: Entry }) {
+export function EntryCard({
+  entry,
+  locked = false,
+}: {
+  entry: Entry;
+  locked?: boolean;
+}) {
   return (
-    <Link className="entry-card" to={"/read/" + entry.id}>
+    <Link
+      className={locked ? "entry-card locked" : "entry-card"}
+      to={"/read/" + entry.id}
+    >
       <div className="entry-top">
         <span>{dateLabel(entry.date)}</span>
-        {entry.completed ? (
+        {locked ? (
+          <Lock size={17} aria-label="Online access required" />
+        ) : entry.completed ? (
           <CheckCircle2 size={18} />
         ) : entry.saved ? (
           <Bookmark size={18} />
@@ -109,15 +125,66 @@ export function EntryCard({ entry }: { entry: Entry }) {
       <p>{entry.theme || "Daily devotional"}</p>
       <div className="entry-bottom">
         <span>
-          {entry.sample
-            ? "Free sample"
-            : entry.completed
-              ? "Completed"
-              : "Daily reading"}
+          {locked
+            ? "Locked · Online access required"
+            : entry.sample
+              ? "Free sample"
+              : entry.completed
+                ? "Completed"
+                : "Daily reading"}
         </span>
         <ArrowUpRight size={18} />
       </div>
     </Link>
+  );
+}
+
+export function ThemeSelector({
+  variant = "full",
+}: {
+  variant?: "full" | "compact";
+}) {
+  const { preference, systemTheme, setPreference } = useTheme();
+  const options: Array<{
+    value: ThemePreference;
+    label: string;
+    detail: string;
+    icon: typeof Sun;
+  }> = [
+    {
+      value: "system",
+      label: "System",
+      detail: `System (Currently ${systemTheme})`,
+      icon: Monitor,
+    },
+    { value: "light", label: "Light", detail: "Light", icon: Sun },
+    { value: "dark", label: "Dark", detail: "Dark", icon: Moon },
+  ];
+
+  return (
+    <div
+      className={
+        variant === "compact" ? "theme-selector compact" : "theme-selector"
+      }
+      role="group"
+      aria-label="Color theme preference"
+    >
+      {options.map(({ value, label, detail, icon: Icon }) => {
+        const active = preference === value;
+        return (
+          <button
+            key={value}
+            type="button"
+            className={active ? "theme-option active" : "theme-option"}
+            aria-pressed={active}
+            onClick={() => setPreference(value)}
+          >
+            <Icon size={variant === "compact" ? 15 : 17} />
+            <span>{variant === "compact" ? label : detail}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -207,6 +274,7 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 export function PwaInstallBanner() {
+  const { user } = useApp();
   const [deferredPrompt, setDeferredPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
   const [isStandalone, setIsStandalone] = useState(false);
@@ -247,7 +315,10 @@ export function PwaInstallBanner() {
     };
   }, []);
 
-  if (isStandalone || dismissed) return null;
+  // Wait until newly registered reader completes or dismisses initial onboarding before showing PWA install prompts
+  if ((user && !user.onboardingCompletedAt) || isStandalone || dismissed) {
+    return null;
+  }
 
   const dismiss = () => {
     setDismissed(true);

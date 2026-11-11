@@ -14,7 +14,7 @@ import { monthName } from "../../api";
 import type { Entry } from "../../types";
 
 export function LibraryPage({ saved = false }: { saved?: boolean }) {
-  const { config } = useApp();
+  const { config, access } = useApp();
   const { data, error } = useData<Entry[]>("/devotionals");
   const [search, setSearch] = useState("");
   const [month, setMonth] = useState(
@@ -113,7 +113,11 @@ export function LibraryPage({ saved = false }: { saved?: boolean }) {
       ) : entries?.length ? (
         <div className="entry-grid">
           {entries.map((e) => (
-            <EntryCard key={e.id} entry={e} />
+            <EntryCard
+              key={e.id}
+              entry={e}
+              locked={!access.hasAccess && !e.sample}
+            />
           ))}
         </div>
       ) : (

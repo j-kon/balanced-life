@@ -2789,3 +2789,906 @@ test("Production hardening: fail-fast ADMIN_MFA_ENCRYPTION_KEY and origin valida
   }
 });
 
+test("Authoritative reader access states, onboarding persistence, content gating, and legacy/complimentary preservation", async () => {
+  const devList = (await send("GET", "/devotionals")).json();
+  const sampleEntry = devList.find((d: { sample: boolean }) => d.sample);
+  const lockedEntry = devList.find((d: { sample: boolean }) => !d.sample);
+  assert.ok(sampleEntry && lockedEntry);
+
+  // 1. Guest state
+  const anonMe = (await send("GET", "/auth/me")).json();
+  assert.equal(anonMe.user, null);
+  assert.equal(anonMe.access.status, "guest");
+  assert.equal(anonMe.access.hasAccess, false);
+  assert.equal(anonMe.unreadNotificationsCount, 0);
+  assert.equal((await send("GET", "/me/dashboard")).statusCode, 401);
+  assert.equal(
+    (await send("GET", `/devotionals/${sampleEntry.id}`)).statusCode,
+    200,
+  );
+  assert.equal(
+    (await send("GET", `/devotionals/${lockedEntry.id}`)).statusCode,
+    403,
+  );
+
+  // 2. Newly registered reader -> free state & onboardingCompletedAt = null
+  const reg = await app.inject({
+    method: "POST",
+    url: "/api/v1/auth/register",
+    remoteAddress: "203.0.113.20",
+    headers: { "x-requested-with": "BalancedLife" },
+    payload: {
+      name: "Kemi Access",
+      email: "kemi-access@example.org",
+      password: "Kemi-Strong-Pass-2027!",
+    },
+  });
+  assert.equal(reg.statusCode, 200);
+  assert.equal(reg.json().user.onboardingCompletedAt, null);
+  let readerCookie = String(reg.headers["set-cookie"]).split(";")[0];
+  const readerId = reg.json().user.id;
+
+  const freeMe = (await send("GET", "/auth/me", undefined, readerCookie)).json();
+  assert.equal(freeMe.access.status, "free");
+  assert.equal(freeMe.access.hasAccess, false);
+
+  const freeDash = (
+    await send("GET", "/me/dashboard", undefined, readerCookie)
+  ).json();
+  assert.equal(freeDash.accessStatus, "free");
+  assert.equal(freeDash.onboardingCompleted, false);
+  assert.equal(freeDash.streakDays, 0);
+  assert.ok(freeDash.freeSample);
+  assert.ok(Array.isArray(freeDash.lockedPreviews));
+
+  // Persistent onboarding dismiss & Account reopen survives re-login
+  const dismissRes = await send(
+    "POST",
+    "/me/onboarding",
+    { completed: true },
+    readerCookie,
+  );
+  assert.equal(dismissRes.statusCode, 200);
+  assert.ok(dismissRes.json().user.onboardingCompletedAt);
+
+  await send("POST", "/auth/logout", {}, readerCookie);
+  const reLogin = await send("POST", "/auth/login", {
+    email: "kemi-access@example.org",
+    password: "Kemi-Strong-Pass-2027!",
+  });
+  readerCookie = String(reLogin.headers["set-cookie"]).split(";")[0];
+  assert.equal(
+    (await send("GET", "/me/dashboard", undefined, readerCookie)).json()
+      .onboardingCompleted,
+    true,
+  );
+
+  await send("POST", "/me/onboarding", { completed: false }, readerCookie);
+  assert.equal(
+    (await send("GET", "/me/dashboard", undefined, readerCookie)).json()
+      .onboardingCompleted,
+    false,
+  );
+  await send("POST", "/me/onboarding", { completed: true }, readerCookie);
+
+  // 3. Pending payment state MUST NOT unlock premium devotionals
+  const checkoutRes = await send(
+    "POST",
+    "/digital-purchases/checkout",
+    { paymentMethod: "paystack", currency: "NGN" },
+    readerCookie,
+  );
+  assert.equal(checkoutRes.statusCode, 200);
+  const ref = checkoutRes.json().reference;
+  const pendingDash = (
+    await send("GET", "/me/dashboard", undefined, readerCookie)
+  ).json();
+  assert.equal(pendingDash.accessStatus, "pending_payment");
+  assert.equal(pendingDash.hasAccess, false);
+  assert.equal(pendingDash.access.pendingPurchase.reference, ref);
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/devotionals/${lockedEntry.id}`,
+        undefined,
+        readerCookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // 4. Verified payment before 2027 -> scheduled state (still 403 on premium devotionals)
+  const verifyRes = await send(
+    "POST",
+    "/digital-purchases/verify",
+    { reference: ref },
+    readerCookie,
+  );
+  assert.equal(verifyRes.statusCode, 200);
+  const schedDash = (
+    await send("GET", "/me/dashboard", undefined, readerCookie)
+  ).json();
+  assert.equal(schedDash.accessStatus, "scheduled");
+  assert.equal(schedDash.hasAccess, false);
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/devotionals/${lockedEntry.id}`,
+        undefined,
+        readerCookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // 5. Active state + streak / journal / bookmark creation
+  const nowMs = Date.now();
+  const activeStart = new Date(nowMs - 86400000 * 5).toISOString();
+  const activeEnd = new Date(nowMs + 86400000 * 60).toISOString();
+  {
+    const db = openDatabase(databasePath);
+    try {
+      db.sqlite
+        .prepare(
+          "UPDATE digital_entitlements SET starts_at = ?, expires_at = ? WHERE user_id = ?",
+        )
+        .run(activeStart, activeEnd, readerId);
+    } finally {
+      db.sqlite.close();
+    }
+  }
+  const activeDash = (
+    await send("GET", "/me/dashboard", undefined, readerCookie)
+  ).json();
+  assert.equal(activeDash.accessStatus, "active");
+  assert.equal(activeDash.hasAccess, true);
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/devotionals/${lockedEntry.id}`,
+        undefined,
+        readerCookie,
+      )
+    ).statusCode,
+    200,
+  );
+
+  assert.equal(
+    (
+      await send(
+        "POST",
+        `/me/progress/${lockedEntry.id}`,
+        { completed: true },
+        readerCookie,
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        `/me/bookmarks/${lockedEntry.id}`,
+        { saved: true },
+        readerCookie,
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/me/journal",
+        {
+          devotionalId: lockedEntry.id,
+          title: "Intentional Stewardship",
+          lessonLearned: "Intentional stewardship",
+          body: "Consistent habits compound.",
+          actionStep: "Read every morning",
+          prayerFocus: "Help me stay steady.",
+          completed: true,
+        },
+        readerCookie,
+      )
+    ).statusCode,
+    200,
+  );
+  const activeAfterReading = (
+    await send("GET", "/me/dashboard", undefined, readerCookie)
+  ).json();
+  assert.equal(activeAfterReading.streakDays, 1);
+  assert.equal(activeAfterReading.bookmarksCount, 1);
+  assert.equal(activeAfterReading.journalsCount, 1);
+
+  // 6. Expiring soon state (within 14-day reminder window)
+  {
+    const db = openDatabase(databasePath);
+    try {
+      db.sqlite
+        .prepare(
+          "UPDATE digital_entitlements SET expires_at = ? WHERE user_id = ?",
+        )
+        .run(new Date(nowMs + 86400000 * 5).toISOString(), readerId);
+    } finally {
+      db.sqlite.close();
+    }
+  }
+  const expSoonMe = (
+    await send("GET", "/auth/me", undefined, readerCookie)
+  ).json();
+  assert.equal(expSoonMe.access.status, "expiring_soon");
+  assert.equal(expSoonMe.access.expiringSoon, true);
+  assert.equal(expSoonMe.access.hasAccess, true);
+
+  // 7. Expired state -> premium locked (403), history/bookmarks/journals preserved
+  {
+    const db = openDatabase(databasePath);
+    try {
+      db.sqlite
+        .prepare(
+          "UPDATE digital_entitlements SET status = 'expired', expires_at = '2026-01-01T00:00:00.000Z' WHERE user_id = ?",
+        )
+        .run(readerId);
+    } finally {
+      db.sqlite.close();
+    }
+  }
+  const expiredDash = (
+    await send("GET", "/me/dashboard", undefined, readerCookie)
+  ).json();
+  assert.equal(expiredDash.accessStatus, "expired");
+  assert.equal(expiredDash.hasAccess, false);
+  assert.equal(expiredDash.completed, 1);
+  assert.equal(expiredDash.bookmarksCount, 1);
+  assert.equal(expiredDash.journalsCount, 1);
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/devotionals/${lockedEntry.id}`,
+        undefined,
+        readerCookie,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (await send("GET", "/me/journal", undefined, readerCookie)).json().length,
+    1,
+  );
+
+  // 8. Revoked state
+  const revokeRes = await send(
+    "POST",
+    `/admin/users/${readerId}/revoke-access`,
+    { reason: "Chargeback reversal" },
+    adminCookie,
+  );
+  assert.equal(revokeRes.statusCode, 200);
+  const revokedDash = (
+    await send("GET", "/me/dashboard", undefined, readerCookie)
+  ).json();
+  assert.equal(revokedDash.accessStatus, "revoked");
+  assert.equal(revokedDash.hasAccess, false);
+  assert.ok(revokedDash.access.revokeReason);
+
+  // 9. Preserved complimentary & legacy entitlements stay active
+  const compMe = (
+    await send("GET", "/auth/me", undefined, subscriberCookie)
+  ).json();
+  assert.equal(compMe.access.status, "active");
+  assert.equal(compMe.access.source, "complimentary");
+  assert.equal(compMe.access.hasAccess, true);
+});
+
+test("Admin Notification Composer RBAC, broadcast consent opt-in, idempotency, scheduling, reader isolation, inbox filters, and push tracking", async () => {
+  // Register isolated readers from distinct client IPs to stay realistic under IP rate limits
+  const regAsIp = (ip: string, name: string, email: string) =>
+    app.inject({
+      method: "POST",
+      url: "/api/v1/auth/register",
+      remoteAddress: ip,
+      headers: { "x-requested-with": "BalancedLife" },
+      payload: {
+        name,
+        email,
+        password: "Notif-Strong-Pass-2027!",
+      },
+    });
+  const regA = await regAsIp(
+    "203.0.113.21",
+    "Reader Alpha",
+    "notif-alpha@example.org",
+  );
+  const regB = await regAsIp(
+    "203.0.113.22",
+    "Reader Beta",
+    "notif-beta@example.org",
+  );
+  const regC = await regAsIp(
+    "203.0.113.23",
+    "Reader Gamma",
+    "notif-gamma@example.org",
+  );
+  assert.equal(regA.statusCode, 200);
+  assert.equal(regB.statusCode, 200);
+  assert.equal(regC.statusCode, 200);
+
+  const cookieA = String(regA.headers["set-cookie"]).split(";")[0];
+  const cookieB = String(regB.headers["set-cookie"]).split(";")[0];
+  const cookieC = String(regC.headers["set-cookie"]).split(";")[0];
+  const userIdA = regA.json().user.id;
+
+  // Announcements consent defaults to false for all new readers
+  const initNotifsB = (
+    await send("GET", "/me/notifications", undefined, cookieB)
+  ).json();
+  assert.equal(initNotifsB.preferences.announcementsEnabled, false);
+
+  // Alpha opts into optional announcements and registers a Web Push endpoint; Beta stays default opted-out; Gamma disables all notifications
+  await send(
+    "PATCH",
+    "/me/notifications/preferences",
+    { notificationsEnabled: true, announcementsEnabled: true },
+    cookieA,
+  );
+  const alphaEndpoint = "https://push.example.org/sub/notif-alpha-device";
+  await send(
+    "POST",
+    "/me/notifications/push-subscribe",
+    {
+      endpoint: alphaEndpoint,
+      keys: {
+        p256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8p8REfXRs",
+        auth: "tBHItJI5svbpez7KI4CCXg",
+      },
+      deviceLabel: "Alpha Browser",
+    },
+    cookieA,
+  );
+  await send(
+    "PATCH",
+    "/me/notifications/preferences",
+    { notificationsEnabled: false, announcementsEnabled: false },
+    cookieC,
+  );
+
+  // Create fresh delegated staff to verify notification RBAC
+  const makeStaff = async (
+    name: string,
+    email: string,
+    role: "content_editor" | "orders_manager" | "finance_manager",
+  ) => {
+    const created = await send(
+      "POST",
+      "/admin/staff",
+      {
+        name,
+        email,
+        role,
+        password: "Staff-Strong-Pass-2027!",
+      },
+      adminCookie,
+    );
+    assert.equal(created.statusCode, 200);
+    const id = created.json().id;
+    const login = await send("POST", "/admin/auth/login", {
+      email,
+      password: "Staff-Strong-Pass-2027!",
+    });
+    const cookie = String(login.headers["set-cookie"]).split(";")[0];
+    const enroll = await send("POST", "/admin/auth/mfa/enroll", {}, cookie);
+    const otp = generateTotpCode(enroll.json().manualEntryKey);
+    const confirm = await send(
+      "POST",
+      "/admin/auth/mfa/confirm",
+      { code: otp },
+      cookie,
+    );
+    assert.equal(confirm.statusCode, 200);
+    return { id, cookie };
+  };
+
+  const editor = await makeStaff(
+    "Notify Editor",
+    "notif-editor@cossyteens.com",
+    "content_editor",
+  );
+  const finance = await makeStaff(
+    "Notify Finance",
+    "notif-finance@cossyteens.com",
+    "finance_manager",
+  );
+  const orders = await makeStaff(
+    "Notify Orders",
+    "notif-orders@cossyteens.com",
+    "orders_manager",
+  );
+
+  // Finance manager cannot view/send notification campaigns; content editor cannot compose/send campaigns
+  assert.equal(
+    (
+      await send(
+        "GET",
+        "/admin/notifications/campaigns",
+        undefined,
+        finance.cookie,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/campaigns",
+        {
+          targetType: "individual",
+          targetUserId: userIdA,
+          category: "account",
+          title: "Blocked",
+          body: "Should fail",
+          actionUrl: "/dashboard",
+        },
+        editor.cookie,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/campaigns",
+        {
+          targetType: "individual",
+          targetUserId: userIdA,
+          category: "account",
+          title: "Blocked",
+          body: "Should fail",
+          actionUrl: "/dashboard",
+        },
+        finance.cookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // Orders manager CAN send individual account alert, CANNOT preview or send multi-reader broadcast by default
+  const individualByOrders = await send(
+    "POST",
+    "/admin/notifications/campaigns",
+    {
+      targetType: "individual",
+      targetUserId: userIdA,
+      category: "account",
+      title: "Delivery Note Ready",
+      body: "Please review your dashboard notice.",
+      actionUrl: "/dashboard",
+    },
+    orders.cookie,
+  );
+  assert.equal(individualByOrders.statusCode, 200);
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/preview",
+        {
+          targetType: "all",
+          category: "announcement",
+          title: "Unauthorized Broadcast",
+          body: "Should be blocked without owner permission.",
+          actionUrl: "/library",
+        },
+        orders.cookie,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/campaigns",
+        {
+          targetType: "all",
+          category: "announcement",
+          title: "Unauthorized Broadcast",
+          body: "Should be blocked without owner permission.",
+          actionUrl: "/library",
+          confirmed: true,
+        },
+        orders.cookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // Owner grants notifications.broadcast explicitly to orders manager -> broadcast preview & send now allowed
+  const grantBroadcast = await send(
+    "PATCH",
+    `/admin/staff/${orders.id}`,
+    { customPermissions: ["notifications.write", "notifications.broadcast"] },
+    adminCookie,
+  );
+  assert.equal(grantBroadcast.statusCode, 200);
+  assert.deepEqual(grantBroadcast.json().customPermissions, [
+    "notifications.write",
+    "notifications.broadcast",
+  ]);
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/preview",
+        {
+          targetType: "all",
+          category: "announcement",
+          title: "Orders Broadcast Allowed",
+          body: "Owner granted broadcast capability cleanly.",
+          actionUrl: "/library",
+        },
+        orders.cookie,
+      )
+    ).statusCode,
+    200,
+  );
+
+  // HTML tags and unsafe external URLs rejected (400); unconfirmed broadcast rejected (400)
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/campaigns",
+        {
+          targetType: "individual",
+          targetUserId: userIdA,
+          category: "account",
+          title: "Bad <script>alert(1)</script>",
+          body: "Invalid HTML payload",
+          actionUrl: "/dashboard",
+        },
+        adminCookie,
+      )
+    ).statusCode,
+    400,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/campaigns",
+        {
+          targetType: "individual",
+          targetUserId: userIdA,
+          category: "account",
+          title: "Bad link",
+          body: "Should block external phishing domain.",
+          actionUrl: "https://evil.example/phish",
+        },
+        adminCookie,
+      )
+    ).statusCode,
+    400,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/notifications/campaigns",
+        {
+          targetType: "all",
+          category: "announcement",
+          title: "Missing Confirmation",
+          body: "Requires explicit dialog confirmation flag.",
+          actionUrl: "/library",
+          confirmed: false,
+        },
+        adminCookie,
+      )
+    ).statusCode,
+    400,
+  );
+
+  // Admin accounts never appear in reader search
+  const searchAdminEmail = (
+    await send(
+      "GET",
+      "/admin/notifications/readers?search=owner-admin@cossyteens.com",
+      undefined,
+      adminCookie,
+    )
+  ).json();
+  assert.equal(searchAdminEmail.items.length, 0);
+
+  // Broadcast with idempotency key: Alpha (opted-in) receives it; Beta (announcementsEnabled=false) and Gamma (opted-out) do not
+  const campPayload = {
+    targetType: "all" as const,
+    category: "announcement" as const,
+    title: "2027 Devotional Update",
+    body: "Explore the newly reviewed January themes today.",
+    actionUrl: "/library",
+    confirmed: true,
+    idempotencyKey: "campaign-dedupe-key-2027",
+  };
+  const camp1 = await send(
+    "POST",
+    "/admin/notifications/campaigns",
+    campPayload,
+    adminCookie,
+  );
+  assert.equal(camp1.statusCode, 200);
+  assert.equal(camp1.json().deduplicated, false);
+  const camp1Id = camp1.json().campaign.id;
+
+  const camp1Dup = await send(
+    "POST",
+    "/admin/notifications/campaigns",
+    campPayload,
+    adminCookie,
+  );
+  assert.equal(camp1Dup.statusCode, 200);
+  assert.equal(camp1Dup.json().deduplicated, true);
+  assert.equal(camp1Dup.json().campaign.id, camp1Id);
+
+  const notifsA = (
+    await send("GET", "/me/notifications?filter=all", undefined, cookieA)
+  ).json();
+  const notifsB = (
+    await send("GET", "/me/notifications?filter=all", undefined, cookieB)
+  ).json();
+  const notifsC = (
+    await send("GET", "/me/notifications?filter=all", undefined, cookieC)
+  ).json();
+  assert.equal(
+    notifsA.events.some(
+      (e: { title: string }) => e.title === "2027 Devotional Update",
+    ),
+    true,
+  );
+  assert.equal(
+    notifsB.events.some(
+      (e: { title: string }) => e.title === "2027 Devotional Update",
+    ),
+    false,
+  );
+  assert.equal(
+    notifsC.events.some(
+      (e: { title: string }) => e.title === "2027 Devotional Update",
+    ),
+    false,
+  );
+
+  // Opt Beta in to announcements without Web Push -> segment broadcast still arrives in Beta's in-app inbox
+  await send(
+    "PATCH",
+    "/me/notifications/preferences",
+    { notificationsEnabled: true, announcementsEnabled: true },
+    cookieB,
+  );
+  const segSend = await send(
+    "POST",
+    "/admin/notifications/campaigns",
+    {
+      targetType: "segment",
+      targetSegment: "free",
+      category: "announcement",
+      title: "Free Sample Highlight",
+      body: "Try today's open devotional sample in your inbox.",
+      actionUrl: "/library",
+      confirmed: true,
+    },
+    adminCookie,
+  );
+  assert.equal(segSend.statusCode, 200);
+  const betaInboxAfter = (
+    await send("GET", "/me/notifications?filter=unread", undefined, cookieB)
+  ).json();
+  assert.equal(
+    betaInboxAfter.events.some(
+      (e: { title: string }) => e.title === "Free Sample Highlight",
+    ),
+    true,
+  );
+
+  // Scheduled future campaign: stays scheduled, cancellable, and runs at scheduledFor via worker
+  const cancellableSched = await send(
+    "POST",
+    "/admin/notifications/campaigns",
+    {
+      targetType: "individual",
+      targetUserId: userIdA,
+      category: "system",
+      title: "Cancelled Future Alert",
+      body: "Should remain unsent after cancellation.",
+      actionUrl: "/dashboard",
+      scheduledFor: "2099-01-01T08:00:00.000Z",
+    },
+    adminCookie,
+  );
+  assert.equal(cancellableSched.statusCode, 200);
+  assert.equal(cancellableSched.json().campaign.status, "scheduled");
+  const cancelRes = await send(
+    "POST",
+    `/admin/notifications/campaigns/${cancellableSched.json().campaign.id}/cancel`,
+    {},
+    adminCookie,
+  );
+  assert.equal(cancelRes.statusCode, 200);
+  assert.equal(cancelRes.json().campaign.status, "cancelled");
+
+  const dueSoonAt = new Date(Date.now() + 60_000).toISOString();
+  const schedRes = await send(
+    "POST",
+    "/admin/notifications/campaigns",
+    {
+      targetType: "individual",
+      targetUserId: userIdA,
+      category: "announcement",
+      title: "Scheduled Morning Encouragement",
+      body: "Delivered when scheduled time arrives.",
+      actionUrl: "/dashboard",
+      scheduledFor: dueSoonAt,
+    },
+    adminCookie,
+  );
+  assert.equal(schedRes.statusCode, 200);
+  assert.equal(schedRes.json().campaign.status, "scheduled");
+
+  // Push failure keeps pushProviderAccepted at 0 while recording in-app delivery cleanly
+  pushProvider.transientFailureEndpoints.add(alphaEndpoint);
+  const store = openDatabase(databasePath);
+  try {
+    await runNotificationWorkerCycle(
+      store,
+      pushProvider,
+      new Date(Date.now() + 120_000),
+    );
+  } finally {
+    store.sqlite.close();
+  }
+  pushProvider.transientFailureEndpoints.delete(alphaEndpoint);
+
+  const schedHistoryBeforePushOk = (
+    await send("GET", "/admin/notifications/campaigns", undefined, adminCookie)
+  ).json();
+  const schedItem = schedHistoryBeforePushOk.items.find(
+    (c: { id: number }) => c.id === schedRes.json().campaign.id,
+  );
+  assert.equal(schedItem.status, "completed");
+  assert.equal(schedItem.inAppCreatedCount, 1);
+  assert.equal(schedItem.pushProviderAccepted, 0);
+  assert.equal(schedItem.readCount, 0);
+
+  // Worker dispatches successfully once gateway recovers
+  const store2 = openDatabase(databasePath);
+  try {
+    await runNotificationWorkerCycle(
+      store2,
+      pushProvider,
+      new Date(Date.now() + 600_000),
+    );
+  } finally {
+    store2.sqlite.close();
+  }
+  const schedHistoryAfterPushOk = (
+    await send("GET", "/admin/notifications/campaigns", undefined, adminCookie)
+  ).json();
+  const schedItemSent = schedHistoryAfterPushOk.items.find(
+    (c: { id: number }) => c.id === schedRes.json().campaign.id,
+  );
+  assert.equal(schedItemSent.pushProviderAccepted, 1);
+  assert.equal(schedItemSent.readCount, 0);
+
+  // Reader isolation: Beta cannot read or mark Alpha's notification as read
+  const alphaUnreadBefore = (
+    await send("GET", "/me/notifications?filter=unread", undefined, cookieA)
+  ).json();
+  const schedAlphaEv = alphaUnreadBefore.events.find(
+    (e: { title: string }) => e.title === "Scheduled Morning Encouragement",
+  );
+  assert.ok(schedAlphaEv);
+  await send("POST", `/me/notifications/${schedAlphaEv.id}/read`, {}, cookieB);
+  assert.equal(
+    (
+      await send("GET", "/me/notifications?filter=unread", undefined, cookieA)
+    ).json().unreadCount,
+    alphaUnreadBefore.unreadCount,
+  );
+
+  // Alpha marks that single event read -> campaign readCount updates while pushProviderAccepted stays exact
+  await send("POST", `/me/notifications/${schedAlphaEv.id}/read`, {}, cookieA);
+  const schedAfterRead = (
+    await send("GET", "/admin/notifications/campaigns", undefined, adminCookie)
+  )
+    .json()
+    .items.find((c: { id: number }) => c.id === schedRes.json().campaign.id);
+  assert.equal(schedAfterRead.pushProviderAccepted, 1);
+  assert.equal(schedAfterRead.readCount, 1);
+
+  // Alpha marks all remaining notifications read -> auth/me unread badge drops to 0
+  const markAllRes = await send(
+    "POST",
+    "/me/notifications/read-all",
+    {},
+    cookieA,
+  );
+  assert.equal(markAllRes.statusCode, 200);
+  assert.equal(markAllRes.json().unreadCount, 0);
+  assert.equal(
+    (await send("GET", "/auth/me", undefined, cookieA)).json()
+      .unreadNotificationsCount,
+    0,
+  );
+});
+
+test("Migration 0009 marks pre-existing readers onboarding-completed, defaults announcements off, and supports announcement events", async () => {
+  const migFolder = mkdtempSync(join(tmpdir(), "balanced-mig0009-"));
+  const migDbPath = join(migFolder, "pre0009.sqlite");
+  try {
+    const raw = new Database(migDbPath);
+    raw.pragma("foreign_keys = ON");
+    raw.exec(
+      "CREATE TABLE schema_migrations(name TEXT PRIMARY KEY,applied_at TEXT NOT NULL)",
+    );
+    const migDir = resolve(process.cwd(), "migrations");
+    const preMigrations = readdirSync(migDir)
+      .filter((f) => f.endsWith(".sql") && f < "0009_")
+      .sort();
+    for (const file of preMigrations) {
+      raw.exec(readFileSync(resolve(migDir, file), "utf8"));
+      raw
+        .prepare("INSERT INTO schema_migrations VALUES (?, ?)")
+        .run(file, "2026-11-10T00:00:00.000Z");
+    }
+
+    const pwHash = await hashPassword("Existing-Reader-2026!");
+    raw
+      .prepare(
+        "INSERT INTO users (id, name, email, password_hash, role, status, suspended_reason, created_at, updated_at) VALUES (21, 'Pre Existing Reader', 'pre0009@example.org', ?, 'reader', 'active', '', '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z')",
+      )
+      .run(pwHash);
+    raw
+      .prepare(
+        "INSERT INTO notification_preferences (user_id, updated_at) VALUES (21, '2026-11-10T00:00:00.000Z')",
+      )
+      .run();
+    raw.close();
+
+    const migrated = openDatabase(migDbPath);
+    const existingReader = migrated.sqlite
+      .prepare("SELECT onboarding_completed_at FROM users WHERE id = 21")
+      .get() as { onboarding_completed_at: string | null };
+    assert.ok(existingReader.onboarding_completed_at);
+
+    const existingPref = migrated.sqlite
+      .prepare(
+        "SELECT announcements_enabled FROM notification_preferences WHERE user_id = 21",
+      )
+      .get() as { announcements_enabled: number };
+    assert.equal(existingPref.announcements_enabled, 0);
+
+    migrated.sqlite
+      .prepare(
+        "INSERT INTO notification_events (user_id, category, title, body, action_url, dedupe_key, push_status, created_at) VALUES (21, 'announcement', 'Migrated Check', 'Supports announcement category', '/library', 'mig0009-ann-1', 'skipped', '2026-11-11T00:00:00.000Z')",
+      )
+      .run();
+    assert.equal(
+      (migrated.sqlite.pragma("foreign_key_check") as unknown[]).length,
+      0,
+    );
+    assert.equal(
+      migrated.sqlite.pragma("integrity_check", { simple: true }),
+      "ok",
+    );
+    migrated.sqlite.close();
+  } finally {
+    rmSync(migFolder, { recursive: true, force: true });
+  }
+});
+

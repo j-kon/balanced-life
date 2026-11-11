@@ -23,8 +23,13 @@ import {
   resetPasswordSchema,
 } from "../validation.js";
 import { getAppSettings } from "../services/settings.js";
-import { createNotificationEvent } from "../services/notifications.js";
+import {
+  createNotificationEvent,
+  getUnreadNotificationCount,
+} from "../services/notifications.js";
+import { getReaderAccessSummary } from "../services/access.js";
 import type { EmailService } from "../services/email.js";
+import { onboardingUpdateSchema } from "../validation.js";
 
 export function registerAuthRoutes(
   app: FastifyInstance,
@@ -35,7 +40,35 @@ export function registerAuthRoutes(
 ) {
   const { db } = store;
 
-  app.get(prefix + "/auth/me", async (req) => ({ user: req.user }));
+  app.get(prefix + "/auth/me", async (req) => ({
+    user: req.user,
+    access: getReaderAccessSummary(store, req.user),
+    unreadNotificationsCount: req.user
+      ? getUnreadNotificationCount(store, req.user.id)
+      : 0,
+  }));
+
+  app.post(prefix + "/me/onboarding", async (req) => {
+    const currentUser = requireUser(req);
+    const { completed } = onboardingUpdateSchema.parse(req.body || {});
+    const now = new Date().toISOString();
+    const updated = db
+      .update(s.users)
+      .set({
+        onboardingCompletedAt: completed ? now : null,
+        updatedAt: now,
+      })
+      .where(eq(s.users.id, currentUser.id))
+      .returning()
+      .get();
+    if (!updated) throw new HttpError(404, "Account not found.");
+    const pub = publicUser(updated);
+    return {
+      ok: true,
+      user: pub,
+      access: getReaderAccessSummary(store, pub),
+    };
+  });
 
   app.post(
     prefix + "/auth/register",

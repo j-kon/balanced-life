@@ -1,9 +1,11 @@
-const CACHE = "balanced-public-v2";
+const CACHE = "balanced-public-v3";
 const PUBLIC_ASSETS = [
   "/icon.svg",
   "/icon-192.png",
   "/icon-512.png",
   "/manifest.webmanifest",
+  "/theme-init.js",
+  "/offline.html",
 ];
 
 self.addEventListener("install", (event) => {
@@ -34,19 +36,26 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  // Never cache API endpoints, private devotionals, or authenticated user state
-  if (
-    event.request.method !== "GET" ||
-    url.origin !== self.location.origin ||
-    !PUBLIC_ASSETS.includes(url.pathname)
-  ) {
+  if (event.request.method !== "GET" || url.origin !== self.location.origin) {
     return;
   }
-  event.respondWith(
-    caches
-      .match(event.request)
-      .then((cached) => cached || fetch(event.request)),
-  );
+
+  // Serve only cached static public shell assets; never cache API payloads or private devotionals.
+  if (PUBLIC_ASSETS.includes(url.pathname)) {
+    event.respondWith(
+      caches
+        .match(event.request)
+        .then((cached) => cached || fetch(event.request)),
+    );
+    return;
+  }
+
+  // For document navigations when completely offline, show the static themed offline fallback.
+  if (event.request.mode === "navigate") {
+    event.respondWith(
+      fetch(event.request).catch(() => caches.match("/offline.html")),
+    );
+  }
 });
 
 self.addEventListener("push", (event) => {

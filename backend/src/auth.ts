@@ -41,11 +41,17 @@ export type AdminPermission =
   | "payments.write"
   | "notifications.read"
   | "notifications.write"
+  | "notifications.broadcast"
   | "settings.read"
   | "settings.write"
   | "audit.read"
   | "staff.read"
   | "staff.write";
+
+export const GRANTABLE_CUSTOM_PERMISSIONS = [
+  "notifications.write",
+  "notifications.broadcast",
+] as const;
 
 export const ALL_ADMIN_PERMISSIONS: readonly AdminPermission[] = [
   "overview.read",
@@ -63,6 +69,7 @@ export const ALL_ADMIN_PERMISSIONS: readonly AdminPermission[] = [
   "payments.write",
   "notifications.read",
   "notifications.write",
+  "notifications.broadcast",
   "settings.read",
   "settings.write",
   "audit.read",
@@ -112,10 +119,28 @@ export const getPermissionsForRole = (role: AdminRole): AdminPermission[] => [
   ...ROLE_PERMISSIONS[role],
 ];
 
+export function parseCustomAdminPermissions(raw?: string | null): AdminPermission[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is AdminPermission =>
+        typeof p === "string" &&
+        (GRANTABLE_CUSTOM_PERMISSIONS as readonly string[]).includes(p),
+    );
+  } catch {
+    return [];
+  }
+}
+
 export const hasAdminPermission = (
   role: AdminRole,
   permission: AdminPermission,
-): boolean => ROLE_PERMISSIONS[role].includes(permission);
+  customPermissions: AdminPermission[] = [],
+): boolean =>
+  ROLE_PERMISSIONS[role].includes(permission) ||
+  customPermissions.includes(permission);
 
 export type PublicUser = {
   id: number;
@@ -125,6 +150,7 @@ export type PublicUser = {
   status: "active" | "suspended";
   ageGroup: string;
   guardianConsentConfirmed: boolean;
+  onboardingCompletedAt: string | null;
   createdAt: string;
 };
 
@@ -137,6 +163,7 @@ export type PublicAdmin = {
   mfaEnabled: boolean;
   mfaVerified: boolean;
   permissions: AdminPermission[];
+  customPermissions: AdminPermission[];
   lastLoginAt: string | null;
   lastActiveAt: string | null;
   createdAt: string;
@@ -165,6 +192,7 @@ export const publicUser = (user: typeof s.users.$inferSelect): PublicUser => ({
   status: user.status === "suspended" ? "suspended" : "active",
   ageGroup: user.ageGroup || "18_25",
   guardianConsentConfirmed: Boolean(user.guardianConsentConfirmed),
+  onboardingCompletedAt: user.onboardingCompletedAt || null,
   createdAt: user.createdAt,
 });
 
@@ -173,6 +201,12 @@ export const publicAdmin = (
   mfaVerified: boolean,
 ): PublicAdmin => {
   const role = normalizeAdminRole(admin.role);
+  const customPermissions = parseCustomAdminPermissions(
+    admin.customPermissionsJson,
+  );
+  const merged = Array.from(
+    new Set([...getPermissionsForRole(role), ...customPermissions]),
+  );
   return {
     id: admin.id,
     name: admin.name,
@@ -181,7 +215,8 @@ export const publicAdmin = (
     status: admin.status === "suspended" ? "suspended" : "active",
     mfaEnabled: Boolean(admin.mfaEnabled),
     mfaVerified: Boolean(mfaVerified),
-    permissions: getPermissionsForRole(role),
+    permissions: merged,
+    customPermissions,
     lastLoginAt: admin.lastLoginAt || null,
     lastActiveAt: admin.lastActiveAt || null,
     createdAt: admin.createdAt,
@@ -259,12 +294,17 @@ export const requireAdmin = (req: FastifyRequest): PublicAdmin => {
   return admin;
 };
 
+export const adminHasPermission = (
+  admin: PublicAdmin,
+  permission: AdminPermission,
+): boolean => admin.permissions.includes(permission);
+
 export const requireAdminPermission = (
   req: FastifyRequest,
   permission: AdminPermission,
 ): PublicAdmin => {
   const admin = requireAdmin(req);
-  if (!hasAdminPermission(admin.role, permission)) {
+  if (!adminHasPermission(admin, permission)) {
     throw new HttpError(
       403,
       "Your administrator role does not have permission for this action.",

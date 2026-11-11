@@ -397,6 +397,28 @@ export const notificationPreferencesSchema = z.object({
     .optional(),
   subscriptionAlertsEnabled: z.boolean().optional(),
   purchaseAlertsEnabled: z.boolean().optional(),
+  announcementsEnabled: z.boolean().optional(),
+});
+
+export const onboardingUpdateSchema = z.object({
+  completed: z.boolean(),
+});
+
+export const adminNotificationCampaignSchema = z.object({
+  targetType: z.enum(["individual", "all", "segment"]),
+  targetSegment: z
+    .enum(["free", "pending_payment", "scheduled", "active", "expired", "revoked"])
+    .optional(),
+  targetUserId: z.coerce.number().int().positive().optional(),
+  category: z
+    .enum(["announcement", "account", "system", "subscription"])
+    .default("announcement"),
+  title: z.string().trim().min(2, "Provide a notification title.").max(120),
+  body: z.string().trim().min(4, "Provide a notification message.").max(600),
+  actionUrl: z.string().trim().max(240).default("/dashboard"),
+  scheduledFor: z.string().trim().max(64).nullable().optional(),
+  confirmed: z.boolean().optional(),
+  idempotencyKey: z.string().trim().min(8).max(120).optional(),
 });
 
 export const pushSubscriptionSchema = z

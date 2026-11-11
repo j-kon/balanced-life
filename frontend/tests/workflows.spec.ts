@@ -54,10 +54,13 @@ const readerPassword = "ReaderPass!2027Secure";
 const readerUpdatedPassword = "ReaderNewPass!2027Secure";
 let e2eAdminMfaSecret = "";
 
+const stateReaderEmail = "state-e2e@cossyteens.org";
+const stateReaderPassword = "StatePass!2027Secure";
+
 function cleanupTestRecords(sqlite: Database.Database) {
   const testUsers = sqlite
-    .prepare(`SELECT id FROM users WHERE email IN (?, ?)`)
-    .all(adminEmail, readerEmail) as { id: number }[];
+    .prepare(`SELECT id FROM users WHERE email IN (?, ?, ?)`)
+    .all(adminEmail, readerEmail, stateReaderEmail) as { id: number }[];
   const ids = testUsers.map((u) => u.id);
   for (const id of ids) {
     sqlite.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(id);
@@ -69,6 +72,9 @@ function cleanupTestRecords(sqlite: Database.Database) {
     sqlite.prepare(`DELETE FROM digital_purchases WHERE user_id = ?`).run(id);
     sqlite
       .prepare(`DELETE FROM notification_preferences WHERE user_id = ?`)
+      .run(id);
+    sqlite
+      .prepare(`DELETE FROM admin_notification_campaign_recipients WHERE user_id = ?`)
       .run(id);
     sqlite.prepare(`DELETE FROM notification_events WHERE user_id = ?`).run(id);
     sqlite.prepare(`DELETE FROM push_subscriptions WHERE user_id = ?`).run(id);
@@ -83,6 +89,16 @@ function cleanupTestRecords(sqlite: Database.Database) {
     .prepare(`SELECT id FROM admin_users WHERE email = ?`)
     .all(adminEmail) as { id: number }[];
   for (const adm of testAdmins) {
+    sqlite
+      .prepare(
+        `DELETE FROM admin_notification_campaign_recipients WHERE campaign_id IN (SELECT id FROM admin_notification_campaigns WHERE created_by_admin_id = ? OR actor_email = ?)`,
+      )
+      .run(adm.id, adminEmail);
+    sqlite
+      .prepare(
+        `DELETE FROM admin_notification_campaigns WHERE created_by_admin_id = ? OR actor_email = ?`,
+      )
+      .run(adm.id, adminEmail);
     sqlite.prepare(`DELETE FROM admin_sessions WHERE admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM admin_mfa_recovery_codes WHERE admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM admin_password_reset_tokens WHERE admin_id = ?`).run(adm.id);
@@ -93,6 +109,14 @@ function cleanupTestRecords(sqlite: Database.Database) {
     sqlite.prepare(`DELETE FROM printed_orders WHERE verified_by_admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM admin_users WHERE id = ?`).run(adm.id);
   }
+  sqlite
+    .prepare(
+      `DELETE FROM admin_notification_campaign_recipients WHERE campaign_id IN (SELECT id FROM admin_notification_campaigns WHERE actor_email = ?)`,
+    )
+    .run(adminEmail);
+  sqlite
+    .prepare(`DELETE FROM admin_notification_campaigns WHERE actor_email = ?`)
+    .run(adminEmail);
   sqlite
     .prepare(`DELETE FROM admin_audit_logs WHERE actor_email = ?`)
     .run(adminEmail);
@@ -305,8 +329,25 @@ test.describe("End-to-End Production Workflows", () => {
 
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(
-      page.getByRole("heading", { name: /A little time to grow/i }),
+      page.getByRole("heading", {
+        name: /Welcome to your Balanced Life journey, Grace!/i,
+      }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Your growth journey starts here\./i }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /Skip onboarding/i }).click();
+    await expect(
+      page.getByRole("heading", {
+        name: /Welcome to your Balanced Life journey/i,
+      }),
+    ).toHaveCount(0);
+    await page.reload();
+    await expect(
+      page.getByRole("heading", {
+        name: /Welcome to your Balanced Life journey/i,
+      }),
+    ).toHaveCount(0);
 
     // Check library shows Jan 1 free sample and locked Jan 2 entry
     await page.goto("/library");
@@ -358,6 +399,11 @@ test.describe("End-to-End Production Workflows", () => {
     await notifForm
       .getByLabel(/Send an evening reminder/i)
       .check();
+    const announcementsToggle = notifForm.getByLabel(
+      /Receive optional community announcements/i,
+    );
+    await expect(announcementsToggle).not.toBeChecked();
+    await announcementsToggle.check();
     await notifForm.locator('select[name="timezone"]').selectOption("Africa/Lagos");
     await notifForm
       .getByRole("button", { name: /Save reminder preferences/i })
@@ -373,6 +419,26 @@ test.describe("End-to-End Production Workflows", () => {
       page.getByText(/Test Notification · The Balanced Life Devotional/i).first(),
     ).toBeVisible();
 
+    // Test reopening and completing the onboarding guide from Account settings
+    await page
+      .getByRole("button", { name: /Reopen welcome onboarding guide/i })
+      .click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(
+      page.getByRole("heading", {
+        name: /Welcome to your Balanced Life journey, Grace!/i,
+      }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: /Personalize My Experience/i })
+      .click();
+    await page.getByRole("button", { name: /Complete onboarding/i }).click();
+    await expect(
+      page.getByRole("heading", {
+        name: /Welcome to your Balanced Life journey/i,
+      }),
+    ).toHaveCount(0);
+
     // Sign out and sign back in with updated password
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(page).toHaveURL(/\/(login)?$/);
@@ -382,6 +448,9 @@ test.describe("End-to-End Production Workflows", () => {
     await page.getByLabel(/^Password/i).fill(readerUpdatedPassword);
     await page.getByRole("button", { name: /^Sign in$/i }).click();
     await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(
+      page.getByRole("heading", { name: /Your growth journey starts here\./i }),
+    ).toBeVisible();
   });
 
   test("3. Separate administration portal: isolated login, MFA setup, navigable URLs, reader/admin boundary, complimentary access, devotional publish & mobile layout", async ({
@@ -540,6 +609,9 @@ test.describe("End-to-End Production Workflows", () => {
     await page.getByLabel(/^Password/i).fill(readerUpdatedPassword);
     await page.getByRole("button", { name: /^Sign in$/i }).click();
     await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(
+      page.getByRole("heading", { name: /Welcome back, Grace\./i }),
+    ).toBeVisible();
 
     // Go to Library, search for 2027-01-08, and open it
     await page.goto("/library");
@@ -630,5 +702,297 @@ test.describe("End-to-End Production Workflows", () => {
     await entryRow.getByRole("button", { name: /Unpublish/i }).click();
     await expect(adminPage.getByText(/Changes saved/i)).toBeVisible();
     await adminCtx.close();
+  });
+
+  test("5. Light/Dark/System themes (no FOUC & live OS reactivity), Pending/Scheduled/Expired dashboards, Admin Notification Composer, Reader Notification Center & Mobile viewports", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1440, height: 960 });
+
+    // 1. Default System theme + live OS dark/light reaction before login
+    await page.goto("/");
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.themePref),
+    ).toBe("system");
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.theme),
+    ).toBe("light");
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.theme))
+      .toBe("dark");
+    expect(
+      await page.evaluate(
+        () =>
+          document
+            .querySelector('meta[name="theme-color"]')
+            ?.getAttribute("content") || "",
+      ),
+    ).toBe("#1a1114");
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.theme))
+      .toBe("light");
+
+    // Cycle header theme toggle (system -> light -> dark) -> persists in localStorage across reload before login
+    await page.locator(".theme-quick-btn").click();
+    await page.locator(".theme-quick-btn").click();
+    expect(
+      await page.evaluate(() => localStorage.getItem("bld_theme")),
+    ).toBe("dark");
+    await page.goto("/login");
+    await page.reload();
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.theme),
+    ).toBe("dark");
+
+    // Cycle back to System (dark -> system)
+    await page.locator(".theme-quick-btn").click();
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.themePref),
+    ).toBe("system");
+
+    // 2. Register isolated reader to verify pending_payment, scheduled, expired dashboards & preserved journals
+    await page.goto("/register");
+    await page.getByLabel(/Your name/i).fill("Daniel State Reader");
+    await page.getByLabel(/Email address/i).fill(stateReaderEmail);
+    await page.getByLabel(/^Password/i).fill(stateReaderPassword);
+    await page.getByRole("button", { name: /Create account/i }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    // Dismiss onboarding first so access dashboards take focus cleanly
+    await page.getByRole("button", { name: /Skip onboarding/i }).click();
+
+    // Opt into optional announcements on Account page so broadcast test includes Daniel
+    await page.goto("/account");
+    const accNotifForm = page.locator("form").nth(2);
+    await accNotifForm
+      .getByLabel(/Receive optional community announcements/i)
+      .check();
+    await accNotifForm
+      .getByRole("button", { name: /Save reminder preferences/i })
+      .click();
+    await expect(
+      page.getByText(/Reminder & notification preferences saved/i),
+    ).toBeVisible();
+
+    // Verify full System (Currently dark/light) indicator reflects emulated OS media
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect(
+      page
+        .locator('section[aria-labelledby="appearance-heading"]')
+        .getByRole("button", { name: /System \(Currently dark\)/i }),
+    ).toBeVisible();
+    await page
+      .locator('section[aria-labelledby="appearance-heading"]')
+      .getByRole("button", { name: /^Light$/i })
+      .click();
+    await page.emulateMedia({ colorScheme: "light" });
+
+    // Seed unverified bank transfer purchase -> Pending Payment dashboard
+    const sqlite = new Database(dbPath);
+    const stateUser = sqlite
+      .prepare("SELECT id FROM users WHERE email = ?")
+      .get(stateReaderEmail) as { id: number };
+    const nowIso = new Date().toISOString();
+    sqlite
+      .prepare(
+        `INSERT INTO digital_purchases (
+          user_id, product_code, product_name, amount_kobo, currency,
+          payment_method, reference, transfer_reference, payer_note,
+          status, duration_months, is_renewal, admin_notes, created_at, updated_at
+        ) VALUES (?, 'digital_2027', 'The Balanced Life Devotional — 2027 Digital Edition', 350000, 'NGN',
+          'bank_transfer', ?, 'NIP-STATE-E2E-2027', 'E2E Transfer',
+          'verifying_transfer', 12, 0, '', ?, ?)`,
+      )
+      .run(stateUser.id, `E2E-PEND-${Date.now()}`, nowIso, nowIso);
+    sqlite.close();
+
+    await page.goto("/dashboard");
+    await expect(
+      page.getByRole("heading", {
+        name: /Your payment is awaiting verification\./i,
+      }),
+    ).toBeVisible();
+
+    // Simulate verified pre-2027 purchase -> Scheduled dashboard (locked until Jan 1, 2027)
+    const sqliteSched = new Database(dbPath);
+    sqliteSched
+      .prepare("UPDATE digital_purchases SET status = 'succeeded', verified_at = ? WHERE user_id = ?")
+      .run(nowIso, stateUser.id);
+    sqliteSched
+      .prepare(
+        `INSERT INTO digital_entitlements (
+          user_id, edition_year, access_type, access_scope, status,
+          starts_at, expires_at, duration_months, renewal_count,
+          legacy_persistent, legacy_review_required, grant_reason,
+          granted_at, updated_at
+        ) VALUES (?, 2027, 'paid', 'edition_2027', 'active', '2027-01-01T00:00:00.000Z', '2028-01-01T00:00:00.000Z', 12, 0, 0, 0, 'E2E Scheduled', ?, ?)`,
+      )
+      .run(stateUser.id, nowIso, nowIso);
+    sqliteSched.close();
+
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: /Your online access is confirmed\./i }),
+    ).toBeVisible();
+
+    // Seed 1 historical journal entry and expire entitlement -> Expired dashboard + preserved journal check
+    const sqliteExp = new Database(dbPath);
+    sqliteExp
+      .prepare(
+        `INSERT INTO journal_entries (user_id, title, lesson_learned, body, action_step, prayer_focus, created_at, updated_at)
+         VALUES (?, 'Preserved E2E Reflection', 'God is faithful', 'My notes stay intact after expiry.', 'Stay consistent', 'Thank you Lord', ?, ?)`,
+      )
+      .run(stateUser.id, nowIso, nowIso);
+    sqliteExp
+      .prepare(
+        "UPDATE digital_entitlements SET status = 'expired', expires_at = '2026-01-01T00:00:00.000Z' WHERE user_id = ?",
+      )
+      .run(stateUser.id);
+    sqliteExp.close();
+
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: /Welcome back, Daniel\./i }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Your 12-Month Online Access Has Expired/i).first(),
+    ).toBeVisible();
+    await expect(page.getByText(/1 Growth Journal reflection/i)).toBeVisible();
+
+    await page.goto("/journal");
+    await expect(page.getByText(/Preserved E2E Reflection/i)).toBeVisible();
+
+    // 3. Separate Admin Portal Notification Composer -> targeted send & community broadcast
+    const adminCtx = await browser.newContext();
+    const adminPage = await adminCtx.newPage();
+    await adminPage.setViewportSize({ width: 1440, height: 960 });
+    await adminPage.goto(`${ADMIN_URL}/login`);
+    await adminPage.getByLabel(/Administrator email/i).fill(adminEmail);
+    await adminPage.getByLabel(/Administrator password/i).fill(adminPassword);
+    await adminPage
+      .getByRole("button", { name: /Continue to verification/i })
+      .click();
+    await expect(adminPage).toHaveURL(/5174\/mfa-verify$/);
+    await adminPage
+      .getByLabel(/6-digit authenticator code/i)
+      .fill(generateTestTotp(e2eAdminMfaSecret));
+    await adminPage
+      .getByRole("button", { name: /Verify & enter dashboard/i })
+      .click();
+    await expect(adminPage).toHaveURL(/5174\/dashboard$/);
+
+    await adminPage.goto(`${ADMIN_URL}/notifications`);
+    await adminPage
+      .getByPlaceholder(/Type reader name or email/i)
+      .fill(stateReaderEmail);
+    await adminPage
+      .locator(".reader-search-item", { hasText: stateReaderEmail })
+      .click();
+    await adminPage
+      .getByLabel(/Notification title/i)
+      .fill("Personal Encouragement Note");
+    await adminPage
+      .getByLabel(/Message body/i)
+      .fill("Thank you for checking your Balanced Life workspace.");
+    await adminPage.getByRole("button", { name: /Review & Send Now/i }).click();
+    await expect(
+      adminPage.getByRole("heading", {
+        name: /Confirm Reader Notification Dispatch/i,
+      }),
+    ).toBeVisible();
+    await adminPage
+      .getByRole("button", { name: /Confirm & Queue Notification/i })
+      .click();
+    await expect(
+      adminPage.getByText(/Notification queued/i).first(),
+    ).toBeVisible();
+
+    // Community broadcast using Welcome preset
+    await adminPage
+      .getByRole("button", { name: /All Eligible Readers/i })
+      .click();
+    await adminPage.getByRole("button", { name: /Welcome preset/i }).click();
+    await adminPage
+      .getByRole("button", { name: /Preview Eligible Count/i })
+      .click();
+    await expect(
+      adminPage.getByText(/Eligible Recipients:/i).first(),
+    ).toBeVisible();
+    await adminPage.getByRole("button", { name: /Review & Send Now/i }).click();
+    await adminPage
+      .getByRole("button", { name: /Confirm & Queue Notification/i })
+      .click();
+    await expect(
+      adminPage.getByText(/Administrator Notification Campaign History/i),
+    ).toBeVisible();
+    await adminCtx.close();
+
+    // 4. Reader Notification Center: sidebar badge, Unread filter, Mark as read & Mark all as read
+    await page.goto("/dashboard");
+    await expect(page.locator(".sidebar-badge")).toBeVisible();
+    await page.locator('.sidebar a[href="/notifications"]').click();
+    await expect(page).toHaveURL(/\/notifications$/);
+    await expect(
+      page.getByRole("heading", { name: /^Notification Center$/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Personal Encouragement Note/i }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /^Unread \(/i }).click();
+    await page
+      .locator(".notif-item", { hasText: "Personal Encouragement Note" })
+      .getByRole("button", { name: /Mark as read/i })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: /Personal Encouragement Note/i }),
+    ).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Mark all as read/i }).click();
+    await expect(
+      page.getByText(/You are all caught up/i),
+    ).toBeVisible();
+    await expect(page.locator(".sidebar-badge")).toHaveCount(0);
+
+    // 5. Mobile viewports (360px, 390px, 430px, 768px) + Mobile More sheet at 390px
+    for (const width of [768, 430, 390, 360]) {
+      await page.setViewportSize({ width, height: 844 });
+      for (const path of ["/dashboard", "/notifications", "/journal"]) {
+        await page.goto(path);
+        const overflow = await page.evaluate(
+          () =>
+            document.documentElement.scrollWidth >
+            document.documentElement.clientWidth,
+        );
+        expect(overflow, `Reader overflow on ${path} at ${width}px`).toBe(false);
+      }
+    }
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/dashboard");
+    await page
+      .getByRole("button", {
+        name: /More reader tools, notifications, and appearance/i,
+      })
+      .click();
+    await expect(page.locator("dialog.mobile-more-dialog[open]")).toBeVisible();
+    await page
+      .locator("dialog.mobile-more-dialog")
+      .getByRole("button", { name: /^Dark$/i })
+      .click();
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.theme),
+    ).toBe("dark");
+    await page
+      .getByRole("button", { name: /Close more options/i })
+      .click();
+
+    await context.close();
   });
 });

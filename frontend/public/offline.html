@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#570008" />
+    <script src="/theme-init.js"></script>
+    <title>Offline · The Balanced Life Devotional</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #faf5ed;
+        --surface: #fffdf9;
+        --text: #302b29;
+        --muted: #696159;
+        --heading: #570008;
+        --accent: #570008;
+        --accent-text: #ffffff;
+        --gold: #d5a52b;
+        --border: #e2d7c9;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #140f12;
+          --surface: #1d1519;
+          --text: #f3ece2;
+          --muted: #c6b8ac;
+          --heading: #f5dfb8;
+          --accent: #8b1e2b;
+          --accent-text: #fff8f0;
+          --gold: #e4b84d;
+          --border: #3a2a31;
+        }
+      }
+      :root[data-theme="dark"] {
+        --bg: #140f12;
+        --surface: #1d1519;
+        --text: #f3ece2;
+        --muted: #c6b8ac;
+        --heading: #f5dfb8;
+        --accent: #8b1e2b;
+        --accent-text: #fff8f0;
+        --gold: #e4b84d;
+        --border: #3a2a31;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .card {
+        max-width: 520px;
+        width: 100%;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-top: 3px solid var(--gold);
+        border-radius: 12px;
+        padding: 32px;
+      }
+      .eyebrow {
+        display: block;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: var(--muted);
+        margin-bottom: 10px;
+      }
+      h1 {
+        margin: 0 0 14px;
+        font-family: Georgia, serif;
+        font-weight: 400;
+        font-size: 1.9rem;
+        color: var(--heading);
+      }
+      p {
+        margin: 0 0 20px;
+        line-height: 1.65;
+        color: var(--muted);
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 12px 20px;
+        border-radius: 6px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-text);
+        font-weight: 600;
+        text-decoration: none;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <span class="eyebrow">The Balanced Life Devotional</span>
+      <h1>You are currently offline.</h1>
+      <p>
+        For your privacy, paid devotionals and personal Growth Journal entries
+        are only retrieved over encrypted HTTPS connections while online. Reconnect
+        to mobile data or Wi-Fi and reload to continue.
+      </p>
+      <button class="btn" type="button" onclick="window.location.reload()">
+        Try connecting again
+      </button>
+    </main>
+  </body>
+</html>
+

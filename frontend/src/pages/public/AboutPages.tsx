@@ -86,15 +86,15 @@ export function AboutDevotionalPage() {
       <div className="notice">
         <BookOpen />
         <div>
-          <strong>Printed, Digital Edition &amp; Membership Options</strong>
+          <strong>Two Clear Ways to Experience The Balanced Life Devotional</strong>
           <p>
-            Order the <strong>Printed Copy ({money(settings.hardcoverPriceKobo)})</strong>,
-            purchase the one-time{" "}
+            Order the <strong>Printed Book ({money(settings.hardcoverPriceKobo)})</strong>{" "}
+            per copy with delivery arranged separately, or unlock{" "}
             <strong>
-              2027 Digital Copy ({money(settings.digitalEditionPriceKobo)})
+              2027 Online Access ({money(settings.digitalEditionPriceKobo)})
             </strong>{" "}
-            for persistent online access, or subscribe to a flexible{" "}
-            <strong>Digital Membership</strong>.
+            for {settings.digitalAccessDurationMonths || 12} calendar months of
+            digital reading with no automatic recurring charges.
           </p>
         </div>
       </div>

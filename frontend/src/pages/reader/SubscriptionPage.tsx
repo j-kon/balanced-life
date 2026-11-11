@@ -82,20 +82,24 @@ export function SubscriptionPage() {
                 ? "Online Access Active"
                 : isScheduled
                   ? "Scheduled (Starts Jan 1, 2027)"
-                  : ent?.status === "expired"
-                    ? "Access Expired"
-                    : "Free Account"}
+                  : ent?.status === "revoked" || ent?.status === "refunded"
+                    ? "Access Revoked"
+                    : ent?.status === "expired"
+                      ? "Access Expired"
+                      : "Free Account"}
             </span>
             <h2>
               {digital.data.active
                 ? "2027 Digital Devotional Access"
                 : isScheduled
                   ? "2027 Digital Access Confirmed"
-                  : legacy.data.subscription?.active
-                    ? "Existing Account Access"
-                    : ent?.status === "expired"
-                      ? "Renew Your 2027 Digital Access"
-                      : "Begin your 2027 journey"}
+                  : ent?.status === "revoked" || ent?.status === "refunded"
+                    ? "Online Access Support Notice"
+                    : legacy.data.subscription?.active
+                      ? "Existing Account Access"
+                      : ent?.status === "expired"
+                        ? "Renew Your 2027 Digital Access"
+                        : "Begin your 2027 journey"}
             </h2>
             {isScheduled && ent ? (
               <>
@@ -170,6 +174,25 @@ export function SubscriptionPage() {
                       {money(config.settings.digitalEditionPriceKobo)})
                     </Link>
                   )}
+                </div>
+              </>
+            ) : ent?.status === "revoked" || ent?.status === "refunded" ? (
+              <>
+                <p>
+                  Online access associated with this previous entitlement has
+                  been revoked
+                  {ent.revokeReason ? ` (${ent.revokeReason})` : ""}. Your
+                  Growth Journal reflections and saved bookmarks remain safe.
+                  Please reach out to support for clarification or renewal
+                  assistance.
+                </p>
+                <div className="actions">
+                  <Link className="button" to="/contact">
+                    Contact support <ArrowRight size={17} />
+                  </Link>
+                  <Link className="button outline" to="/journal">
+                    Open Growth Journal
+                  </Link>
                 </div>
               </>
             ) : (

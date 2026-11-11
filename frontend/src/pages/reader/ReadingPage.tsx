@@ -171,7 +171,7 @@ export function ReadingPage() {
             </article>
             {user ? (
               <>
-                <div className="reading-actions">
+                <div className="reading-actions reading-one-hand-bar">
                   <button
                     className="button"
                     disabled={busy}
@@ -195,6 +195,14 @@ export function ReadingPage() {
                     />
                     {data.saved ? "Saved" : "Save reading"}
                   </button>
+                  {data.nextId && (
+                    <Link
+                      className="button outline"
+                      to={"/read/" + data.nextId}
+                    >
+                      Next <ChevronRight size={17} />
+                    </Link>
+                  )}
                 </div>
 
                 <form

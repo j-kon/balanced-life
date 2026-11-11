@@ -394,6 +394,23 @@ export function DigitalEditionPage() {
                 </div>
               )}
 
+              {(ent?.status === "revoked" || ent?.status === "refunded") && (
+                <div className="notice">
+                  <AlertCircle size={22} />
+                  <div>
+                    <strong>Online Access Support Notice</strong>
+                    <p>
+                      Online access linked to your previous entitlement has been
+                      revoked{ent.revokeReason ? ` (${ent.revokeReason})` : ""}.
+                      Please contact{" "}
+                      <strong>{config.settings.organizationName}</strong> at{" "}
+                      <strong>{config.settings.contactEmail}</strong> for
+                      support.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {(!data?.active && !isScheduled) || showRenewalCheckout ? (
                 <>
                   {/* OPTION 1: PAYSTACK ONLINE CHECKOUT */}

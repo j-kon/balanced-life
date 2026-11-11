@@ -1,17 +1,19 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Bell,
   CheckCircle2,
   Clock,
+  Palette,
   Send,
   Smartphone,
+  Sparkles,
   Trash2,
   UserCheck,
 } from "lucide-react";
 import { useApp } from "../../context/AppContext";
 import { useData } from "../../hooks/useData";
-import { ErrorBox, Loading } from "../../components/Common";
+import { ErrorBox, Loading, ThemeSelector } from "../../components/Common";
 import { api } from "../../api";
 import type {
   NotificationEventRecord,
@@ -82,6 +84,7 @@ function isIosRequiresStandalone(): boolean {
 
 export function AccountPage() {
   const { user, refresh, toast } = useApp();
+  const navigate = useNavigate();
   const {
     data: notifData,
     error: notifError,
@@ -194,10 +197,12 @@ export function AccountPage() {
           subscriptionAlertsEnabled:
             f.get("subscriptionAlertsEnabled") === "on",
           purchaseAlertsEnabled: f.get("purchaseAlertsEnabled") === "on",
+          announcementsEnabled: f.get("announcementsEnabled") === "on",
         },
         "PATCH",
       );
       reloadNotifs();
+      await refresh();
       toast("Reminder & notification preferences saved.");
     } catch (err) {
       toast((err as Error).message);
@@ -371,12 +376,54 @@ export function AccountPage() {
           <span className="eyebrow">Profile, Security &amp; Mobile Reminders</span>
           <h1>Account settings</h1>
           <p>
-            Manage your personal information, password security, and mobile PWA
-            daily reminder preferences.
+            Manage your appearance theme, welcome guide, personal information,
+            password security, and notification consent preferences.
           </p>
         </div>
         <UserCheck size={40} strokeWidth={1} />
       </div>
+
+      <section
+        className="panel stack"
+        aria-labelledby="appearance-heading"
+        style={{ marginBottom: "22px" }}
+      >
+        <div className="section-title" style={{ margin: 0 }}>
+          <div>
+            <h2 id="appearance-heading">Appearance &amp; Welcome Guide</h2>
+            <p className="muted" style={{ margin: 0, padding: 0 }}>
+              Choose Light, Dark, or follow your device&apos;s System appearance.
+              Your choice saves locally on this device before and after login.
+            </p>
+          </div>
+          <Palette size={22} />
+        </div>
+        <ThemeSelector variant="full" />
+        <div className="actions">
+          <button
+            type="button"
+            className="button outline small"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await api("/me/onboarding", { completed: false });
+                await refresh();
+                navigate("/dashboard");
+              } catch (err) {
+                toast((err as Error).message);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <Sparkles size={15} /> Reopen welcome onboarding guide
+          </button>
+          <Link className="text-link" to="/install">
+            <Smartphone size={15} /> PWA installation instructions
+          </Link>
+        </div>
+      </section>
 
       <div className="admin-plans">
         <form className="panel stack" onSubmit={saveProfile}>
@@ -452,7 +499,7 @@ export function AccountPage() {
         <Loading />
       ) : (
         notifData && (
-          <div className="admin-plans" style={{ marginTop: "24px" }}>
+          <div id="notifications" className="admin-plans" style={{ marginTop: "24px" }}>
             <form className="panel stack" onSubmit={saveNotifPreferences}>
               <div className="section-title" style={{ margin: 0 }}>
                 <h2>Mobile &amp; Daily Devotional Reminders</h2>
@@ -595,6 +642,20 @@ export function AccountPage() {
                 </span>
               </label>
 
+              <label className="check-label">
+                <input
+                  type="checkbox"
+                  name="announcementsEnabled"
+                  defaultChecked={
+                    notifData.preferences.announcementsEnabled ?? false
+                  }
+                />
+                <span>
+                  Receive optional community announcements &amp; updates from
+                  Cossy Teens Consult (off by default)
+                </span>
+              </label>
+
               <div className="notice">
                 <Smartphone size={18} />
                 <div style={{ flex: 1 }}>
@@ -716,7 +777,12 @@ export function AccountPage() {
             </form>
 
             <div className="panel stack">
-              <h2>Recent Notifications &amp; Alerts</h2>
+              <div className="section-title" style={{ margin: 0 }}>
+                <h2>Recent Notifications &amp; Alerts</h2>
+                <Link className="text-link" to="/notifications">
+                  Open full inbox
+                </Link>
+              </div>
               {notifData.events.length ? (
                 <div className="stack" style={{ gap: "12px" }}>
                   {notifData.events.slice(0, 8).map((ev) => (

@@ -2,8 +2,13 @@ import { useEffect, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { CheckCircle2, ChevronRight, X } from "lucide-react";
 import { api } from "./api";
-import type { AppConfig, User } from "./types";
-import { AppContext, defaultConfig } from "./context/AppContext";
+import type { AppConfig, ReaderAccessSummary, User } from "./types";
+import {
+  AppContext,
+  defaultConfig,
+  defaultGuestAccess,
+} from "./context/AppContext";
+import { ThemeProvider } from "./context/ThemeContext";
 import { ErrorBox, Loading } from "./components/Common";
 import { Footer, Header } from "./layouts/PublicLayout";
 import { Protected, ReaderShell } from "./layouts/ReaderLayout";
@@ -33,10 +38,9 @@ import { DashboardPage } from "./pages/reader/DashboardPage";
 import { LibraryPage } from "./pages/reader/LibraryPage";
 import { ReadingPage, SamplePage } from "./pages/reader/ReadingPage";
 import { JournalPage } from "./pages/reader/JournalPage";
-import {
-  SubscriptionPage,
-} from "./pages/reader/SubscriptionPage";
+import { SubscriptionPage } from "./pages/reader/SubscriptionPage";
 import { AccountPage } from "./pages/reader/AccountPage";
+import { NotificationsCenterPage } from "./pages/reader/NotificationsPage";
 
 function RouteScroll() {
   const { pathname } = useLocation();
@@ -48,14 +52,22 @@ function RouteScroll() {
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [access, setAccess] = useState<ReaderAccessSummary>(defaultGuestAccess);
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
   const [ready, setReady] = useState(false);
   const [startupError, setStartupError] = useState("");
   const [config, setConfig] = useState<AppConfig>(defaultConfig);
   const [message, setMessage] = useState("");
 
   const refresh = async () => {
-    const u = await api<{ user: User | null }>("/auth/me");
+    const u = await api<{
+      user: User | null;
+      access?: ReaderAccessSummary;
+      unreadNotificationsCount?: number;
+    }>("/auth/me");
     setUser(u.user);
+    setAccess(u.access || defaultGuestAccess);
+    setUnreadNotificationsCount(u.unreadNotificationsCount || 0);
     return u.user;
   };
 
@@ -78,9 +90,18 @@ export default function App() {
   }, [message]);
 
   return (
-    <AppContext.Provider
-      value={{ user, refresh, refreshConfig, config, toast: setMessage }}
-    >
+    <ThemeProvider>
+      <AppContext.Provider
+        value={{
+          user,
+          access,
+          unreadNotificationsCount,
+          refresh,
+          refreshConfig,
+          config,
+          toast: setMessage,
+        }}
+      >
       <RouteScroll />
       <Header />
       <main id="main">
@@ -199,6 +220,14 @@ export default function App() {
               }
             />
             <Route
+              path="/notifications"
+              element={
+                <Protected>
+                  <NotificationsCenterPage />
+                </Protected>
+              }
+            />
+            <Route
               path="*"
               element={
                 <div className="container section">
@@ -227,5 +256,6 @@ export default function App() {
         </div>
       )}
     </AppContext.Provider>
+    </ThemeProvider>
   );
 }

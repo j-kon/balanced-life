@@ -21,6 +21,7 @@ export const users = sqliteTable("users", {
   })
     .notNull()
     .default(true),
+  onboardingCompletedAt: text("onboarding_completed_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -31,6 +32,9 @@ export const adminUsers = sqliteTable("admin_users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   role: text("role").notNull().default("owner"),
+  customPermissionsJson: text("custom_permissions_json")
+    .notNull()
+    .default("[]"),
   status: text("status").notNull().default("active"),
   suspendedReason: text("suspended_reason").notNull().default(""),
   mfaEnabled: integer("mfa_enabled", { mode: "boolean" })
@@ -459,6 +463,9 @@ export const notificationPreferences = sqliteTable("notification_preferences", {
   purchaseAlertsEnabled: integer("purchase_alerts_enabled", { mode: "boolean" })
     .notNull()
     .default(true),
+  announcementsEnabled: integer("announcements_enabled", { mode: "boolean" })
+    .notNull()
+    .default(false),
   lastDailyReminderDate: text("last_daily_reminder_date"),
   lastUnreadReminderDate: text("last_unread_reminder_date"),
   lastExpiryReminderFor: text("last_expiry_reminder_for"),
@@ -483,6 +490,42 @@ export const pushSubscriptions = sqliteTable("push_subscriptions", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const adminNotificationCampaigns = sqliteTable(
+  "admin_notification_campaigns",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    createdByAdminId: integer("created_by_admin_id").references(
+      () => adminUsers.id,
+      { onDelete: "set null" },
+    ),
+    actorName: text("actor_name").notNull().default(""),
+    actorEmail: text("actor_email").notNull().default(""),
+    targetType: text("target_type").notNull(),
+    targetSegment: text("target_segment").notNull().default(""),
+    targetUserId: integer("target_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    category: text("category").notNull().default("announcement"),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    actionUrl: text("action_url").notNull().default("/dashboard"),
+    idempotencyKey: text("idempotency_key").notNull().unique(),
+    status: text("status").notNull().default("queued"),
+    scheduledFor: text("scheduled_for"),
+    eligibleCount: integer("eligible_count").notNull().default(0),
+    skippedOptOutCount: integer("skipped_opt_out_count").notNull().default(0),
+    queuedCount: integer("queued_count").notNull().default(0),
+    inAppCreatedCount: integer("in_app_created_count").notNull().default(0),
+    confirmedByAdmin: integer("confirmed_by_admin", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    startedAt: text("started_at"),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+);
+
 export const notificationEvents = sqliteTable("notification_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id")
@@ -493,6 +536,14 @@ export const notificationEvents = sqliteTable("notification_events", {
   body: text("body").notNull(),
   actionUrl: text("action_url").notNull().default("/dashboard"),
   dedupeKey: text("dedupe_key").notNull().unique(),
+  campaignId: integer("campaign_id").references(
+    () => adminNotificationCampaigns.id,
+    { onDelete: "set null" },
+  ),
+  createdByAdminId: integer("created_by_admin_id").references(
+    () => adminUsers.id,
+    { onDelete: "set null" },
+  ),
   pushStatus: text("push_status").notNull().default("pending"),
   deliveryAttempts: integer("delivery_attempts").notNull().default(0),
   maxAttempts: integer("max_attempts").notNull().default(3),
@@ -503,6 +554,27 @@ export const notificationEvents = sqliteTable("notification_events", {
   readAt: text("read_at"),
   createdAt: text("created_at").notNull(),
 });
+
+export const adminNotificationCampaignRecipients = sqliteTable(
+  "admin_notification_campaign_recipients",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    campaignId: integer("campaign_id")
+      .notNull()
+      .references(() => adminNotificationCampaigns.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    notificationEventId: integer("notification_event_id").references(
+      () => notificationEvents.id,
+      { onDelete: "set null" },
+    ),
+    status: text("status").notNull().default("pending"),
+    skipReason: text("skip_reason").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+);
 
 export const notificationDeliveries = sqliteTable("notification_deliveries", {
   id: integer("id").primaryKey({ autoIncrement: true }),

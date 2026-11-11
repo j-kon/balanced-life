@@ -6,7 +6,50 @@ export type User = {
   status?: "active" | "suspended";
   ageGroup?: "13_17" | "18_25" | "adult_mentor" | string;
   guardianConsentConfirmed?: boolean;
+  onboardingCompletedAt?: string | null;
   createdAt?: string;
+};
+
+export type ReaderAccessState =
+  | "guest"
+  | "free"
+  | "pending_payment"
+  | "scheduled"
+  | "active"
+  | "expiring_soon"
+  | "expired"
+  | "revoked";
+
+export type PendingPurchaseSummary = {
+  id: number;
+  reference: string;
+  paymentMethod: "paystack" | "bank_transfer";
+  status: "pending" | "verifying_transfer";
+  amountKobo: number;
+  currency: string;
+  transferReference: string;
+  createdAt: string;
+};
+
+export type ReaderAccessSummary = {
+  status: ReaderAccessState;
+  hasAccess: boolean;
+  source:
+    | "none"
+    | "digital_entitlement"
+    | "legacy_subscription"
+    | "complimentary";
+  accessType: "paid" | "complimentary" | null;
+  startsAt: string | null;
+  expiresAt: string | null;
+  daysRemaining: number | null;
+  expiringSoon: boolean;
+  legacyPersistent: boolean;
+  revokeReason: string | null;
+  pendingPurchase: PendingPurchaseSummary | null;
+  previousEntitlementExpired: boolean;
+  entitlement: DigitalEntitlementRecord | null;
+  subscription: SubscriptionDetails | null;
 };
 
 export type JournalEntry = {
@@ -392,6 +435,7 @@ export type NotificationPreferences = {
   quietHoursEnd: string;
   subscriptionAlertsEnabled: boolean;
   purchaseAlertsEnabled: boolean;
+  announcementsEnabled?: boolean;
   lastDailyReminderDate: string | null;
   lastUnreadReminderDate: string | null;
   lastExpiryReminderFor: string | null;
@@ -421,6 +465,7 @@ export type NotificationEventRecord = {
     | "subscription"
     | "digital_purchase"
     | "printed_order"
+    | "announcement"
     | "account"
     | "system";
   title: string;

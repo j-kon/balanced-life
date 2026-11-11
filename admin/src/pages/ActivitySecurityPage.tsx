@@ -643,6 +643,48 @@ export function ActivitySecurityPage() {
                               ),
                             )}
                           </select>
+                          {member.role !== "owner" && !isSelf && (
+                            <label
+                              className="check-label"
+                              style={{ marginTop: "6px", fontSize: "0.72rem" }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={Boolean(
+                                  member.customPermissions?.includes(
+                                    "notifications.broadcast",
+                                  ),
+                                )}
+                                disabled={staffBusy}
+                                onChange={(e) => {
+                                  const existing =
+                                    member.customPermissions || [];
+                                  const next = e.target.checked
+                                    ? Array.from(
+                                        new Set([
+                                          ...existing,
+                                          "notifications.write",
+                                          "notifications.broadcast",
+                                        ]),
+                                      )
+                                    : existing.filter(
+                                        (p) =>
+                                          p !== "notifications.broadcast" &&
+                                          (member.role === "orders_manager" ||
+                                            p !== "notifications.write"),
+                                      );
+                                  updateStaff(
+                                    member.id,
+                                    { customPermissions: next },
+                                    e.target.checked
+                                      ? `Grant broadcast notification permission to ${member.email}?`
+                                      : `Revoke broadcast notification permission from ${member.email}?`,
+                                  );
+                                }}
+                              />
+                              <span>Allow broadcasts</span>
+                            </label>
+                          )}
                         </td>
                         <td>
                           <span className="pill">

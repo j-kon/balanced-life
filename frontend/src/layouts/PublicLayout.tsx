@@ -1,16 +1,34 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
-import { ArrowUpRight, LogOut, Menu, X } from "lucide-react";
+import {
+  ArrowUpRight,
+  Bell,
+  LogOut,
+  Menu,
+  Monitor,
+  Moon,
+  Sun,
+  X,
+} from "lucide-react";
 import { useApp } from "../context/AppContext";
+import { useTheme } from "../context/ThemeContext";
 import { Brand } from "../components/Common";
 import { api } from "../api";
 
 export function Header() {
-  const { user, refresh, toast } = useApp();
+  const { user, unreadNotificationsCount, refresh, toast } = useApp();
+  const { preference, resolvedTheme, cyclePreference } = useTheme();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const location = useLocation();
   useEffect(() => setOpen(false), [location]);
+
+  const ThemeIcon =
+    preference === "system" ? Monitor : preference === "dark" ? Moon : Sun;
+  const themeButtonLabel =
+    preference === "system"
+      ? `Theme: System (${resolvedTheme}). Activate to switch.`
+      : `Theme: ${preference}. Activate to switch.`;
 
   return (
     <header className="header">
@@ -25,38 +43,87 @@ export function Header() {
           <NavLink to="/library">Library</NavLink>
           <NavLink to="/pricing">Get access</NavLink>
           <NavLink to="/bookstore">Printed Book</NavLink>
+          <NavLink to="/install">Install App</NavLink>
           <NavLink to="/contact">Contact</NavLink>
-          <Link className="button small" to={user ? "/dashboard" : "/login"}>
-            {user ? "My journey" : "Sign in"}
-            <ArrowUpRight size={15} />
-          </Link>
+          {!user && (
+            <>
+              <NavLink to="/register">Register</NavLink>
+              <Link className="button small" to="/login">
+                Sign in <ArrowUpRight size={15} />
+              </Link>
+            </>
+          )}
           {user && (
-            <button
-              className="icon-button"
-              aria-label="Sign out of account"
-              onClick={async () => {
-                try {
-                  await api("/auth/logout", {});
-                  await refresh();
-                  navigate("/");
-                } catch (error) {
-                  toast((error as Error).message);
-                }
-              }}
-            >
-              <LogOut size={18} />
-              <span className="mobile-signout-label">Sign out</span>
-            </button>
+            <>
+              <Link className="button small" to="/dashboard">
+                My journey
+                <ArrowUpRight size={15} />
+              </Link>
+              <button
+                className="icon-button"
+                aria-label="Sign out of account"
+                onClick={async () => {
+                  try {
+                    await api("/auth/logout", {});
+                    await refresh();
+                    navigate("/");
+                  } catch (error) {
+                    toast((error as Error).message);
+                  }
+                }}
+              >
+                <LogOut size={18} />
+                <span className="mobile-signout-label">Sign out</span>
+              </button>
+            </>
           )}
         </nav>
-        <button
-          className="icon-button menu-toggle"
-          aria-label="Toggle navigation"
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-        >
-          {open ? <X /> : <Menu />}
-        </button>
+
+        <div className="header-quick-actions">
+          <button
+            type="button"
+            className="icon-button theme-quick-btn"
+            aria-label={themeButtonLabel}
+            onClick={cyclePreference}
+          >
+            <ThemeIcon size={18} aria-hidden="true" />
+            <span className="sr-only">
+              {preference === "system"
+                ? `System theme (${resolvedTheme})`
+                : `${preference} theme`}
+            </span>
+          </button>
+
+          {user && (
+            <Link
+              to="/notifications"
+              className="icon-button notif-bell-link"
+              aria-label={
+                unreadNotificationsCount > 0
+                  ? `Notifications (${unreadNotificationsCount} unread)`
+                  : "Notifications"
+              }
+            >
+              <Bell size={18} aria-hidden="true" />
+              {unreadNotificationsCount > 0 && (
+                <span className="notif-badge" aria-hidden="true">
+                  {unreadNotificationsCount > 99
+                    ? "99+"
+                    : unreadNotificationsCount}
+                </span>
+              )}
+            </Link>
+          )}
+
+          <button
+            className="icon-button menu-toggle"
+            aria-label="Toggle navigation"
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+          >
+            {open ? <X /> : <Menu />}
+          </button>
+        </div>
       </div>
     </header>
   );
@@ -80,13 +147,14 @@ export function Footer() {
           <Link to="/themes">2027 themes</Link>
           <Link to="/digital-edition">Online access · ₦3,500</Link>
           <Link to="/install">Install the app</Link>
-          <Link to="/bookstore">Printed Book</Link>
+          <Link to="/bookstore">Printed Book · ₦5,000</Link>
           <Link to="/contact">Contact</Link>
           <Link to="/privacy">Privacy policy</Link>
           <Link to="/terms">Terms of use</Link>
         </div>
         <small>
-          © 2027 {config.settings.organizationName} · {config.settings.authorName}
+          © 2027 {config.settings.organizationName} ·{" "}
+          {config.settings.authorName}
           <br />
           {config.settings.contactEmail} · {config.settings.contactPhone}
           {config.settings.contactSecondaryPhone

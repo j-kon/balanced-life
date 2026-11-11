@@ -154,6 +154,7 @@ export type AdminOverviewData = {
     configured: boolean;
     activePushDevicesCount: number;
     recentEvents: NotificationEventRecord[];
+    campaigns?: AdminNotificationCampaign[];
   };
   engagement: Array<{
     id: number;
@@ -168,6 +169,33 @@ export type AdminOverviewData = {
     configured: boolean;
     provider: "paystack";
   };
+};
+
+export type AdminNotificationCampaign = {
+  id: number;
+  createdByAdminId: number | null;
+  actorName: string;
+  actorEmail: string;
+  targetType: "individual" | "all" | "segment";
+  targetSegment: string;
+  targetUserId: number | null;
+  category: "announcement" | "account" | "system" | "subscription";
+  title: string;
+  body: string;
+  actionUrl: string;
+  idempotencyKey: string;
+  status: "scheduled" | "queued" | "enqueueing" | "completed" | "cancelled";
+  scheduledFor: string | null;
+  eligibleCount: number;
+  skippedOptOutCount: number;
+  queuedCount: number;
+  inAppCreatedCount: number;
+  pushAttempts: number;
+  pushProviderAccepted: number;
+  pushFailedOrSkipped: number;
+  readCount: number;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type AdminSaveFn = (

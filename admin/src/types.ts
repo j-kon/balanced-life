@@ -20,6 +20,7 @@ export type AdminPermission =
   | "payments.write"
   | "notifications.read"
   | "notifications.write"
+  | "notifications.broadcast"
   | "settings.read"
   | "settings.write"
   | "audit.read"
@@ -45,6 +46,7 @@ export type StaffAdminRecord = {
   name: string;
   email: string;
   role: AdminRole;
+  customPermissions?: AdminPermission[];
   status: "active" | "suspended";
   suspendedReason: string;
   mfaEnabled: boolean;
@@ -422,6 +424,7 @@ export type NotificationEventRecord = {
     | "subscription"
     | "digital_purchase"
     | "printed_order"
+    | "announcement"
     | "account"
     | "system";
   title: string;

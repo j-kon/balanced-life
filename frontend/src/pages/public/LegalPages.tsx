@@ -94,13 +94,15 @@ export function TermsPage() {
         We offer distinct ways to access {config.settings.siteTitle}:
       </p>
       <p>
-        <strong>a) 2027 Digital Copy ({money(config.settings.digitalEditionPriceKobo)}):</strong>{" "}
-        A verified one-time purchase grants persistent online reading access to
-        all published devotionals in the 2027 edition inside your registered
-        reader account, along with your private Growth Journal and 5-step daily
-        accountability tools. A one-time Digital Copy purchase does not incur
-        recurring billing and does not include future annual editions unless
-        explicitly stated.
+        <strong>a) 2027 Online Access ({money(config.settings.digitalEditionPriceKobo)}):</strong>{" "}
+        A verified one-time purchase grants {config.settings.digitalAccessDurationMonths || 12}{" "}
+        calendar months of online reading access to published devotionals in the
+        2027 edition inside your registered reader account (starting January 1,
+        2027 for early purchases, or on payment verification thereafter), along
+        with your private Growth Journal and 5-step daily accountability tools.
+        Online access has no automatic recurring billing, can be manually renewed,
+        and preserves existing grandfathered legacy entitlements documented prior
+        to the 12-month policy update.
       </p>
       <p><strong>b) Printed book ({money(config.settings.hardcoverPriceKobo)}):</strong> One physical copy, ordered separately from online reading access. Delivery arrangements are confirmed by {config.settings.organizationName}.</p>
       <h2>3. Payment Verification, Refunds &amp; Access Revocation</h2>

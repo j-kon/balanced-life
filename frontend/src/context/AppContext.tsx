@@ -1,5 +1,22 @@
 import { createContext, useContext } from "react";
-import type { AppConfig, User } from "../types";
+import type { AppConfig, ReaderAccessSummary, User } from "../types";
+
+export const defaultGuestAccess: ReaderAccessSummary = {
+  status: "guest",
+  hasAccess: false,
+  source: "none",
+  accessType: null,
+  startsAt: null,
+  expiresAt: null,
+  daysRemaining: null,
+  expiringSoon: false,
+  legacyPersistent: false,
+  revokeReason: null,
+  pendingPurchase: null,
+  previousEntitlementExpired: false,
+  entitlement: null,
+  subscription: null,
+};
 
 export const defaultConfig: AppConfig = {
   currentDate: new Date().toISOString().slice(0, 10),
@@ -68,6 +85,8 @@ export const defaultConfig: AppConfig = {
 
 export type AppContextValue = {
   user: User | null;
+  access: ReaderAccessSummary;
+  unreadNotificationsCount: number;
   refresh: () => Promise<User | null>;
   refreshConfig: () => Promise<void>;
   config: AppConfig;
@@ -76,6 +95,8 @@ export type AppContextValue = {
 
 export const AppContext = createContext<AppContextValue>({
   user: null,
+  access: defaultGuestAccess,
+  unreadNotificationsCount: 0,
   refresh: async () => null,
   refreshConfig: async () => {},
   config: defaultConfig,

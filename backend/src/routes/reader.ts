@@ -35,9 +35,11 @@ import {
 import {
   SUPPORTED_TIMEZONES,
   getNotificationPreferences,
+  getUnreadNotificationCount,
   getUserNotifications,
   getUserPushDevices,
   getUserPushSubscriptionsCount,
+  markAllNotificationsRead,
   markNotificationRead,
   removePushSubscription,
   removePushSubscriptionById,
@@ -46,6 +48,10 @@ import {
   updateNotificationPreferences,
   type WebPushProvider,
 } from "../services/notifications.js";
+import {
+  computeReadingStreakDays,
+  getReaderAccessSummary,
+} from "../services/access.js";
 import type { PaymentProvider } from "../services/payments.js";
 import { formatEntryMetadata, getAuthorizedEntry } from "./public.js";
 import { z } from "zod";
@@ -62,16 +68,22 @@ export function registerReaderRoutes(
 
   app.get(prefix + "/me/dashboard", async (req) => {
     const user = requireUser(req);
-    const settings = getAppSettings(store);
     const currentDate = new Date().toISOString().slice(0, 10);
     const isUpcomingYear = currentDate < "2027-01-01";
-    const canReadPremium = hasPremiumAccess(store, user);
+    const access = getReaderAccessSummary(store, user);
+    const canReadPremium = access.hasAccess;
     const subscriptionAccess = hasSubscriptionAccess(store, user);
     const digitalAccess = hasActiveDigitalEntitlement(store, user.id, 2027);
-    const digitalEntitlement = getUserDigitalEntitlement(store, user.id, 2027);
+    const digitalEntitlement = access.entitlement;
 
-    const notifications = getUserNotifications(store, user.id, 10);
+    const notifications = getUserNotifications(store, user.id, { limit: 15 });
+    const unreadNotificationsCount = getUnreadNotificationCount(store, user.id);
     const notificationPreferences = getNotificationPreferences(store, user.id);
+    const streakDays = computeReadingStreakDays(
+      store,
+      user.id,
+      notificationPreferences.timezone,
+    );
 
     const entries = db
       .select()
@@ -103,29 +115,45 @@ export function registerReaderRoutes(
     const accessibleEntries = entries.filter(
       (e) => e.sample || canReadPremium,
     );
+    const freeSample = entries.find((e) => e.sample) || null;
+    const todayEntry = entries.find((e) => e.date === currentDate) || null;
+    const todayEntryUnavailable =
+      !isUpcomingYear && (!todayEntry || (!todayEntry.sample && !canReadPremium));
 
-    const featured =
-      entries.find((e) => e.date === currentDate) ||
-      accessibleEntries.find((e) => !e.completed) ||
-      entries.find((e) => e.sample) ||
-      entries[0] ||
-      null;
+    const featured = canReadPremium
+      ? todayEntry ||
+        accessibleEntries.find((e) => !e.completed) ||
+        accessibleEntries[0] ||
+        null
+      : freeSample;
 
-    const continueReading =
-      accessibleEntries.find((e) => !e.completed) ||
-      entries.find((e) => !e.completed) ||
-      null;
+    const continueReading = canReadPremium
+      ? accessibleEntries.find((e) => !e.completed) ||
+        accessibleEntries[0] ||
+        null
+      : freeSample;
+
+    const lockedPreviews = !canReadPremium
+      ? entries.filter((e) => !e.sample).slice(0, 6)
+      : [];
 
     return {
       currentDate,
       isUpcomingYear,
+      accessStatus: access.status,
+      access,
+      onboardingCompleted: Boolean(user.onboardingCompletedAt),
       hasAccess: canReadPremium,
       hasSubscriptionAccess: subscriptionAccess,
       hasDigitalEditionAccess: digitalAccess,
       digitalEntitlement,
       completed: done.length,
+      streakDays,
       bookmarksCount: savedRows.length,
       journalsCount: journalRows.length,
+      freeSample,
+      todayEntryUnavailable,
+      lockedPreviews,
       featured,
       continueReading,
       history: done
@@ -135,13 +163,10 @@ export function registerReaderRoutes(
           return entry ? { ...entry, completedAt: p.completedAt } : null;
         })
         .filter(Boolean),
-      subscription: getSubscriptionDetails(
-        store,
-        user.id,
-        settings.renewalReminderDays,
-      ),
+      subscription: access.subscription,
       printedOrders: getUserPrintedOrders(store, user),
       notifications,
+      unreadNotificationsCount,
       notificationPreferences,
     };
   });
@@ -583,17 +608,26 @@ export function registerReaderRoutes(
 
   app.get(prefix + "/me/notifications", async (req) => {
     const user = requireUser(req);
+    const q = (req.query || {}) as { filter?: string; limit?: string };
+    const filter = q.filter === "unread" ? "unread" : "all";
+    const limit = Math.min(Math.max(1, Number(q.limit) || 50), 100);
     return {
       preferences: getNotificationPreferences(store, user.id),
       pushSubscriptionsCount: getUserPushSubscriptionsCount(store, user.id),
       devices: getUserPushDevices(store, user.id),
-      events: getUserNotifications(store, user.id, 30),
+      events: getUserNotifications(store, user.id, { filter, limit }),
+      unreadCount: getUnreadNotificationCount(store, user.id),
       webPush: {
         configured: pushProvider.configured,
         publicKey: pushProvider.publicKey,
       },
       supportedTimezones: SUPPORTED_TIMEZONES,
     };
+  });
+
+  app.post(prefix + "/me/notifications/read-all", async (req) => {
+    const user = requireUser(req);
+    return markAllNotificationsRead(store, user.id);
   });
 
   app.patch(

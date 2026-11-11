@@ -5,10 +5,12 @@ import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import {
   ADMIN_ROLES,
+  GRANTABLE_CUSTOM_PERMISSIONS,
+  adminHasPermission,
   assertStrongAdminPassword,
-  hasAdminPermission,
   hashPassword,
   logAdminAudit,
+  parseCustomAdminPermissions,
   requireAdminPermission,
   requireOwner,
   type AdminActor,
@@ -17,6 +19,7 @@ import {
 import { HttpError } from "../errors.js";
 import {
   adminBulkOrderUpdateSchema,
+  adminNotificationCampaignSchema,
   adminPrintedOrderUpdateSchema,
   adminReconcileDigitalPurchaseSchema,
   complimentaryGrantSchema,
@@ -50,9 +53,15 @@ import {
 import type { PaymentProvider } from "../services/payments.js";
 import {
   LiveWebPushProvider,
+  cancelAdminNotificationCampaign,
+  createAndQueueNotificationCampaign,
+  getAdminNotificationCampaigns,
+  previewNotificationCampaign,
   runNotificationWorkerCycle,
+  searchNotificationReaders,
   type WebPushProvider,
 } from "../services/notifications.js";
+import type { ReaderAudienceSegment } from "../services/access.js";
 
 export function registerAdminRoutes(
   app: FastifyInstance,
@@ -90,6 +99,7 @@ export function registerAdminRoutes(
   const staffUpdateSchema = z.object({
     name: z.string().trim().min(2).max(100).optional(),
     role: z.enum(ADMIN_ROLES).optional(),
+    customPermissions: z.array(z.enum(GRANTABLE_CUSTOM_PERMISSIONS)).optional(),
     status: z.enum(["active", "suspended"]).optional(),
     suspendedReason: z.string().trim().max(500).optional(),
     resetMfa: z.boolean().optional(),
@@ -114,17 +124,14 @@ export function registerAdminRoutes(
 
   app.get(prefix + "/admin/overview", async (req) => {
     const admin = requireAdminPermission(req, "overview.read");
-    const canReaders = hasAdminPermission(admin.role, "readers.read");
-    const canDevotionals = hasAdminPermission(admin.role, "devotionals.read");
-    const canDigital = hasAdminPermission(admin.role, "digital_orders.read");
-    const canPrinted = hasAdminPermission(admin.role, "printed_orders.read");
-    const canBulk = hasAdminPermission(admin.role, "bulk_orders.read");
-    const canPayments = hasAdminPermission(admin.role, "payments.read");
-    const canNotifications = hasAdminPermission(
-      admin.role,
-      "notifications.read",
-    );
-    const canAudit = hasAdminPermission(admin.role, "audit.read");
+    const canReaders = adminHasPermission(admin, "readers.read");
+    const canDevotionals = adminHasPermission(admin, "devotionals.read");
+    const canDigital = adminHasPermission(admin, "digital_orders.read");
+    const canPrinted = adminHasPermission(admin, "printed_orders.read");
+    const canBulk = adminHasPermission(admin, "bulk_orders.read");
+    const canPayments = adminHasPermission(admin, "payments.read");
+    const canNotifications = adminHasPermission(admin, "notifications.read");
+    const canAudit = adminHasPermission(admin, "audit.read");
 
     const settings = getAppSettings(store);
 
@@ -888,6 +895,9 @@ export function registerAdminRoutes(
         configured: pushProvider.configured,
         activePushDevicesCount,
         recentEvents: pushEventsAll.slice(0, 20),
+        campaigns: canNotifications
+          ? getAdminNotificationCampaigns(store, { limit: 15 }).items
+          : [],
       },
       engagement: canDevotionals
         ? entries
@@ -1326,7 +1336,7 @@ export function registerAdminRoutes(
     if (
       input.paymentStatus !== undefined &&
       input.paymentStatus !== existing.paymentStatus &&
-      !hasAdminPermission(admin.role, "payments.write")
+      !adminHasPermission(admin, "payments.write")
     ) {
       throw new HttpError(
         403,
@@ -1360,6 +1370,100 @@ export function registerAdminRoutes(
     );
     return settings;
   });
+
+  app.get(prefix + "/admin/notifications/readers", async (req) => {
+    requireAdminPermission(req, "notifications.write");
+    const q = (req.query || {}) as {
+      search?: string;
+      segment?: ReaderAudienceSegment | "all";
+      limit?: string;
+    };
+    const items = searchNotificationReaders(store, {
+      search: q.search,
+      segment: q.segment,
+      limit: Number(q.limit) || 40,
+    });
+    return { items };
+  });
+
+  app.post(
+    prefix + "/admin/notifications/preview",
+    { config: { rateLimit: { max: 40, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const admin = requireAdminPermission(req, "notifications.write");
+      const input = adminNotificationCampaignSchema.parse(req.body);
+      if (
+        input.targetType !== "individual" &&
+        !adminHasPermission(admin, "notifications.broadcast")
+      ) {
+        throw new HttpError(
+          403,
+          "Only administrators explicitly permitted by the owner can send broadcast campaigns.",
+        );
+      }
+      return previewNotificationCampaign(store, input);
+    },
+  );
+
+  app.post(
+    prefix + "/admin/notifications/campaigns",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const admin = requireAdminPermission(req, "notifications.write");
+      const input = adminNotificationCampaignSchema.parse(req.body);
+      if (
+        input.targetType !== "individual" &&
+        !adminHasPermission(admin, "notifications.broadcast")
+      ) {
+        throw new HttpError(
+          403,
+          "Only administrators explicitly permitted by the owner can send multi-reader broadcast campaigns.",
+        );
+      }
+      return createAndQueueNotificationCampaign(store, actorOf(admin), input);
+    },
+  );
+
+  app.get(prefix + "/admin/notifications/campaigns", async (req) => {
+    requireAdminPermission(req, "notifications.read");
+    const q = (req.query || {}) as { page?: string; limit?: string };
+    return getAdminNotificationCampaigns(store, {
+      page: Number(q.page) || 1,
+      limit: Number(q.limit) || 20,
+    });
+  });
+
+  app.post(
+    prefix + "/admin/notifications/campaigns/:id/cancel",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const admin = requireAdminPermission(req, "notifications.write");
+      const campaignId = idOf(req);
+      const existing = db
+        .select()
+        .from(s.adminNotificationCampaigns)
+        .where(eq(s.adminNotificationCampaigns.id, campaignId))
+        .get();
+      if (
+        existing &&
+        existing.targetType !== "individual" &&
+        !adminHasPermission(admin, "notifications.broadcast")
+      ) {
+        throw new HttpError(
+          403,
+          "Broadcast notification permission is required to cancel a multi-reader campaign.",
+        );
+      }
+      return {
+        ok: true,
+        campaign: cancelAdminNotificationCampaign(
+          store,
+          actorOf(admin),
+          campaignId,
+        ),
+      };
+    },
+  );
 
   app.post(
     prefix + "/admin/notifications/run-worker",
@@ -1468,6 +1572,7 @@ export function registerAdminRoutes(
         name: row.name,
         email: row.email,
         role: row.role,
+        customPermissions: parseCustomAdminPermissions(row.customPermissionsJson),
         status: row.status,
         suspendedReason: row.suspendedReason,
         mfaEnabled: Boolean(row.mfaEnabled),
@@ -1618,12 +1723,18 @@ export function registerAdminRoutes(
       : existing.passwordHash;
     const now = new Date().toISOString();
 
+    const nextCustomPermissions =
+      input.customPermissions !== undefined
+        ? JSON.stringify(Array.from(new Set(input.customPermissions)))
+        : existing.customPermissionsJson || "[]";
+
     return sqlite.transaction(() => {
       const updated = db
         .update(s.adminUsers)
         .set({
           name: input.name ?? existing.name,
           role: nextRole,
+          customPermissionsJson: nextCustomPermissions,
           status: nextStatus,
           suspendedReason:
             nextStatus === "suspended"
@@ -1664,6 +1775,9 @@ export function registerAdminRoutes(
 
       const changes: string[] = [];
       if (nextRole !== existing.role) changes.push(`role=${nextRole}`);
+      if (nextCustomPermissions !== (existing.customPermissionsJson || "[]")) {
+        changes.push(`customPermissions=${nextCustomPermissions}`);
+      }
       if (nextStatus !== existing.status) changes.push(`status=${nextStatus}`);
       if (input.resetMfa) changes.push("MFA reset (re-enrollment required)");
       if (input.newPassword) changes.push("password reset");
@@ -1683,6 +1797,9 @@ export function registerAdminRoutes(
         name: updated.name,
         email: updated.email,
         role: updated.role,
+        customPermissions: parseCustomAdminPermissions(
+          updated.customPermissionsJson,
+        ),
         status: updated.status,
         suspendedReason: updated.suspendedReason,
         mfaEnabled: Boolean(updated.mfaEnabled),
