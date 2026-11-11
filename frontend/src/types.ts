@@ -2,7 +2,7 @@ export type User = {
   id: number;
   name: string;
   email: string;
-  role: "admin" | "reader";
+  role: "reader";
   status?: "active" | "suspended";
   ageGroup?: "13_17" | "18_25" | "adult_mentor" | string;
   guardianConsentConfirmed?: boolean;

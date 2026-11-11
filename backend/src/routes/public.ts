@@ -91,7 +91,7 @@ export function getAuthorizedEntry(
     .where(eq(s.devotionals.id, id))
     .get();
 
-  if (!entry || (!entry.published && user?.role !== "admin")) {
+  if (!entry || !entry.published) {
     throw new HttpError(404, "This reading is not available.");
   }
   if (!entry.sample && !hasPremiumAccess(store, user)) {

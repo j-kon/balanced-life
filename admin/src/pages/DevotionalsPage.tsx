@@ -8,9 +8,9 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { Empty, ErrorBox, Loading } from "../../components/Common";
-import { api, monthName } from "../../api";
-import type { Entry } from "../../types";
+import { Empty, ErrorBox, Loading } from "../components/Common";
+import { api, monthName } from "../api";
+import type { Entry } from "../types";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 
 const blankEntry: Partial<Entry> = {

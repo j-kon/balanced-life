@@ -37,10 +37,9 @@ export function AuthPage({ register = false }: { register?: boolean }) {
           password: f.get("password"),
         });
       }
-      const loggedIn = await refresh();
+      await refresh();
       const redirectTarget =
-        (location.state as { from?: string })?.from ||
-        (loggedIn?.role === "admin" ? "/admin" : "/dashboard");
+        (location.state as { from?: string })?.from || "/dashboard";
       navigate(redirectTarget);
     } catch (e) {
       setError((e as Error).message);

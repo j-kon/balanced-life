@@ -1,5 +1,5 @@
 import { AlertCircle, ArrowRight, Bell, Play } from "lucide-react";
-import { Empty } from "../../components/Common";
+import { Empty } from "../components/Common";
 import type {
   AdminOverviewData,
   AdminSaveFn,

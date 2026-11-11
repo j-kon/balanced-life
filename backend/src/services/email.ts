@@ -18,6 +18,7 @@ export type OrderAccessEmailInput = {
 export interface EmailService {
   readonly configured: boolean;
   sendPasswordReset(input: PasswordResetEmailInput): Promise<void>;
+  sendAdminPasswordReset?(input: PasswordResetEmailInput): Promise<void>;
   sendOrderAccessLink?(input: OrderAccessEmailInput): Promise<void>;
 }
 
@@ -55,6 +56,33 @@ export class WebhookEmailService implements EmailService {
       throw new HttpError(
         502,
         "Password reset email could not be delivered by the configured email provider.",
+      );
+    }
+  }
+
+  async sendAdminPasswordReset(input: PasswordResetEmailInput): Promise<void> {
+    if (!this.configured) {
+      throw new HttpError(
+        503,
+        "Transactional email delivery is not configured in this environment. Set EMAIL_WEBHOOK_URL to enable administrator password-reset emails.",
+      );
+    }
+
+    const res = await fetch(this.webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: this.from,
+        to: input.to,
+        subject: "Reset your administrator password — The Balanced Life Admin",
+        text: `Hello ${input.name},\n\nWe received a request to reset your administrator password for The Balanced Life Admin Portal.\n\nAdministrator reset link (valid for ${input.expiresInMinutes} minutes):\n${input.resetUrl}\n\nIf you did not request this change, notify the portal owner immediately.`,
+      }),
+    });
+
+    if (!res.ok) {
+      throw new HttpError(
+        502,
+        "Administrator password reset email could not be delivered by the configured email provider.",
       );
     }
   }

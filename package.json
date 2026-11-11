@@ -4,10 +4,11 @@
   "version": "1.0.0",
   "workspaces": [
     "frontend",
+    "admin",
     "backend"
   ],
   "scripts": {
-    "dev": "concurrently -k -n api,web \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "dev": "concurrently -k -n api,web,admin \"npm run dev -w backend\" \"npm run dev -w frontend\" \"npm run dev -w admin\"",
     "build": "npm run build --workspaces",
     "test": "npm run test -w backend",
     "lint": "npm run lint --workspaces",

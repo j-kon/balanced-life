@@ -405,10 +405,7 @@ export function AccountPage() {
             />
           </label>
           <p className="muted">
-            Account role:{" "}
-            <strong>
-              {user?.role === "admin" ? "Administrator" : "Reader"}
-            </strong>
+            Account role: <strong>Reader</strong>
             {user?.ageGroup ? ` · Group: ${user.ageGroup}` : ""}
           </p>
           <ErrorBox message={profileError} />

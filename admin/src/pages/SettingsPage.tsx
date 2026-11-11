@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Landmark, Settings } from "lucide-react";
-import type { BankAccountSetting } from "../../types";
+import type { BankAccountSetting } from "../types";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 
 export function SettingsPage({

@@ -67,8 +67,7 @@ export function registerReaderRoutes(
     const isUpcomingYear = currentDate < "2027-01-01";
     const canReadPremium = hasPremiumAccess(store, user);
     const subscriptionAccess = hasSubscriptionAccess(store, user);
-    const digitalAccess =
-      user.role === "admin" || hasActiveDigitalEntitlement(store, user.id, 2027);
+    const digitalAccess = hasActiveDigitalEntitlement(store, user.id, 2027);
     const digitalEntitlement = getUserDigitalEntitlement(store, user.id, 2027);
 
     const notifications = getUserNotifications(store, user.id, 10);

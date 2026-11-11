@@ -4,7 +4,11 @@ import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import { HttpError } from "../errors.js";
 import type { PaymentProvider } from "./payments.js";
-import type { PublicUser } from "../auth.js";
+import {
+  logAdminAudit,
+  type AdminActor,
+  type PublicUser,
+} from "../auth.js";
 import { hasActiveDigitalEntitlement } from "./commerce.js";
 import { createNotificationEvent } from "./notifications.js";
 
@@ -153,7 +157,6 @@ export function hasSubscriptionAccess(
   referenceNowIso?: string,
 ): boolean {
   if (!user || user.status === "suspended") return false;
-  if (user.role === "admin") return true;
   const now = referenceNowIso || new Date().toISOString();
   const sub = store.db
     .select()
@@ -175,14 +178,13 @@ export function hasPremiumAccess(
   referenceNowIso?: string,
 ): boolean {
   if (!user || user.status === "suspended") return false;
-  if (user.role === "admin") return true;
   if (hasSubscriptionAccess(store, user, referenceNowIso)) return true;
   return hasActiveDigitalEntitlement(store, user.id, 2027, referenceNowIso);
 }
 
 export function grantComplimentaryAccess(
   store: Store,
-  adminId: number,
+  actor: AdminActor,
   targetUserId: number,
   input: { planId: number; reason: string },
 ) {
@@ -226,7 +228,7 @@ export function grantComplimentaryAccess(
       expiresAt: addMonths(base, plan.months),
       renewalMode: "manual" as const,
       cancelAtPeriodEnd: false,
-      grantedByAdminId: adminId,
+      grantedByAdminId: actor.id,
       grantReason: input.reason,
       updatedAt: now,
     };
@@ -236,13 +238,14 @@ export function grantComplimentaryAccess(
       .onConflictDoUpdate({ target: s.subscriptions.userId, set: values })
       .run();
 
-    db.insert(s.auditLogs)
-      .values({
-        adminId,
-        action: `Granted complimentary ${plan.name} access to ${targetUser.email} (${input.reason})`,
-        createdAt: now,
-      })
-      .run();
+    logAdminAudit(
+      store,
+      actor,
+      `Granted complimentary ${plan.name} access to ${targetUser.email} (${input.reason})`,
+      "subscription",
+      targetUserId,
+      now,
+    );
 
     createNotificationEvent(store, {
       userId: targetUserId,
@@ -259,7 +262,7 @@ export function grantComplimentaryAccess(
 
 export function revokeSubscriptionAccess(
   store: Store,
-  adminId: number,
+  actor: AdminActor,
   targetUserId: number,
   reason: string,
 ) {
@@ -318,13 +321,14 @@ export function revokeSubscriptionAccess(
         .run();
     }
 
-    db.insert(s.auditLogs)
-      .values({
-        adminId,
-        action: `Revoked membership access for ${targetUser.email} (${reason})`,
-        createdAt: now,
-      })
-      .run();
+    logAdminAudit(
+      store,
+      actor,
+      `Revoked membership access for ${targetUser.email} (${reason})`,
+      "subscription",
+      targetUserId,
+      now,
+    );
 
     createNotificationEvent(store, {
       userId: targetUserId,

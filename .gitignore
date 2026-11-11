@@ -2,6 +2,7 @@ node_modules/
 **/dist/
 **/.env
 **/*.sqlite*
+backend/data/.dev-mfa.key
 private/manuscript/*
 !private/manuscript/.gitkeep
 private/backups/

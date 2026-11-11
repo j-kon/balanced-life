@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import { Empty } from "../../components/Common";
-import { money } from "../../api";
-import type { BulkOrderRecord } from "../../types";
+import { Empty } from "../components/Common";
+import { money } from "../api";
+import type { BulkOrderRecord } from "../types";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 
 export function BulkOrdersPage({

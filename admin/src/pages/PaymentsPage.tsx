@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { CheckCircle2, CreditCard, Landmark, Search } from "lucide-react";
-import { Empty } from "../../components/Common";
-import { money } from "../../api";
+import { Empty } from "../components/Common";
+import { money } from "../api";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 
 type LedgerRow = {

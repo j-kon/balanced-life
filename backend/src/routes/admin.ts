@@ -1,8 +1,19 @@
 import type { FastifyInstance } from "fastify";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gt } from "drizzle-orm";
+import { z } from "zod";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
-import { requireAdmin } from "../auth.js";
+import {
+  ADMIN_ROLES,
+  assertStrongAdminPassword,
+  hasAdminPermission,
+  hashPassword,
+  logAdminAudit,
+  requireAdminPermission,
+  requireOwner,
+  type AdminActor,
+  type PublicAdmin,
+} from "../auth.js";
 import { HttpError } from "../errors.js";
 import {
   adminBulkOrderUpdateSchema,
@@ -52,11 +63,38 @@ export function registerAdminRoutes(
 ) {
   const { db, sqlite } = store;
 
-  const audit = (adminId: number, action: string) =>
-    db
-      .insert(s.auditLogs)
-      .values({ adminId, action, createdAt: new Date().toISOString() })
-      .run();
+  const actorOf = (admin: PublicAdmin): AdminActor => ({
+    id: admin.id,
+    name: admin.name,
+    email: admin.email,
+    role: admin.role,
+  });
+
+  const audit = (
+    admin: PublicAdmin,
+    action: string,
+    entityType = "system",
+    entityId: string | number = "",
+  ) => logAdminAudit(store, actorOf(admin), action, entityType, entityId);
+
+  const staffCreateSchema = z.object({
+    name: z.string().trim().min(2).max(100),
+    email: z
+      .email("Enter a valid administrator email address.")
+      .max(254)
+      .transform((v) => v.toLowerCase()),
+    role: z.enum(ADMIN_ROLES),
+    password: z.string().min(12).max(128),
+  });
+
+  const staffUpdateSchema = z.object({
+    name: z.string().trim().min(2).max(100).optional(),
+    role: z.enum(ADMIN_ROLES).optional(),
+    status: z.enum(["active", "suspended"]).optional(),
+    suspendedReason: z.string().trim().max(500).optional(),
+    resetMfa: z.boolean().optional(),
+    newPassword: z.string().min(12).max(128).optional(),
+  });
 
   const syncMonthlyTheme = (date: string, theme: string) => {
     if (theme) {
@@ -75,7 +113,19 @@ export function registerAdminRoutes(
   };
 
   app.get(prefix + "/admin/overview", async (req) => {
-    requireAdmin(req);
+    const admin = requireAdminPermission(req, "overview.read");
+    const canReaders = hasAdminPermission(admin.role, "readers.read");
+    const canDevotionals = hasAdminPermission(admin.role, "devotionals.read");
+    const canDigital = hasAdminPermission(admin.role, "digital_orders.read");
+    const canPrinted = hasAdminPermission(admin.role, "printed_orders.read");
+    const canBulk = hasAdminPermission(admin.role, "bulk_orders.read");
+    const canPayments = hasAdminPermission(admin.role, "payments.read");
+    const canNotifications = hasAdminPermission(
+      admin.role,
+      "notifications.read",
+    );
+    const canAudit = hasAdminPermission(admin.role, "audit.read");
+
     const settings = getAppSettings(store);
 
     const progressRows = db.select().from(s.progress).all();
@@ -347,7 +397,7 @@ export function registerAdminRoutes(
       .orderBy(desc(s.bulkOrders.createdAt))
       .all();
 
-    const readerUsers = enrichedUsers.filter((u) => u.role !== "admin");
+    const readerUsers = enrichedUsers.filter((u) => u.role === "reader");
     const activeSubs = enrichedUsers.filter((u) => u.subscription?.active);
     const expiredSubs = enrichedUsers.filter(
       (u) =>
@@ -678,56 +728,90 @@ export function registerAdminRoutes(
       }
     }
 
-    const pushEventsAll = db
-      .select()
-      .from(s.notificationEvents)
-      .orderBy(desc(s.notificationEvents.createdAt))
-      .limit(50)
-      .all();
-    const activePushDevicesCount = db
-      .select()
-      .from(s.pushSubscriptions)
-      .where(eq(s.pushSubscriptions.status, "active"))
-      .all().length;
+    const scopedAlerts = operationalAlerts.filter((alert) => {
+      if (alert.category === "printed_order") return canPrinted;
+      if (alert.category === "payment_verification") {
+        return canPayments || canDigital;
+      }
+      if (alert.category === "online_access") return canDigital;
+      if (alert.category === "bulk_order") return canBulk;
+      return canNotifications;
+    });
 
-    const auditRows = db
-      .select({
-        id: s.auditLogs.id,
-        adminId: s.auditLogs.adminId,
-        adminName: s.users.name,
-        action: s.auditLogs.action,
-        createdAt: s.auditLogs.createdAt,
-      })
-      .from(s.auditLogs)
-      .leftJoin(s.users, eq(s.users.id, s.auditLogs.adminId))
-      .orderBy(desc(s.auditLogs.id))
-      .limit(60)
-      .all();
+    const pushEventsAll = canNotifications
+      ? db
+          .select()
+          .from(s.notificationEvents)
+          .orderBy(desc(s.notificationEvents.createdAt))
+          .limit(50)
+          .all()
+      : [];
+    const activePushDevicesCount = canNotifications
+      ? db
+          .select()
+          .from(s.pushSubscriptions)
+          .where(eq(s.pushSubscriptions.status, "active"))
+          .all().length
+      : 0;
+
+    const auditRows = canAudit
+      ? db
+          .select({
+            id: s.auditLogs.id,
+            adminId: s.auditLogs.adminId,
+            adminName: s.adminUsers.name,
+            actorName: s.auditLogs.actorName,
+            actorEmail: s.auditLogs.actorEmail,
+            actorRole: s.auditLogs.actorRole,
+            entityType: s.auditLogs.entityType,
+            entityId: s.auditLogs.entityId,
+            action: s.auditLogs.action,
+            createdAt: s.auditLogs.createdAt,
+          })
+          .from(s.auditLogs)
+          .leftJoin(s.adminUsers, eq(s.adminUsers.id, s.auditLogs.adminId))
+          .orderBy(desc(s.auditLogs.id))
+          .limit(60)
+          .all()
+          .map((row) => ({
+            ...row,
+            adminName: row.adminName || row.actorName || "Administrator",
+          }))
+      : [];
+
+    const canFinanceMetrics = canPayments || canDigital || canPrinted;
 
     return {
       metrics: {
-        readers: readerUsers.length,
-        totalRegisteredReaders: readerUsers.length,
-        activeOnlineReaders,
-        expiringOnlineAccessSoon,
-        expiredOnlineAccess,
-        activeMemberships: activeSubs.length,
-        paidMemberships: activeSubs.filter((u) => u.accessType === "paid")
-          .length,
-        complimentaryMemberships: activeSubs.filter(
-          (u) => u.accessType === "complimentary",
-        ).length,
-        expiredMemberships: expiredSubs.length,
-        activeEntitlementsCount,
-        digitalEditionsSold: paidDigitalPurchasesCount,
-        pendingDigitalPurchases: digitalPurchaseRows.filter(
-          (dp) => dp.status === "pending" || dp.status === "verifying_transfer",
-        ).length,
-        pendingPrintedOrders: pendingPrintedOrdersCount,
-        ordersAwaitingDelivery: ordersAwaitingDeliveryCount,
-        deliveredOrders: deliveredOrdersCount,
-        printedOrdersTotal: printedOrders.length,
-        printedBooksCopiesOrdered,
+        readers: canReaders ? readerUsers.length : 0,
+        totalRegisteredReaders: canReaders ? readerUsers.length : 0,
+        activeOnlineReaders: canReaders || canDigital ? activeOnlineReaders : 0,
+        expiringOnlineAccessSoon:
+          canReaders || canDigital ? expiringOnlineAccessSoon : 0,
+        expiredOnlineAccess: canReaders || canDigital ? expiredOnlineAccess : 0,
+        activeMemberships: canReaders || canPayments ? activeSubs.length : 0,
+        paidMemberships:
+          canReaders || canPayments
+            ? activeSubs.filter((u) => u.accessType === "paid").length
+            : 0,
+        complimentaryMemberships:
+          canReaders || canPayments
+            ? activeSubs.filter((u) => u.accessType === "complimentary").length
+            : 0,
+        expiredMemberships: canReaders || canPayments ? expiredSubs.length : 0,
+        activeEntitlementsCount: canDigital ? activeEntitlementsCount : 0,
+        digitalEditionsSold: canDigital ? paidDigitalPurchasesCount : 0,
+        pendingDigitalPurchases: canDigital
+          ? digitalPurchaseRows.filter(
+              (dp) =>
+                dp.status === "pending" || dp.status === "verifying_transfer",
+            ).length
+          : 0,
+        pendingPrintedOrders: canPrinted ? pendingPrintedOrdersCount : 0,
+        ordersAwaitingDelivery: canPrinted ? ordersAwaitingDeliveryCount : 0,
+        deliveredOrders: canPrinted ? deliveredOrdersCount : 0,
+        printedOrdersTotal: canPrinted ? printedOrders.length : 0,
+        printedBooksCopiesOrdered: canPrinted ? printedBooksCopiesOrdered : 0,
         published: entries.filter((e) => e.published).length,
         drafts: entries.filter((e) => !e.published).length,
         approvedReadings: entries.filter((e) => e.reviewStatus === "approved")
@@ -737,64 +821,87 @@ export function registerAdminRoutes(
         ).length,
         completions: progressRows.length,
         bookmarks: bookmarkRows.length,
-        subscriptionRevenueKobo,
-        digitalRevenueKobo,
-        digitalAccessRevenueKobo,
-        printedBookRevenueKobo,
-        totalSalesKobo: verifiedRevenueKobo,
-        verifiedRevenueKobo,
-        openInquiries: inquiryRows.filter((i) => i.status === "new").length,
-        bulkOrderInquiries: bulkOrderRows.length,
-        openBulkOrders: bulkOrderRows.filter(
-          (b) => b.status === "new" || b.status === "quoted",
-        ).length,
-        activeAlertsCount: operationalAlerts.length,
+        subscriptionRevenueKobo: canPayments ? subscriptionRevenueKobo : 0,
+        digitalRevenueKobo: canPayments || canDigital ? digitalRevenueKobo : 0,
+        digitalAccessRevenueKobo:
+          canPayments || canDigital ? digitalAccessRevenueKobo : 0,
+        printedBookRevenueKobo:
+          canPayments || canPrinted ? printedBookRevenueKobo : 0,
+        totalSalesKobo: canFinanceMetrics ? verifiedRevenueKobo : 0,
+        verifiedRevenueKobo: canFinanceMetrics ? verifiedRevenueKobo : 0,
+        openInquiries: canNotifications
+          ? inquiryRows.filter((i) => i.status === "new").length
+          : 0,
+        bulkOrderInquiries: canBulk ? bulkOrderRows.length : 0,
+        openBulkOrders: canBulk
+          ? bulkOrderRows.filter(
+              (b) => b.status === "new" || b.status === "quoted",
+            ).length
+          : 0,
+        activeAlertsCount: scopedAlerts.length,
       },
       charts: {
-        salesByPeriod: {
-          daily: dailySeries,
-          weekly: weeklySeries,
-          monthly: monthlySeries,
-        },
-        digitalVsPrinted: {
-          digitalKobo: digitalAccessRevenueKobo,
-          printedKobo: printedBookRevenueKobo,
-          digitalCount: verifiedDigitalEvents.length,
-          printedCount: verifiedPrintedEvents.length,
-        },
-        registrationsByMonth,
-        ordersByFulfillmentStatus,
+        salesByPeriod: canFinanceMetrics
+          ? {
+              daily: dailySeries,
+              weekly: weeklySeries,
+              monthly: monthlySeries,
+            }
+          : { daily: [], weekly: [], monthly: [] },
+        digitalVsPrinted: canFinanceMetrics
+          ? {
+              digitalKobo: digitalAccessRevenueKobo,
+              printedKobo: printedBookRevenueKobo,
+              digitalCount: verifiedDigitalEvents.length,
+              printedCount: verifiedPrintedEvents.length,
+            }
+          : {
+              digitalKobo: 0,
+              printedKobo: 0,
+              digitalCount: 0,
+              printedCount: 0,
+            },
+        registrationsByMonth: canReaders ? registrationsByMonth : [],
+        ordersByFulfillmentStatus: canPrinted ? ordersByFulfillmentStatus : [],
       },
-      users: enrichedUsers,
-      devotionals: entries,
-      themes: db
-        .select()
-        .from(s.monthlyThemes)
-        .orderBy(s.monthlyThemes.month)
-        .all(),
-      plans: db.select().from(s.plans).orderBy(s.plans.months).all(),
-      payments: paymentRows,
-      digitalPurchases: digitalPurchaseRows,
-      onlineAccessRecords,
-      printedOrders,
-      bulkOrders: bulkOrderRows,
-      inquiries: inquiryRows,
-      operationalAlerts,
+      users: canReaders ? enrichedUsers : [],
+      devotionals: canDevotionals ? entries : [],
+      themes: canDevotionals
+        ? db
+            .select()
+            .from(s.monthlyThemes)
+            .orderBy(s.monthlyThemes.month)
+            .all()
+        : [],
+      plans: canPayments
+        ? db.select().from(s.plans).orderBy(s.plans.months).all()
+        : [],
+      payments: canPayments ? paymentRows : [],
+      digitalPurchases: canDigital || canPayments ? digitalPurchaseRows : [],
+      onlineAccessRecords:
+        canDigital || canPayments ? onlineAccessRecords : [],
+      printedOrders: canPrinted ? printedOrders : [],
+      bulkOrders: canBulk ? bulkOrderRows : [],
+      inquiries: canNotifications || canBulk ? inquiryRows : [],
+      operationalAlerts: scopedAlerts,
       pushStatusSummary: {
         configured: pushProvider.configured,
         activePushDevicesCount,
         recentEvents: pushEventsAll.slice(0, 20),
       },
-      engagement: entries
-        .filter((e) => e.published)
-        .map((e) => ({
-          id: e.id,
-          date: e.date,
-          title: e.title,
-          completions: progressRows.filter((p) => p.devotionalId === e.id)
-            .length,
-          bookmarks: bookmarkRows.filter((b) => b.devotionalId === e.id).length,
-        })),
+      engagement: canDevotionals
+        ? entries
+            .filter((e) => e.published)
+            .map((e) => ({
+              id: e.id,
+              date: e.date,
+              title: e.title,
+              completions: progressRows.filter((p) => p.devotionalId === e.id)
+                .length,
+              bookmarks: bookmarkRows.filter((b) => b.devotionalId === e.id)
+                .length,
+            }))
+        : [],
       audit: auditRows,
       settings,
       paymentsConfig: {
@@ -805,7 +912,7 @@ export function registerAdminRoutes(
   });
 
   app.get(prefix + "/admin/devotionals", async (req) => {
-    requireAdmin(req);
+    requireAdminPermission(req, "devotionals.read");
     const query = (req.query || {}) as {
       search?: string;
       month?: string;
@@ -868,7 +975,7 @@ export function registerAdminRoutes(
   });
 
   app.get(prefix + "/admin/devotionals/:id", async (req) => {
-    requireAdmin(req);
+    requireAdminPermission(req, "devotionals.read");
     const entry = db
       .select()
       .from(s.devotionals)
@@ -879,7 +986,7 @@ export function registerAdminRoutes(
   });
 
   app.post(prefix + "/admin/devotionals", async (req) => {
-    const user = requireAdmin(req);
+    const admin = requireAdminPermission(req, "devotionals.write");
     const input = entrySchema.parse(req.body);
     const now = new Date().toISOString();
     const reviewStatus = input.published ? "approved" : input.reviewStatus;
@@ -898,15 +1005,17 @@ export function registerAdminRoutes(
         .get();
       if (input.published) syncMonthlyTheme(input.date, input.theme);
       audit(
-        user.id,
+        admin,
         `Created devotional ${input.date}: ${input.title} (${input.published ? "published" : "draft"})`,
+        "devotional",
+        entry.id,
       );
       return entry;
     })();
   });
 
   app.put(prefix + "/admin/devotionals/:id", async (req) => {
-    const user = requireAdmin(req);
+    const admin = requireAdminPermission(req, "devotionals.write");
     const id = idOf(req);
     const input = entrySchema.parse(req.body);
     const now = new Date().toISOString();
@@ -928,15 +1037,17 @@ export function registerAdminRoutes(
       if (!entry) throw new HttpError(404, "Devotional not found.");
       if (input.published) syncMonthlyTheme(input.date, input.theme);
       audit(
-        user.id,
+        admin,
         `Updated devotional ${entry.date}: ${entry.title} (${entry.published ? "published" : "draft"}, ${entry.reviewStatus})`,
+        "devotional",
+        entry.id,
       );
       return entry;
     })();
   });
 
   app.patch(prefix + "/admin/devotionals/:id/status", async (req) => {
-    const user = requireAdmin(req);
+    const admin = requireAdminPermission(req, "devotionals.write");
     const id = idOf(req);
     const input = entryStatusPatchSchema.parse(req.body);
     const now = new Date().toISOString();
@@ -995,15 +1106,17 @@ export function registerAdminRoutes(
         .get();
 
       audit(
-        user.id,
+        admin,
         `Updated status for ${updated.date} (${updated.title}): ${updated.published ? "published" : "draft"}, ${updated.reviewStatus}`,
+        "devotional",
+        updated.id,
       );
       return updated;
     })();
   });
 
   app.put(prefix + "/admin/themes/:month", async (req) => {
-    const user = requireAdmin(req);
+    const admin = requireAdminPermission(req, "devotionals.write");
     const month = monthOf(req);
     const input = themeUpdateSchema.parse(req.body);
 
@@ -1018,18 +1131,23 @@ export function registerAdminRoutes(
         .returning()
         .get();
 
-      audit(user.id, `Updated Month ${month} theme: ${input.title}`);
+      audit(
+        admin,
+        `Updated Month ${month} theme: ${input.title}`,
+        "monthly_theme",
+        month,
+      );
       return theme;
     })();
   });
 
   app.post(prefix + "/admin/users/:id/complimentary", async (req) => {
-    const admin = requireAdmin(req);
+    const admin = requireAdminPermission(req, "digital_orders.write");
     const targetUserId = idOf(req);
     const input = complimentaryGrantSchema.parse(req.body);
     const subscription = grantComplimentaryAccess(
       store,
-      admin.id,
+      actorOf(admin),
       targetUserId,
       input,
     );
@@ -1037,12 +1155,12 @@ export function registerAdminRoutes(
   });
 
   app.post(prefix + "/admin/users/:id/revoke-access", async (req) => {
-    const admin = requireAdmin(req);
+    const admin = requireAdminPermission(req, "digital_orders.write");
     const targetUserId = idOf(req);
     const { reason } = revokeAccessSchema.parse(req.body || {});
     const subscription = revokeSubscriptionAccess(
       store,
-      admin.id,
+      actorOf(admin),
       targetUserId,
       reason,
     );
@@ -1050,11 +1168,8 @@ export function registerAdminRoutes(
   });
 
   app.patch(prefix + "/admin/users/:id/status", async (req) => {
-    const admin = requireAdmin(req);
+    const admin = requireAdminPermission(req, "readers.write");
     const targetUserId = idOf(req);
-    if (targetUserId === admin.id) {
-      throw new HttpError(400, "You cannot suspend your own admin account.");
-    }
     const input = userStatusUpdateSchema.parse(req.body);
     const now = new Date().toISOString();
 
@@ -1079,15 +1194,17 @@ export function registerAdminRoutes(
       }
 
       audit(
-        admin.id,
-        `${input.status === "suspended" ? "Suspended" : "Reactivated"} account ${updated.email}${input.reason ? ` (${input.reason})` : ""}`,
+        admin,
+        `${input.status === "suspended" ? "Suspended" : "Reactivated"} reader account ${updated.email}${input.reason ? ` (${input.reason})` : ""}`,
+        "reader",
+        updated.id,
       );
       return { ok: true, status: updated.status };
     })();
   });
 
   app.patch(prefix + "/admin/plans/:id", async (req) => {
-    const user = requireAdmin(req);
+    const admin = requireAdminPermission(req, "payments.write");
     const input = planUpdateSchema.parse(req.body);
     return sqlite.transaction(() => {
       const plan = db
@@ -1098,15 +1215,17 @@ export function registerAdminRoutes(
         .get();
       if (!plan) throw new HttpError(404, "Plan not found.");
       audit(
-        user.id,
+        admin,
         `Updated plan ${plan.name}: NGN ${(plan.amountKobo / 100).toLocaleString()} (${plan.active ? "active" : "hidden"})`,
+        "plan",
+        plan.id,
       );
       return plan;
     })();
   });
 
   app.patch(prefix + "/admin/inquiries/:id", async (req) => {
-    const user = requireAdmin(req);
+    const admin = requireAdminPermission(req, "notifications.write");
     const input = inquiryUpdateSchema.parse(req.body);
     const now = new Date().toISOString();
     return sqlite.transaction(() => {
@@ -1129,29 +1248,31 @@ export function registerAdminRoutes(
         .get();
 
       audit(
-        user.id,
+        admin,
         `Updated inquiry #${result.id} (${result.name}) status to ${result.status}`,
+        "inquiry",
+        result.id,
       );
       return result;
     })();
   });
 
   app.post(prefix + "/admin/digital-purchases/:id/reconcile", async (req) => {
-    const admin = requireAdmin(req);
+    const admin = requireAdminPermission(req, "digital_orders.write");
     const purchaseId = idOf(req);
     const input = adminReconcileDigitalPurchaseSchema.parse(req.body);
-    return reconcileDigitalPurchaseAdmin(store, admin.id, purchaseId, input);
+    return reconcileDigitalPurchaseAdmin(store, actorOf(admin), purchaseId, input);
   });
 
   app.post(
     prefix + "/admin/users/:id/online-access/grant",
     async (req) => {
-      const admin = requireAdmin(req);
+      const admin = requireAdminPermission(req, "digital_orders.write");
       const targetUserId = idOf(req);
       const input = complimentaryOnlineAccessGrantSchema.parse(req.body);
       const entitlement = grantComplimentaryOnlineAccessAdmin(
         store,
-        admin.id,
+        actorOf(admin),
         targetUserId,
         input,
       );
@@ -1162,12 +1283,12 @@ export function registerAdminRoutes(
   app.post(
     prefix + "/admin/users/:id/online-access/revoke",
     async (req) => {
-      const admin = requireAdmin(req);
+      const admin = requireAdminPermission(req, "digital_orders.write");
       const targetUserId = idOf(req);
       const { reason } = revokeAccessSchema.parse(req.body || {});
       const entitlement = revokeOnlineAccessAdmin(
         store,
-        admin.id,
+        actorOf(admin),
         targetUserId,
         reason,
       );
@@ -1176,7 +1297,7 @@ export function registerAdminRoutes(
   );
 
   app.get(prefix + "/admin/printed-orders", async (req) => {
-    requireAdmin(req);
+    requireAdminPermission(req, "printed_orders.read");
     const orders = db
       .select()
       .from(s.printedOrders)
@@ -1190,36 +1311,53 @@ export function registerAdminRoutes(
   });
 
   app.get(prefix + "/admin/printed-orders/:id", async (req) => {
-    requireAdmin(req);
+    requireAdminPermission(req, "printed_orders.read");
     const order = getPrintedOrderById(store, idOf(req));
     if (!order) throw new HttpError(404, "Printed book order not found.");
     return order;
   });
 
   app.patch(prefix + "/admin/printed-orders/:id", async (req) => {
-    const admin = requireAdmin(req);
+    const admin = requireAdminPermission(req, "printed_orders.write");
     const orderId = idOf(req);
     const input = adminPrintedOrderUpdateSchema.parse(req.body);
-    return updatePrintedOrderAdmin(store, admin.id, orderId, input);
+    const existing = getPrintedOrderById(store, orderId);
+    if (!existing) throw new HttpError(404, "Printed book order not found.");
+    if (
+      input.paymentStatus !== undefined &&
+      input.paymentStatus !== existing.paymentStatus &&
+      !hasAdminPermission(admin.role, "payments.write")
+    ) {
+      throw new HttpError(
+        403,
+        "Only finance managers or the owner can confirm or modify printed order payment status.",
+      );
+    }
+    return updatePrintedOrderAdmin(store, actorOf(admin), orderId, input);
   });
 
   app.patch(prefix + "/admin/bulk-orders/:id", async (req) => {
-    const admin = requireAdmin(req);
+    const admin = requireAdminPermission(req, "bulk_orders.write");
     const bulkOrderId = idOf(req);
     const input = adminBulkOrderUpdateSchema.parse(req.body);
-    return updateBulkOrderAdmin(store, admin.id, bulkOrderId, input);
+    return updateBulkOrderAdmin(store, actorOf(admin), bulkOrderId, input);
   });
 
   app.get(prefix + "/admin/settings", async (req) => {
-    requireAdmin(req);
+    requireAdminPermission(req, "settings.read");
     return getAppSettings(store);
   });
 
   app.put(prefix + "/admin/settings", async (req) => {
-    const user = requireAdmin(req);
+    const admin = requireAdminPermission(req, "settings.write");
     const input = settingsUpdateSchema.parse(req.body);
     const settings = updateAppSettings(store, input);
-    audit(user.id, "Updated application and organization settings");
+    audit(
+      admin,
+      "Updated application and organization settings",
+      "settings",
+      "global",
+    );
     return settings;
   });
 
@@ -1227,14 +1365,356 @@ export function registerAdminRoutes(
     prefix + "/admin/notifications/run-worker",
     { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
     async (req) => {
-      const admin = requireAdmin(req);
+      const admin = requireAdminPermission(req, "notifications.write");
       const result = await runNotificationWorkerCycle(store, pushProvider);
       audit(
-        admin.id,
+        admin,
         `Executed notification worker cycle (generated: ${result.generatedCount}, sent: ${result.sentEvents})`,
+        "notifications",
+        "worker",
       );
       return { ok: true, result };
     },
   );
+
+  app.get(prefix + "/admin/activity", async (req) => {
+    requireAdminPermission(req, "audit.read");
+    const query = (req.query || {}) as {
+      search?: string;
+      entityType?: string;
+      page?: string;
+      limit?: string;
+    };
+
+    let rows = db
+      .select({
+        id: s.auditLogs.id,
+        adminId: s.auditLogs.adminId,
+        adminName: s.adminUsers.name,
+        actorName: s.auditLogs.actorName,
+        actorEmail: s.auditLogs.actorEmail,
+        actorRole: s.auditLogs.actorRole,
+        entityType: s.auditLogs.entityType,
+        entityId: s.auditLogs.entityId,
+        action: s.auditLogs.action,
+        createdAt: s.auditLogs.createdAt,
+      })
+      .from(s.auditLogs)
+      .leftJoin(s.adminUsers, eq(s.adminUsers.id, s.auditLogs.adminId))
+      .orderBy(desc(s.auditLogs.id))
+      .all()
+      .map((row) => ({
+        ...row,
+        adminName: row.adminName || row.actorName || "Administrator",
+      }));
+
+    if (query.entityType && query.entityType !== "all") {
+      rows = rows.filter((r) => r.entityType === query.entityType);
+    }
+
+    if (query.search?.trim()) {
+      const q = query.search.trim().toLowerCase();
+      rows = rows.filter((r) =>
+        `${r.action} ${r.adminName} ${r.actorEmail} ${r.actorRole} ${r.entityType} ${r.entityId}`
+          .toLowerCase()
+          .includes(q),
+      );
+    }
+
+    const entityTypes = Array.from(new Set(rows.map((r) => r.entityType))).sort();
+    const total = rows.length;
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 40));
+    const items = rows.slice((page - 1) * limit, page * limit);
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      entityTypes,
+    };
+  });
+
+  app.get(prefix + "/admin/staff", async (req) => {
+    requireOwner(req);
+    const now = new Date().toISOString();
+    const staffRows = db
+      .select()
+      .from(s.adminUsers)
+      .orderBy(asc(s.adminUsers.createdAt))
+      .all();
+    const activeSessions = db
+      .select()
+      .from(s.adminSessions)
+      .where(gt(s.adminSessions.expiresAt, now))
+      .all();
+
+    const pendingLegacyAdmins = db
+      .select({
+        id: s.users.id,
+        name: s.users.name,
+        email: s.users.email,
+        legacyAdminStatus: s.users.legacyAdminStatus,
+      })
+      .from(s.users)
+      .where(eq(s.users.legacyAdminStatus, "pending_decision"))
+      .all();
+
+    return {
+      staff: staffRows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        status: row.status,
+        suspendedReason: row.suspendedReason,
+        mfaEnabled: Boolean(row.mfaEnabled),
+        mfaVerifiedAt: row.mfaVerifiedAt,
+        lastLoginAt: row.lastLoginAt,
+        lastActiveAt: row.lastActiveAt,
+        activeSessionsCount: activeSessions.filter(
+          (sess) => sess.adminId === row.id,
+        ).length,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      })),
+      pendingLegacyAdmins,
+    };
+  });
+
+  app.post(prefix + "/admin/staff", async (req) => {
+    const owner = requireOwner(req);
+    const input = staffCreateSchema.parse(req.body);
+    assertStrongAdminPassword(input.password);
+
+    const existingAdmin = db
+      .select({ id: s.adminUsers.id })
+      .from(s.adminUsers)
+      .where(eq(s.adminUsers.email, input.email))
+      .get();
+    if (existingAdmin) {
+      throw new HttpError(
+        409,
+        "An administrator account already uses that email address.",
+      );
+    }
+
+    const readerCollision = db
+      .select({ id: s.users.id })
+      .from(s.users)
+      .where(eq(s.users.email, input.email))
+      .get();
+    if (readerCollision) {
+      throw new HttpError(
+        409,
+        "That email address is currently used by a reader account. Use a dedicated staff email address.",
+      );
+    }
+
+    const now = new Date().toISOString();
+    const passwordHash = await hashPassword(input.password);
+
+    return sqlite.transaction(() => {
+      const created = db
+        .insert(s.adminUsers)
+        .values({
+          name: input.name,
+          email: input.email,
+          passwordHash,
+          role: input.role,
+          status: "active",
+          suspendedReason: "",
+          mfaEnabled: false,
+          mfaSecretEnc: null,
+          mfaPendingSecretEnc: null,
+          mfaVerifiedAt: null,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          lastLoginAt: null,
+          lastActiveAt: null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+        .get();
+
+      audit(
+        owner,
+        `Created administrator account ${created.email} (${created.role})`,
+        "admin_staff",
+        created.id,
+      );
+
+      return {
+        id: created.id,
+        name: created.name,
+        email: created.email,
+        role: created.role,
+        status: created.status,
+        mfaEnabled: false,
+        createdAt: created.createdAt,
+      };
+    })();
+  });
+
+  app.patch(prefix + "/admin/staff/:id", async (req) => {
+    const owner = requireOwner(req);
+    const targetId = idOf(req);
+    const input = staffUpdateSchema.parse(req.body);
+
+    const existing = db
+      .select()
+      .from(s.adminUsers)
+      .where(eq(s.adminUsers.id, targetId))
+      .get();
+    if (!existing) {
+      throw new HttpError(404, "Administrator account not found.");
+    }
+
+    const nextRole = input.role ?? existing.role;
+    const nextStatus = input.status ?? existing.status;
+
+    if (
+      targetId === owner.id &&
+      (nextStatus === "suspended" || nextRole !== "owner")
+    ) {
+      throw new HttpError(
+        400,
+        "You cannot suspend or remove your own owner role.",
+      );
+    }
+
+    if (
+      existing.role === "owner" &&
+      (nextRole !== "owner" || nextStatus === "suspended")
+    ) {
+      const otherActiveOwners = db
+        .select()
+        .from(s.adminUsers)
+        .where(
+          and(
+            eq(s.adminUsers.role, "owner"),
+            eq(s.adminUsers.status, "active"),
+          ),
+        )
+        .all()
+        .filter((a) => a.id !== existing.id);
+
+      if (otherActiveOwners.length === 0) {
+        throw new HttpError(
+          400,
+          "At least one active owner administrator account must remain.",
+        );
+      }
+    }
+
+    if (input.newPassword) {
+      assertStrongAdminPassword(input.newPassword);
+    }
+    const newHash = input.newPassword
+      ? await hashPassword(input.newPassword)
+      : existing.passwordHash;
+    const now = new Date().toISOString();
+
+    return sqlite.transaction(() => {
+      const updated = db
+        .update(s.adminUsers)
+        .set({
+          name: input.name ?? existing.name,
+          role: nextRole,
+          status: nextStatus,
+          suspendedReason:
+            nextStatus === "suspended"
+              ? input.suspendedReason ?? existing.suspendedReason
+              : "",
+          passwordHash: newHash,
+          mfaEnabled: input.resetMfa ? false : existing.mfaEnabled,
+          mfaSecretEnc: input.resetMfa ? null : existing.mfaSecretEnc,
+          mfaPendingSecretEnc: input.resetMfa
+            ? null
+            : existing.mfaPendingSecretEnc,
+          mfaVerifiedAt: input.resetMfa ? null : existing.mfaVerifiedAt,
+          failedLoginAttempts:
+            input.status === "active" || input.newPassword
+              ? 0
+              : existing.failedLoginAttempts,
+          lockedUntil:
+            input.status === "active" || input.newPassword
+              ? null
+              : existing.lockedUntil,
+          updatedAt: now,
+        })
+        .where(eq(s.adminUsers.id, targetId))
+        .returning()
+        .get();
+
+      if (input.resetMfa) {
+        db.delete(s.adminMfaRecoveryCodes)
+          .where(eq(s.adminMfaRecoveryCodes.adminId, targetId))
+          .run();
+      }
+
+      if (nextStatus === "suspended" || input.resetMfa || input.newPassword) {
+        db.delete(s.adminSessions)
+          .where(eq(s.adminSessions.adminId, targetId))
+          .run();
+      }
+
+      const changes: string[] = [];
+      if (nextRole !== existing.role) changes.push(`role=${nextRole}`);
+      if (nextStatus !== existing.status) changes.push(`status=${nextStatus}`);
+      if (input.resetMfa) changes.push("MFA reset (re-enrollment required)");
+      if (input.newPassword) changes.push("password reset");
+      if (input.name && input.name !== existing.name) {
+        changes.push(`name="${input.name}"`);
+      }
+
+      audit(
+        owner,
+        `Updated staff account ${updated.email}${changes.length ? ` (${changes.join(", ")})` : ""}`,
+        "admin_staff",
+        updated.id,
+      );
+
+      return {
+        id: updated.id,
+        name: updated.name,
+        email: updated.email,
+        role: updated.role,
+        status: updated.status,
+        suspendedReason: updated.suspendedReason,
+        mfaEnabled: Boolean(updated.mfaEnabled),
+        updatedAt: updated.updatedAt,
+      };
+    })();
+  });
+
+  app.delete(prefix + "/admin/staff/:id/sessions", async (req) => {
+    const owner = requireOwner(req);
+    const targetId = idOf(req);
+    const existing = db
+      .select()
+      .from(s.adminUsers)
+      .where(eq(s.adminUsers.id, targetId))
+      .get();
+    if (!existing) {
+      throw new HttpError(404, "Administrator account not found.");
+    }
+
+    db.delete(s.adminSessions)
+      .where(eq(s.adminSessions.adminId, targetId))
+      .run();
+
+    audit(
+      owner,
+      `Revoked active sessions for administrator ${existing.email}`,
+      "admin_staff",
+      targetId,
+    );
+
+    return { ok: true };
+  });
 }
 

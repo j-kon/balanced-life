@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Gift, Search, X } from "lucide-react";
-import { Empty } from "../../components/Common";
-import { money } from "../../api";
-import type { DigitalPurchaseRecord } from "../../types";
+import { Empty } from "../components/Common";
+import { money } from "../api";
+import type { DigitalPurchaseRecord } from "../types";
 import type { AdminOverviewData, AdminSaveFn, AdminUserRow } from "./AdminTypes";
 
 export function DigitalOrdersPage({

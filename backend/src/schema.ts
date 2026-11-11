@@ -12,6 +12,7 @@ export const users = sqliteTable("users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   role: text("role").notNull().default("reader"),
+  legacyAdminStatus: text("legacy_admin_status").notNull().default("none"),
   status: text("status").notNull().default("active"),
   suspendedReason: text("suspended_reason").notNull().default(""),
   ageGroup: text("age_group").notNull().default("18_25"),
@@ -23,6 +24,66 @@ export const users = sqliteTable("users", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const adminUsers = sqliteTable("admin_users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  role: text("role").notNull().default("owner"),
+  status: text("status").notNull().default("active"),
+  suspendedReason: text("suspended_reason").notNull().default(""),
+  mfaEnabled: integer("mfa_enabled", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  mfaSecretEnc: text("mfa_secret_enc"),
+  mfaPendingSecretEnc: text("mfa_pending_secret_enc"),
+  mfaVerifiedAt: text("mfa_verified_at"),
+  failedLoginAttempts: integer("failed_login_attempts").notNull().default(0),
+  lockedUntil: text("locked_until"),
+  lastLoginAt: text("last_login_at"),
+  lastActiveAt: text("last_active_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const adminSessions = sqliteTable("admin_sessions", {
+  tokenHash: text("token_hash").primaryKey(),
+  adminId: integer("admin_id")
+    .notNull()
+    .references(() => adminUsers.id, { onDelete: "cascade" }),
+  mfaVerified: integer("mfa_verified", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  ipAddress: text("ip_address").notNull().default(""),
+  userAgent: text("user_agent").notNull().default(""),
+  lastActivityAt: text("last_activity_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const adminMfaRecoveryCodes = sqliteTable("admin_mfa_recovery_codes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  adminId: integer("admin_id")
+    .notNull()
+    .references(() => adminUsers.id, { onDelete: "cascade" }),
+  codeHash: text("code_hash").notNull(),
+  usedAt: text("used_at"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const adminPasswordResetTokens = sqliteTable(
+  "admin_password_reset_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    adminId: integer("admin_id")
+      .notNull()
+      .references(() => adminUsers.id, { onDelete: "cascade" }),
+    expiresAt: text("expires_at").notNull(),
+    usedAt: text("used_at"),
+    createdAt: text("created_at").notNull(),
+  },
+);
 
 export const sessions = sqliteTable("sessions", {
   tokenHash: text("token_hash").primaryKey(),
@@ -95,9 +156,12 @@ export const subscriptions = sqliteTable("subscriptions", {
     .notNull()
     .default(false),
   providerSubscriptionCode: text("provider_subscription_code"),
-  grantedByAdminId: integer("granted_by_admin_id").references(() => users.id, {
-    onDelete: "set null",
-  }),
+  grantedByAdminId: integer("granted_by_admin_id").references(
+    () => adminUsers.id,
+    {
+      onDelete: "set null",
+    },
+  ),
   grantReason: text("grant_reason").notNull().default(""),
   updatedAt: text("updated_at").notNull(),
 });
@@ -154,7 +218,7 @@ export const digitalPurchases = sqliteTable("digital_purchases", {
   periodEndAt: text("period_end_at"),
   adminNotes: text("admin_notes").notNull().default(""),
   verifiedByAdminId: integer("verified_by_admin_id").references(
-    () => users.id,
+    () => adminUsers.id,
     { onDelete: "set null" },
   ),
   verifiedAt: text("verified_at"),
@@ -184,9 +248,12 @@ export const digitalEntitlements = sqliteTable("digital_entitlements", {
   legacyReviewRequired: integer("legacy_review_required", { mode: "boolean" })
     .notNull()
     .default(false),
-  grantedByAdminId: integer("granted_by_admin_id").references(() => users.id, {
-    onDelete: "set null",
-  }),
+  grantedByAdminId: integer("granted_by_admin_id").references(
+    () => adminUsers.id,
+    {
+      onDelete: "set null",
+    },
+  ),
   grantReason: text("grant_reason").notNull().default(""),
   grantedAt: text("granted_at").notNull(),
   revokedAt: text("revoked_at"),
@@ -236,7 +303,7 @@ export const printedOrders = sqliteTable("printed_orders", {
   customerDeliveryNotes: text("customer_delivery_notes").notNull().default(""),
   adminNotes: text("admin_notes").notNull().default(""),
   verifiedByAdminId: integer("verified_by_admin_id").references(
-    () => users.id,
+    () => adminUsers.id,
     { onDelete: "set null" },
   ),
   paidAt: text("paid_at"),
@@ -453,9 +520,20 @@ export const notificationDeliveries = sqliteTable("notification_deliveries", {
 
 export const auditLogs = sqliteTable("admin_audit_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  adminId: integer("admin_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
+  adminId: integer("admin_id").references(() => adminUsers.id, {
+    onDelete: "set null",
+  }),
+  legacyUserAdminId: integer("legacy_user_admin_id").references(
+    () => users.id,
+    {
+      onDelete: "set null",
+    },
+  ),
+  actorName: text("actor_name").notNull().default(""),
+  actorEmail: text("actor_email").notNull().default(""),
+  actorRole: text("actor_role").notNull().default(""),
+  entityType: text("entity_type").notNull().default("system"),
+  entityId: text("entity_id").notNull().default(""),
   action: text("action").notNull(),
   createdAt: text("created_at").notNull(),
 });

@@ -7,11 +7,10 @@ import {
   LayoutDashboard,
   LogOut,
   PenLine,
-  Shield,
   UserCheck,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
-import { Empty, PwaInstallBanner } from "../components/Common";
+import { PwaInstallBanner } from "../components/Common";
 import { api } from "../api";
 
 export const readerLinks = [
@@ -68,20 +67,12 @@ export function ReaderShell({ children }: { children: ReactNode }) {
               {label}
             </NavLink>
           ))}
-          {user?.role === "admin" && (
-            <NavLink to="/admin">
-              <Shield size={19} />
-              Administration
-            </NavLink>
-          )}
         </nav>
         <div className="sidebar-bottom">
           <span className="avatar">{user?.name[0] || "R"}</span>
           <div>
             <strong>{user?.name}</strong>
-            <small>
-              {user?.role === "admin" ? "Administrator" : "Reader account"}
-            </small>
+            <small>Reader account</small>
           </div>
           <button
             aria-label="Sign out"
@@ -116,26 +107,11 @@ export function ReaderShell({ children }: { children: ReactNode }) {
   );
 }
 
-export function Protected({
-  children,
-  admin = false,
-}: {
-  children: ReactNode;
-  admin?: boolean;
-}) {
+export function Protected({ children }: { children: ReactNode }) {
   const { user } = useApp();
   const location = useLocation();
   if (!user) {
     return <Navigate to="/login" state={{ from: location.pathname }} replace />;
-  }
-  if (admin && user.role !== "admin") {
-    return (
-      <div className="container section">
-        <Empty title="Administrator access required">
-          This page is available only to administrators.
-        </Empty>
-      </div>
-    );
   }
   return <ReaderShell>{children}</ReaderShell>;
 }

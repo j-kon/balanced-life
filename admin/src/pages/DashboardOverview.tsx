@@ -10,11 +10,13 @@ import {
   Package,
   PenLine,
   Settings,
+  Shield,
   ShoppingBag,
   Truck,
   Users,
 } from "lucide-react";
-import { money } from "../../api";
+import { money } from "../api";
+import { useAdminAuth } from "../context/AdminAuthContext";
 import type { AdminOverviewData, AdminSectionId } from "./AdminTypes";
 
 export function DashboardOverview({
@@ -24,6 +26,7 @@ export function DashboardOverview({
   data: AdminOverviewData;
   onNavigate: (tab: AdminSectionId) => void;
 }) {
+  const { hasPermission } = useAdminAuth();
   const [salesPeriod, setSalesPeriod] = useState<"daily" | "weekly" | "monthly">(
     "daily",
   );
@@ -136,49 +139,68 @@ export function DashboardOverview({
           </p>
         </div>
         <div className="actions">
-          <button
-            type="button"
-            className="button small"
-            onClick={() => onNavigate("Payments")}
-          >
-            <CreditCard size={15} /> Review Pending Payments (
-            {m.pendingDigitalPurchases})
-          </button>
+          {hasPermission("payments.read") && (
+            <button
+              type="button"
+              className="button small"
+              onClick={() => onNavigate("Payments")}
+            >
+              <CreditCard size={15} /> Review Pending Payments (
+              {m.pendingDigitalPurchases})
+            </button>
+          )}
+          {hasPermission("printed_orders.read") && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Printed Orders")}
+            >
+              <Package size={15} /> View Printed Orders (
+              {m.printedOrdersTotal ?? 0})
+            </button>
+          )}
+          {hasPermission("readers.read") && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Readers")}
+            >
+              <Gift size={15} /> Grant Complimentary Access
+            </button>
+          )}
+          {hasPermission("devotionals.read") && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Devotionals")}
+            >
+              <PenLine size={15} /> Edit Devotional Entries ({m.drafts} drafts)
+            </button>
+          )}
+          {hasPermission("bulk_orders.read") && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Bulk Orders")}
+            >
+              <Building2 size={15} /> Manage Bulk Orders ({m.bulkOrderInquiries})
+            </button>
+          )}
+          {hasPermission("settings.read") && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Settings")}
+            >
+              <Settings size={15} /> Update Pricing &amp; Delivery Settings
+            </button>
+          )}
           <button
             type="button"
             className="button outline small"
-            onClick={() => onNavigate("Printed Orders")}
+            onClick={() => onNavigate("Activity & Security")}
           >
-            <Package size={15} /> View Printed Orders (
-            {m.printedOrdersTotal ?? 0})
-          </button>
-          <button
-            type="button"
-            className="button outline small"
-            onClick={() => onNavigate("Readers")}
-          >
-            <Gift size={15} /> Grant Complimentary Access
-          </button>
-          <button
-            type="button"
-            className="button outline small"
-            onClick={() => onNavigate("Devotionals")}
-          >
-            <PenLine size={15} /> Edit Devotional Entries ({m.drafts} drafts)
-          </button>
-          <button
-            type="button"
-            className="button outline small"
-            onClick={() => onNavigate("Bulk Orders")}
-          >
-            <Building2 size={15} /> Manage Bulk Orders ({m.bulkOrderInquiries})
-          </button>
-          <button
-            type="button"
-            className="button outline small"
-            onClick={() => onNavigate("Settings")}
-          >
-            <Settings size={15} /> Update Pricing &amp; Delivery Settings
+            <Shield size={15} /> Security &amp; Activity
           </button>
         </div>
       </div>

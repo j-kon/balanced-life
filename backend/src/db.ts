@@ -187,22 +187,43 @@ export function openDatabase(
   sqlite.exec(
     "CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY,applied_at TEXT NOT NULL)",
   );
-  for (const file of readdirSync(resolve(root, "backend/migrations"))
+  const pendingMigrations = readdirSync(resolve(root, "backend/migrations"))
     .filter((f) => f.endsWith(".sql"))
-    .sort()) {
-    if (
-      !sqlite
-        .prepare("SELECT name FROM schema_migrations WHERE name=?")
-        .get(file)
-    ) {
-      sqlite.transaction(() => {
-        sqlite.exec(
-          readFileSync(resolve(root, "backend/migrations", file), "utf8"),
+    .sort()
+    .filter(
+      (file) =>
+        !sqlite
+          .prepare("SELECT name FROM schema_migrations WHERE name=?")
+          .get(file),
+    );
+  if (pendingMigrations.length > 0) {
+    // SQLite ignores PRAGMA foreign_keys = OFF inside transactions; toggle outside so
+    // safe table-rebuild migrations can preserve existing IDs and re-verify constraints.
+    sqlite.pragma("foreign_keys = OFF");
+    try {
+      for (const file of pendingMigrations) {
+        sqlite.transaction(() => {
+          sqlite.exec(
+            readFileSync(resolve(root, "backend/migrations", file), "utf8"),
+          );
+          sqlite
+            .prepare("INSERT INTO schema_migrations VALUES (?,?)")
+            .run(file, new Date().toISOString());
+        })();
+      }
+      sqlite.pragma("foreign_keys = ON");
+      const fkViolations = sqlite.pragma("foreign_key_check") as Array<{
+        table: string;
+        rowid: number;
+        parent: string;
+      }>;
+      if (fkViolations.length > 0) {
+        throw new Error(
+          `Database foreign key integrity check failed after migrations: ${JSON.stringify(fkViolations)}`,
         );
-        sqlite
-          .prepare("INSERT INTO schema_migrations VALUES (?,?)")
-          .run(file, new Date().toISOString());
-      })();
+      }
+    } finally {
+      sqlite.pragma("foreign_keys = ON");
     }
   }
   const db = drizzle(sqlite, { schema });

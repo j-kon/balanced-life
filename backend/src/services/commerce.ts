@@ -4,7 +4,13 @@ import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import { HttpError } from "../errors.js";
 import type { PaymentProvider } from "./payments.js";
-import { newToken, tokenHash, type PublicUser } from "../auth.js";
+import {
+  logAdminAudit,
+  newToken,
+  tokenHash,
+  type AdminActor,
+  type PublicUser,
+} from "../auth.js";
 import { getAppSettings, updateAppSettings } from "./settings.js";
 import { createNotificationEvent } from "./notifications.js";
 
@@ -619,7 +625,7 @@ export function submitBankTransferProof(
 
 export function reconcileDigitalPurchaseAdmin(
   store: Store,
-  adminId: number,
+  actor: AdminActor,
   purchaseId: number,
   input: {
     action: "approve" | "reject" | "refund" | "revoke";
@@ -667,18 +673,19 @@ export function reconcileDigitalPurchaseAdmin(
         existing,
         existing.verifiedAt || now,
         {
-          adminId,
+          adminId: actor.id,
           adminNotes: notes,
         },
       );
 
-      db.insert(s.auditLogs)
-        .values({
-          adminId,
-          action: `Verified and approved digital purchase ${existing.reference} for user #${existing.userId}${notes ? ` (${notes})` : ""}`,
-          createdAt: now,
-        })
-        .run();
+      logAdminAudit(
+        store,
+        actor,
+        `Verified and approved digital purchase ${existing.reference} for user #${existing.userId}${notes ? ` (${notes})` : ""}`,
+        "digital_purchase",
+        existing.id,
+        now,
+      );
 
       return purchase;
     }
@@ -696,20 +703,21 @@ export function reconcileDigitalPurchaseAdmin(
         .set({
           status: "failed",
           adminNotes: notes,
-          verifiedByAdminId: adminId,
+          verifiedByAdminId: actor.id,
           updatedAt: now,
         })
         .where(eq(s.digitalPurchases.id, purchaseId))
         .returning()
         .get();
 
-      db.insert(s.auditLogs)
-        .values({
-          adminId,
-          action: `Marked digital purchase ${existing.reference} as failed/unverified${notes ? ` (${notes})` : ""}`,
-          createdAt: now,
-        })
-        .run();
+      logAdminAudit(
+        store,
+        actor,
+        `Marked digital purchase ${existing.reference} as failed/unverified${notes ? ` (${notes})` : ""}`,
+        "digital_purchase",
+        existing.id,
+        now,
+      );
 
       return updated;
     }
@@ -728,7 +736,7 @@ export function reconcileDigitalPurchaseAdmin(
       .set({
         status: targetStatus,
         adminNotes: notes,
-        verifiedByAdminId: adminId,
+        verifiedByAdminId: actor.id,
         updatedAt: now,
       })
       .where(eq(s.digitalPurchases.id, purchaseId))
@@ -753,13 +761,14 @@ export function reconcileDigitalPurchaseAdmin(
       )
       .run();
 
-    db.insert(s.auditLogs)
-      .values({
-        adminId,
-        action: `${targetStatus === "refunded" ? "Refunded" : "Revoked"} digital purchase ${existing.reference} for user #${existing.userId}${notes ? ` (${notes})` : ""}`,
-        createdAt: now,
-      })
-      .run();
+    logAdminAudit(
+      store,
+      actor,
+      `${targetStatus === "refunded" ? "Refunded" : "Revoked"} digital purchase ${existing.reference} for user #${existing.userId}${notes ? ` (${notes})` : ""}`,
+      "digital_purchase",
+      existing.id,
+      now,
+    );
 
     createNotificationEvent(store, {
       userId: existing.userId,
@@ -776,7 +785,7 @@ export function reconcileDigitalPurchaseAdmin(
 
 export function grantComplimentaryOnlineAccessAdmin(
   store: Store,
-  adminId: number,
+  actor: AdminActor,
   targetUserId: number,
   input: {
     months?: number;
@@ -856,7 +865,7 @@ export function grantComplimentaryOnlineAccessAdmin(
       renewalCount: current ? current.renewalCount : 0,
       legacyPersistent: false,
       legacyReviewRequired: false,
-      grantedByAdminId: adminId,
+      grantedByAdminId: actor.id,
       grantReason: input.reason.trim(),
       grantedAt: now,
       revokedAt: null,
@@ -875,13 +884,14 @@ export function grantComplimentaryOnlineAccessAdmin(
       })
       .run();
 
-    db.insert(s.auditLogs)
-      .values({
-        adminId,
-        action: `Granted complimentary 2027 online access to ${targetUser.email} until ${new Date(computedExpiresAt).toLocaleDateString("en-GB")} (${input.reason.trim()})`,
-        createdAt: now,
-      })
-      .run();
+    logAdminAudit(
+      store,
+      actor,
+      `Granted complimentary 2027 online access to ${targetUser.email} until ${new Date(computedExpiresAt).toLocaleDateString("en-GB")} (${input.reason.trim()})`,
+      "online_access",
+      targetUserId,
+      now,
+    );
 
     createNotificationEvent(store, {
       userId: targetUserId,
@@ -898,7 +908,7 @@ export function grantComplimentaryOnlineAccessAdmin(
 
 export function revokeOnlineAccessAdmin(
   store: Store,
-  adminId: number,
+  actor: AdminActor,
   targetUserId: number,
   reason: string,
 ) {
@@ -964,13 +974,14 @@ export function revokeOnlineAccessAdmin(
         .run();
     }
 
-    db.insert(s.auditLogs)
-      .values({
-        adminId,
-        action: `Revoked online access for ${targetUser.email} (${reason.trim()})`,
-        createdAt: now,
-      })
-      .run();
+    logAdminAudit(
+      store,
+      actor,
+      `Revoked online access for ${targetUser.email} (${reason.trim()})`,
+      "online_access",
+      targetUserId,
+      now,
+    );
 
     createNotificationEvent(store, {
       userId: targetUserId,
@@ -1044,9 +1055,6 @@ export function authorizePrintedOrderAccess(
   order: { id: number; userId: number | null },
   options: { user?: PublicUser | null; token?: string | null },
 ) {
-  if (options.user?.role === "admin") {
-    return;
-  }
   if (
     options.user &&
     options.user.status === "active" &&
@@ -1100,13 +1108,10 @@ export function lookupPrintedOrderAuthorized(
     .get();
 
   if (!order) {
-    if (!hasUser || options.user?.role !== "admin") {
-      throw new HttpError(
-        403,
-        "Order number or order access token is invalid or has expired.",
-      );
-    }
-    throw new HttpError(404, "Printed book order not found.");
+    throw new HttpError(
+      403,
+      "Order number or order access token is invalid or has expired.",
+    );
   }
 
   authorizePrintedOrderAccess(store, order, options);
@@ -1564,7 +1569,7 @@ export async function verifyPrintedOrderPayment(
 
 export function updatePrintedOrderAdmin(
   store: Store,
-  adminId: number,
+  actor: AdminActor,
   orderId: number,
   input: Partial<{
     deliveryFeeKobo: number | null;
@@ -1803,7 +1808,7 @@ export function updatePrintedOrderAdmin(
         adminNotes: input.adminNotes ?? existing.adminNotes,
         verifiedByAdminId:
           nextPaymentStatus === "paid" && existing.paymentStatus !== "paid"
-            ? adminId
+            ? actor.id
             : existing.verifiedByAdminId,
         stockDeducted: nextStockDeducted,
         paidAt,
@@ -1828,14 +1833,14 @@ export function updatePrintedOrderAdmin(
       auditParts.push(`UNPAID DISPATCH EXCEPTION: ${exceptionNote}`);
     }
 
-    store.db
-      .insert(s.auditLogs)
-      .values({
-        adminId,
-        action: auditParts.join(" · "),
-        createdAt: now,
-      })
-      .run();
+    logAdminAudit(
+      store,
+      actor,
+      auditParts.join(" · "),
+      "printed_order",
+      existing.id,
+      now,
+    );
 
     // Operational notifications for customer (if linked to a user account)
     if (existing.userId) {
@@ -1967,7 +1972,7 @@ export function createBulkOrder(
 
 export function updateBulkOrderAdmin(
   store: Store,
-  adminId: number,
+  actor: AdminActor,
   orderId: number,
   input: Partial<{
     status:
@@ -2086,14 +2091,14 @@ export function updateBulkOrderAdmin(
       .returning()
       .get();
 
-    store.db
-      .insert(s.auditLogs)
-      .values({
-        adminId,
-        action: `Updated bulk order #${orderId} (${existing.organizationName}, ${existing.quantity} copies) -> status=${updated.status}, fulfillment=${updated.fulfillmentStatus}${linkedPrintedOrderId ? `, linkedPrintedOrder=#${linkedPrintedOrderId}` : ""}`,
-        createdAt: now,
-      })
-      .run();
+    logAdminAudit(
+      store,
+      actor,
+      `Updated bulk order #${orderId} (${existing.organizationName}, ${existing.quantity} copies) -> status=${updated.status}, fulfillment=${updated.fulfillmentStatus}${linkedPrintedOrderId ? `, linkedPrintedOrder=#${linkedPrintedOrderId}` : ""}`,
+      "bulk_order",
+      orderId,
+      now,
+    );
 
     return updated;
   })();

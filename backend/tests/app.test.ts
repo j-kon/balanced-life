@@ -7,8 +7,13 @@ import {
   computeDigitalTermWindow,
 } from "../src/services/commerce.js";
 import { openDatabase } from "../src/db.js";
-import { hashPassword } from "../src/auth.js";
-import { users } from "../src/schema.js";
+import { hashPassword, tokenHash } from "../src/auth.js";
+import { generateTotpCode } from "../src/services/mfa.js";
+import { adminSessions, adminUsers } from "../src/schema.js";
+import { eq } from "drizzle-orm";
+import Database from "better-sqlite3";
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
 import type {
   PaymentInitializeInput,
   PaymentProvider,
@@ -74,10 +79,15 @@ class MockPaystackProvider implements PaymentProvider {
 class MockEmailService implements EmailService {
   readonly configured = true;
   public sent: PasswordResetEmailInput[] = [];
+  public sentAdminResets: PasswordResetEmailInput[] = [];
   public sentOrderLinks: OrderAccessEmailInput[] = [];
 
   async sendPasswordReset(input: PasswordResetEmailInput) {
     this.sent.push(input);
+  }
+
+  async sendAdminPasswordReset(input: PasswordResetEmailInput) {
+    this.sentAdminResets.push(input);
   }
 
   async sendOrderAccessLink(input: OrderAccessEmailInput) {
@@ -135,6 +145,9 @@ let paystackProvider: MockPaystackProvider;
 let emailService: MockEmailService;
 let pushProvider: MockWebPushProvider;
 let adminCookie = "";
+let ownerAdminId = 0;
+let ownerMfaSecret = "";
+let ownerRecoveryCodes: string[] = [];
 let subscriberCookie = "";
 let subscriberId = 0;
 let guestCookie = "";
@@ -145,34 +158,46 @@ const send = (
   url: string,
   payload?: unknown,
   cookie = "",
-) =>
-  app.inject({
+  extraHeaders: Record<string, string> = {},
+) => {
+  const cleanUrl = url.split("?")[0] || "";
+  const isAdmin =
+    cleanUrl === "/admin" || cleanUrl.startsWith("/admin/");
+  return app.inject({
     method,
     url: "/api/v1" + url,
     payload,
-    headers: { cookie, "x-requested-with": "BalancedLife" },
+    headers: {
+      cookie,
+      "x-requested-with": isAdmin ? "BalancedLifeAdmin" : "BalancedLife",
+      ...extraHeaders,
+    },
   });
+};
 
 before(async () => {
   folder = mkdtempSync(join(tmpdir(), "balanced-app-test-"));
   databasePath = join(folder, "test.sqlite");
 
-  // Bootstrap administrator in database
+  // Bootstrap owner administrator in dedicated admin_users table (separate from reader users)
   const store = openDatabase(databasePath);
   const now = new Date().toISOString();
-  store.db
-    .insert(users)
+  const insertedOwner = store.db
+    .insert(adminUsers)
     .values({
       name: "Constance Nwisi",
-      email: "admin@cossyteensconsult.org",
-      passwordHash: await hashPassword("Admin-Secure-Pass-2027!"),
-      role: "admin",
+      email: "owner-admin@cossyteens.com",
+      passwordHash: await hashPassword("Admin-Strong-Pass-2027!"),
+      role: "owner",
       status: "active",
       suspendedReason: "",
+      mfaEnabled: false,
       createdAt: now,
       updatedAt: now,
     })
-    .run();
+    .returning()
+    .get();
+  ownerAdminId = insertedOwner.id;
   store.sqlite.close();
 
   paystackProvider = new MockPaystackProvider();
@@ -186,12 +211,43 @@ before(async () => {
   });
   await app.ready();
 
-  const adminLogin = await send("POST", "/auth/login", {
-    email: "admin@cossyteensconsult.org",
-    password: "Admin-Secure-Pass-2027!",
+  // Password login -> mandatory initial MFA enrollment
+  const adminLogin = await send("POST", "/admin/auth/login", {
+    email: "owner-admin@cossyteens.com",
+    password: "Admin-Strong-Pass-2027!",
   });
   assert.equal(adminLogin.statusCode, 200);
-  adminCookie = String(adminLogin.headers["set-cookie"]).split(";")[0];
+  assert.equal(adminLogin.json().nextStep, "enroll_mfa");
+  const rawSetCookie = String(adminLogin.headers["set-cookie"]);
+  assert.match(rawSetCookie, /balanced_admin_session=/);
+  assert.match(rawSetCookie, /HttpOnly/);
+  assert.match(rawSetCookie, /SameSite=Strict/);
+  assert.equal(/Domain=/i.test(rawSetCookie), false);
+  adminCookie = rawSetCookie.split(";")[0];
+
+  // Unverified MFA session cannot access protected admin endpoints yet
+  assert.equal(
+    (await send("GET", "/admin/overview", undefined, adminCookie)).statusCode,
+    403,
+  );
+
+  // Enroll & confirm TOTP MFA
+  const enrollRes = await send("POST", "/admin/auth/mfa/enroll", {}, adminCookie);
+  assert.equal(enrollRes.statusCode, 200);
+  ownerMfaSecret = enrollRes.json().manualEntryKey;
+  assert.ok(enrollRes.json().otpauthUri.startsWith("otpauth://totp/"));
+
+  const confirmRes = await send(
+    "POST",
+    "/admin/auth/mfa/confirm",
+    { code: generateTotpCode(ownerMfaSecret) },
+    adminCookie,
+  );
+  assert.equal(confirmRes.statusCode, 200);
+  assert.equal(confirmRes.json().admin.mfaEnabled, true);
+  assert.equal(confirmRes.json().admin.mfaVerified, true);
+  ownerRecoveryCodes = confirmRes.json().recoveryCodes;
+  assert.equal(ownerRecoveryCodes.length, 8);
 
   const subReg = await send("POST", "/auth/register", {
     name: "Grace Reader",
@@ -346,9 +402,10 @@ test("profile updates, password changes, and password reset token flow work secu
 
 test("guest and anonymous callers cannot access administration", async () => {
   assert.equal((await send("GET", "/admin/overview")).statusCode, 401);
+  // Reader session cookie (balanced_session) is never accepted for admin endpoints
   assert.equal(
     (await send("GET", "/admin/overview", undefined, guestCookie)).statusCode,
-    403,
+    401,
   );
   assert.equal(
     (
@@ -357,6 +414,18 @@ test("guest and anonymous callers cannot access administration", async () => {
         "/admin/devotionals",
         entryFixture,
         guestCookie,
+      )
+    ).statusCode,
+    401,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/devotionals",
+        entryFixture,
+        guestCookie,
+        { "x-requested-with": "BalancedLife" },
       )
     ).statusCode,
     403,
@@ -2087,5 +2156,517 @@ test("Admin Dashboard Overview: 12 KPIs, chart series, webhook idempotency, and 
     overviewText.includes("Saved during my active 12-month access."),
     false,
   );
+});
+
+test("Separated Admin Auth: reader vs admin login isolation, distinct emails, origin separation, MFA verify/recovery, lockout, idle timeout, suspension & password reset", async () => {
+  // 1. Reader email cannot share owner admin email; admin cannot log into reader login
+  assert.equal(
+    (
+      await send("POST", "/auth/register", {
+        name: "Impersonator",
+        email: "owner-admin@cossyteens.com",
+        password: "Reader-Pass-2027!",
+      })
+    ).statusCode,
+    409,
+  );
+  assert.equal(
+    (
+      await send("POST", "/auth/login", {
+        email: "owner-admin@cossyteens.com",
+        password: "Admin-Strong-Pass-2027!",
+      })
+    ).statusCode,
+    401,
+  );
+
+  // 2. Reader account cannot log into admin auth login
+  assert.equal(
+    (
+      await send("POST", "/admin/auth/login", {
+        email: "alex@example.org",
+        password: "Brand-New-Password-2027!",
+      })
+    ).statusCode,
+    401,
+  );
+
+  // 3. Cross-portal Origin / CSRF checks
+  assert.equal(
+    (
+      await send("POST", "/admin/auth/login", {
+        email: "owner-admin@cossyteens.com",
+        password: "Admin-Strong-Pass-2027!",
+      }, "", {
+        origin: "http://localhost:5173",
+      })
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send("POST", "/journals", { title: "X", body: "Y" }, subscriberCookie, {
+        origin: "http://localhost:5174",
+      })
+    ).statusCode,
+    403,
+  );
+
+  // 4. Subsequent admin login triggers MFA challenge, TOTP code unlocks, backup recovery works once
+  const relogin = await send("POST", "/admin/auth/login", {
+    email: "owner-admin@cossyteens.com",
+    password: "Admin-Strong-Pass-2027!",
+  });
+  assert.equal(relogin.statusCode, 200);
+  assert.equal(relogin.json().nextStep, "verify_mfa");
+  const challengeCookie = String(relogin.headers["set-cookie"]).split(";")[0];
+
+  assert.equal(
+    (await send("GET", "/admin/overview", undefined, challengeCookie))
+      .statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/auth/mfa/verify",
+        { code: "000000" },
+        challengeCookie,
+      )
+    ).statusCode,
+    401,
+  );
+  const verifyOk = await send(
+    "POST",
+    "/admin/auth/mfa/verify",
+    { code: generateTotpCode(ownerMfaSecret) },
+    challengeCookie,
+  );
+  assert.equal(verifyOk.statusCode, 200);
+  assert.equal(verifyOk.json().admin.mfaVerified, true);
+  assert.equal(
+    (await send("GET", "/admin/overview", undefined, challengeCookie))
+      .statusCode,
+    200,
+  );
+
+  // Logout immediately revokes cookie in DB
+  assert.equal(
+    (await send("POST", "/admin/auth/logout", {}, challengeCookie)).statusCode,
+    200,
+  );
+  assert.equal(
+    (await send("GET", "/admin/overview", undefined, challengeCookie))
+      .statusCode,
+    401,
+  );
+
+  // 5. Recovery code login (single use)
+  const relogin2 = await send("POST", "/admin/auth/login", {
+    email: "owner-admin@cossyteens.com",
+    password: "Admin-Strong-Pass-2027!",
+  });
+  const challengeCookie2 = String(relogin2.headers["set-cookie"]).split(";")[0];
+  const singleUseCode = ownerRecoveryCodes[0];
+  const recoverOk = await send(
+    "POST",
+    "/admin/auth/mfa/recover",
+    { recoveryCode: singleUseCode },
+    challengeCookie2,
+  );
+  assert.equal(recoverOk.statusCode, 200);
+  assert.equal(recoverOk.json().admin.mfaVerified, true);
+
+  // Reusing same recovery code fails
+  const relogin3 = await send("POST", "/admin/auth/login", {
+    email: "owner-admin@cossyteens.com",
+    password: "Admin-Strong-Pass-2027!",
+  });
+  const challengeCookie3 = String(relogin3.headers["set-cookie"]).split(";")[0];
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/auth/mfa/recover",
+        { recoveryCode: singleUseCode },
+        challengeCookie3,
+      )
+    ).statusCode,
+    401,
+  );
+
+  // 6. Idle timeout invalidation & absolute expiry invalidation
+  const dbStore = openDatabase(databasePath);
+  const rawToken2 = challengeCookie2.split("=")[1];
+  const staleIso = new Date(Date.now() - 45 * 60_000).toISOString();
+  dbStore.db
+    .update(adminSessions)
+    .set({ lastActivityAt: staleIso })
+    .where(eq(adminSessions.tokenHash, tokenHash(rawToken2)))
+    .run();
+  dbStore.sqlite.close();
+
+  assert.equal(
+    (await send("GET", "/admin/overview", undefined, challengeCookie2))
+      .statusCode,
+    401,
+  );
+
+  // Clean up challengeCookie3
+  await send("POST", "/admin/auth/logout", {}, challengeCookie3);
+});
+
+test("RBAC enforcement across Owner, Content Editor, Orders Manager, Finance Manager, Lockout, Suspension, Staff API & Activity Log", async () => {
+  // Reject creating staff email matching existing reader
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/staff",
+        {
+          name: "Collision Staff",
+          email: "alex@example.org",
+          role: "orders_manager",
+          password: "Staff-Strong-Pass-2027!",
+        },
+        adminCookie,
+      )
+    ).statusCode,
+    409,
+  );
+
+  // Create one staff member for each delegated role
+  const roles = [
+    { role: "content_editor", email: "editor-staff@cossyteens.com" },
+    { role: "orders_manager", email: "orders-staff@cossyteens.com" },
+    { role: "finance_manager", email: "finance-staff@cossyteens.com" },
+  ] as const;
+
+  const staffCookies: Record<string, string> = {};
+  const staffIds: Record<string, number> = {};
+
+  for (const spec of roles) {
+    const createRes = await send(
+      "POST",
+      "/admin/staff",
+      {
+        name: `Test ${spec.role}`,
+        email: spec.email,
+        role: spec.role,
+        password: "Staff-Strong-Pass-2027!",
+      },
+      adminCookie,
+    );
+    assert.equal(createRes.statusCode, 200);
+    staffIds[spec.role] = createRes.json().id;
+
+    // Login & complete MFA enrollment
+    const loginRes = await send("POST", "/admin/auth/login", {
+      email: spec.email,
+      password: "Staff-Strong-Pass-2027!",
+    });
+    assert.equal(loginRes.statusCode, 200);
+    const cookie = String(loginRes.headers["set-cookie"]).split(";")[0];
+    const enroll = await send("POST", "/admin/auth/mfa/enroll", {}, cookie);
+    const otp = generateTotpCode(enroll.json().manualEntryKey);
+    const confirm = await send(
+      "POST",
+      "/admin/auth/mfa/confirm",
+      { code: otp },
+      cookie,
+    );
+    assert.equal(confirm.statusCode, 200);
+    staffCookies[spec.role] = cookie;
+  }
+
+  // Content editor: allowed devotionals, denied printed orders, payments, settings, staff
+  assert.equal(
+    (await send("GET", "/admin/devotionals", undefined, staffCookies.content_editor))
+      .statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await send(
+        "GET",
+        "/admin/printed-orders",
+        undefined,
+        staffCookies.content_editor,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send("GET", "/admin/settings", undefined, staffCookies.content_editor)
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (await send("GET", "/admin/staff", undefined, staffCookies.content_editor))
+      .statusCode,
+    403,
+  );
+
+  // Create a fresh printed order for RBAC action tests
+  const printedRes = await send("POST", "/printed-orders", {
+    fullName: "RBAC Test Customer",
+    email: "rbac-cust@example.org",
+    phone: "+2348099988877",
+    streetAddress: "7 Allen Avenue",
+    city: "Lagos",
+    state: "Lagos",
+    country: "Nigeria",
+    quantity: 1,
+  });
+  const printedOrderId = printedRes.json().id;
+
+  // Orders manager: CAN update delivery quote, CANNOT confirm payment status as paid, CANNOT publish devotional or view staff
+  assert.equal(
+    (
+      await send(
+        "PATCH",
+        `/admin/printed-orders/${printedOrderId}`,
+        { deliveryFeeKobo: 200000, deliveryQuoteNote: "Dispatch rider quote" },
+        staffCookies.orders_manager,
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await send(
+        "PATCH",
+        `/admin/printed-orders/${printedOrderId}`,
+        { paymentStatus: "paid" },
+        staffCookies.orders_manager,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (await send("GET", "/admin/staff", undefined, staffCookies.orders_manager))
+      .statusCode,
+    403,
+  );
+
+  // Finance manager: CAN confirm printed order payment & view audit activity, CANNOT modify devotionals or staff
+  assert.equal(
+    (
+      await send(
+        "PATCH",
+        `/admin/printed-orders/${printedOrderId}`,
+        { paymentStatus: "paid", adminNotes: "Verified by finance desk" },
+        staffCookies.finance_manager,
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (await send("GET", "/admin/activity", undefined, staffCookies.finance_manager))
+      .statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await send(
+        "PUT",
+        "/admin/themes/1",
+        { title: "Blocked", description: "Blocked" },
+        staffCookies.finance_manager,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // Owner: cannot suspend self, can suspend orders_manager & immediately invalidates session
+  assert.equal(
+    (
+      await send(
+        "PATCH",
+        `/admin/staff/${ownerAdminId}`,
+        { status: "suspended" },
+        adminCookie,
+      )
+    ).statusCode,
+    400,
+  );
+  assert.equal(
+    (
+      await send(
+        "PATCH",
+        `/admin/staff/${staffIds.orders_manager}`,
+        { status: "suspended", suspendedReason: "Rotation test" },
+        adminCookie,
+      )
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await send(
+        "GET",
+        "/admin/overview",
+        undefined,
+        staffCookies.orders_manager,
+      )
+    ).statusCode,
+    401,
+  );
+  assert.equal(
+    (
+      await send("POST", "/admin/auth/login", {
+        email: "orders-staff@cossyteens.com",
+        password: "Staff-Strong-Pass-2027!",
+      })
+    ).statusCode,
+    403,
+  );
+
+  // Lockout after 5 failed passwords + Admin password recovery flow
+  for (let i = 0; i < 5; i++) {
+    await send("POST", "/admin/auth/login", {
+      email: "editor-staff@cossyteens.com",
+      password: "Wrong-Password-Attempt!",
+    });
+  }
+  const lockedLogin = await send("POST", "/admin/auth/login", {
+    email: "editor-staff@cossyteens.com",
+    password: "Staff-Strong-Pass-2027!",
+  });
+  assert.equal(lockedLogin.statusCode, 423);
+
+  const forgotRes = await send("POST", "/admin/auth/forgot-password", {
+    email: "editor-staff@cossyteens.com",
+  });
+  assert.equal(forgotRes.statusCode, 200);
+  const resetEmail = emailService.sentAdminResets.find(
+    (m) => m.to === "editor-staff@cossyteens.com",
+  );
+  assert.ok(resetEmail);
+  assert.ok(resetEmail.resetUrl.startsWith("http://localhost:5174/reset-password?token="));
+  const token = decodeURIComponent(resetEmail.resetUrl.split("token=")[1]);
+
+  const resetRes = await send("POST", "/admin/auth/reset-password", {
+    token,
+    password: "Editor-Recovered-Pass-2027!",
+  });
+  assert.equal(resetRes.statusCode, 200);
+  // Previous session invalidated by password reset
+  assert.equal(
+    (
+      await send(
+        "GET",
+        "/admin/overview",
+        undefined,
+        staffCookies.content_editor,
+      )
+    ).statusCode,
+    401,
+  );
+  // New password unlocks immediately
+  assert.equal(
+    (
+      await send("POST", "/admin/auth/login", {
+        email: "editor-staff@cossyteens.com",
+        password: "Editor-Recovered-Pass-2027!",
+      })
+    ).statusCode,
+    200,
+  );
+
+  // Audit activity log contains structured events
+  const activityRes = await send(
+    "GET",
+    "/admin/activity?entityType=admin_staff",
+    undefined,
+    adminCookie,
+  );
+  assert.equal(activityRes.statusCode, 200);
+  assert.ok(activityRes.json().items.length >= 2);
+});
+
+test("Migration 0008 safely preserves historical admin audit logs and revokes/demotes pre-existing reader-table admins", async () => {
+  const migFolder = mkdtempSync(join(tmpdir(), "balanced-mig0008-"));
+  const migDbPath = join(migFolder, "legacy.sqlite");
+  try {
+    const raw = new Database(migDbPath);
+    raw.pragma("foreign_keys = ON");
+    raw.exec(
+      "CREATE TABLE schema_migrations(name TEXT PRIMARY KEY,applied_at TEXT NOT NULL)",
+    );
+    const migDir = resolve(process.cwd(), "migrations");
+    const preMigrations = readdirSync(migDir)
+      .filter((f) => f.endsWith(".sql") && f < "0008_")
+      .sort();
+    for (const file of preMigrations) {
+      raw.exec(readFileSync(resolve(migDir, file), "utf8"));
+      raw
+        .prepare("INSERT INTO schema_migrations VALUES (?, ?)")
+        .run(file, "2026-11-01T00:00:00.000Z");
+    }
+
+    // Seed pre-separation admin inside users, plus reader session & audit log
+    const pwHash = await hashPassword("Legacy-Pass-2026!");
+    raw
+      .prepare(
+        "INSERT INTO users (id, name, email, password_hash, role, status, suspended_reason, created_at, updated_at) VALUES (11, 'Jeremiah Legacy', 'legacy-admin@example.com', ?, 'admin', 'active', '', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z')",
+      )
+      .run(pwHash);
+    raw
+      .prepare(
+        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ('old-legacy-token-hash', 11, '2028-01-01T00:00:00.000Z')",
+      )
+      .run();
+    raw
+      .prepare(
+        "INSERT INTO admin_audit_logs (id, admin_id, action, created_at) VALUES (39, 11, 'Granted administrator access', '2026-11-08 18:15:20')",
+      )
+      .run();
+    raw.close();
+
+    // Run openDatabase (executes 0008)
+    const migrated = openDatabase(migDbPath);
+    const demotedUser = migrated.sqlite
+      .prepare(
+        "SELECT role, legacy_admin_status FROM users WHERE id = 11",
+      )
+      .get() as { role: string; legacy_admin_status: string };
+    assert.equal(demotedUser.role, "reader");
+    assert.equal(demotedUser.legacy_admin_status, "pending_decision");
+
+    const oldSessCount = (
+      migrated.sqlite
+        .prepare("SELECT COUNT(*) AS c FROM sessions WHERE user_id = 11")
+        .get() as { c: number }
+    ).c;
+    assert.equal(oldSessCount, 0);
+
+    const preservedAudit = migrated.sqlite
+      .prepare(
+        "SELECT admin_id, legacy_user_admin_id, actor_name, actor_email, actor_role, action FROM admin_audit_logs WHERE id = 39",
+      )
+      .get() as {
+      admin_id: number | null;
+      legacy_user_admin_id: number | null;
+      actor_name: string;
+      actor_email: string;
+      actor_role: string;
+      action: string;
+    };
+    assert.equal(preservedAudit.admin_id, null);
+    assert.equal(preservedAudit.legacy_user_admin_id, 11);
+    assert.equal(preservedAudit.actor_name, "Jeremiah Legacy");
+    assert.equal(preservedAudit.actor_email, "legacy-admin@example.com");
+    assert.equal(preservedAudit.actor_role, "legacy_admin");
+    assert.equal(preservedAudit.action, "Granted administrator access");
+
+    const fkErrors = migrated.sqlite.pragma("foreign_key_check") as unknown[];
+    assert.equal(fkErrors.length, 0);
+    migrated.sqlite.close();
+  } finally {
+    rmSync(migFolder, { recursive: true, force: true });
+  }
 });
 

@@ -3,6 +3,8 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import {
+  READER_SESSION_COOKIE,
+  clearReaderCookie,
   establishSession,
   hashPassword,
   newToken,
@@ -47,6 +49,17 @@ export function registerAuthRoutes(
         );
       }
       const input = registerSchema.parse(req.body);
+      const existingAdmin = db
+        .select({ id: s.adminUsers.id })
+        .from(s.adminUsers)
+        .where(eq(s.adminUsers.email, input.email))
+        .get();
+      if (existingAdmin) {
+        throw new HttpError(
+          409,
+          "This email address is reserved for staff administration. Please use a separate personal email for your reader account.",
+        );
+      }
       const now = new Date().toISOString();
       const user = db
         .insert(s.users)
@@ -86,7 +99,7 @@ export function registerAuthRoutes(
         user?.passwordHash ||
           "00000000000000000000000000000000:" + "00".repeat(64),
       );
-      if (!user || !valid) {
+      if (!user || !valid || user.role !== "reader") {
         throw new HttpError(401, "Email or password is incorrect.");
       }
       if (user.status === "suspended") {
@@ -100,14 +113,13 @@ export function registerAuthRoutes(
   );
 
   app.post(prefix + "/auth/logout", async (req, reply) => {
-    if (req.cookies.balanced_session) {
+    const cookieToken = req.cookies[READER_SESSION_COOKIE];
+    if (cookieToken) {
       db.delete(s.sessions)
-        .where(
-          eq(s.sessions.tokenHash, tokenHash(req.cookies.balanced_session)),
-        )
+        .where(eq(s.sessions.tokenHash, tokenHash(cookieToken)))
         .run();
     }
-    reply.clearCookie("balanced_session", { path: "/" });
+    clearReaderCookie(reply, options.isProduction);
     return { ok: true };
   });
 
@@ -215,6 +227,19 @@ export function registerAuthRoutes(
   app.patch(prefix + "/me/profile", async (req) => {
     const currentUser = requireUser(req);
     const input = profileUpdateSchema.parse(req.body);
+    if (input.email !== currentUser.email) {
+      const adminConflict = db
+        .select({ id: s.adminUsers.id })
+        .from(s.adminUsers)
+        .where(eq(s.adminUsers.email, input.email))
+        .get();
+      if (adminConflict) {
+        throw new HttpError(
+          409,
+          "That email address is reserved for staff administration and cannot be used for a reader profile.",
+        );
+      }
+    }
     const now = new Date().toISOString();
 
     const updated = db

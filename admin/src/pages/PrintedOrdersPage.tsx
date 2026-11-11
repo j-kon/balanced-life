@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Printer, Search, Truck, X } from "lucide-react";
-import { Empty } from "../../components/Common";
-import { money } from "../../api";
-import type { PrintedOrderRecord } from "../../types";
+import { Empty } from "../components/Common";
+import { money } from "../api";
+import type { PrintedOrderRecord } from "../types";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 
 export function PrintedOrdersPage({

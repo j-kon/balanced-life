@@ -1,5 +1,5 @@
 import path from "node:path";
-import { randomBytes, scryptSync } from "node:crypto";
+import { createHmac, randomBytes, scryptSync } from "node:crypto";
 import Database from "better-sqlite3";
 import { test, expect } from "@playwright/test";
 
@@ -9,16 +9,47 @@ function hashTestPassword(password: string) {
   return `${salt}:${derived}`;
 }
 
+function generateTestTotp(secretBase32: string) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const cleaned = secretBase32.toUpperCase().replace(/[\s=-]/g, "");
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const ch of cleaned) {
+    const idx = alphabet.indexOf(ch);
+    if (idx === -1) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  const counter = Math.floor(Date.now() / 1000 / 30);
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64BE(BigInt(counter), 0);
+  const hmac = createHmac("sha1", Buffer.from(bytes)).update(buf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const binary =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
 const dbPath = path.resolve(
   import.meta.dirname,
   "../../backend/data/devotional.sqlite",
 );
 
+const ADMIN_URL = "http://127.0.0.1:5174";
 const adminEmail = "admin-e2e@cossyteens.org";
 const adminPassword = "AdminPass!2027Secure";
 const readerEmail = "reader-e2e@cossyteens.org";
 const readerPassword = "ReaderPass!2027Secure";
 const readerUpdatedPassword = "ReaderNewPass!2027Secure";
+let e2eAdminMfaSecret = "";
 
 function cleanupTestRecords(sqlite: Database.Database) {
   const testUsers = sqlite
@@ -38,17 +69,30 @@ function cleanupTestRecords(sqlite: Database.Database) {
       .run(id);
     sqlite.prepare(`DELETE FROM notification_events WHERE user_id = ?`).run(id);
     sqlite.prepare(`DELETE FROM push_subscriptions WHERE user_id = ?`).run(id);
-    sqlite
-      .prepare(
-        `DELETE FROM subscriptions WHERE user_id = ? OR granted_by_admin_id = ?`,
-      )
-      .run(id, id);
-    sqlite.prepare(`DELETE FROM admin_audit_logs WHERE admin_id = ?`).run(id);
+    sqlite.prepare(`DELETE FROM subscriptions WHERE user_id = ?`).run(id);
+    sqlite.prepare(`DELETE FROM admin_audit_logs WHERE legacy_user_admin_id = ?`).run(id);
     sqlite
       .prepare(`DELETE FROM password_reset_tokens WHERE user_id = ?`)
       .run(id);
     sqlite.prepare(`DELETE FROM users WHERE id = ?`).run(id);
   }
+  const testAdmins = sqlite
+    .prepare(`SELECT id FROM admin_users WHERE email = ?`)
+    .all(adminEmail) as { id: number }[];
+  for (const adm of testAdmins) {
+    sqlite.prepare(`DELETE FROM admin_sessions WHERE admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM admin_mfa_recovery_codes WHERE admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM admin_password_reset_tokens WHERE admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM admin_audit_logs WHERE admin_id = ? OR actor_email = ?`).run(adm.id, adminEmail);
+    sqlite.prepare(`DELETE FROM subscriptions WHERE granted_by_admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM digital_entitlements WHERE granted_by_admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM digital_purchases WHERE verified_by_admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM printed_orders WHERE verified_by_admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM admin_users WHERE id = ?`).run(adm.id);
+  }
+  sqlite
+    .prepare(`DELETE FROM admin_audit_logs WHERE actor_email = ?`)
+    .run(adminEmail);
   sqlite
     .prepare(`DELETE FROM hardcover_inquiries WHERE email = ?`)
     .run(readerEmail);
@@ -72,8 +116,8 @@ test.beforeAll(() => {
   const now = new Date().toISOString();
   sqlite
     .prepare(
-      `INSERT INTO users (name, email, password_hash, role, status, suspended_reason, created_at, updated_at)
-       VALUES (?, ?, ?, 'admin', 'active', '', ?, ?)`,
+      `INSERT INTO admin_users (name, email, password_hash, role, status, suspended_reason, mfa_enabled, created_at, updated_at)
+       VALUES (?, ?, ?, 'owner', 'active', '', 0, ?, ?)`,
     )
     .run(
       "E2E Test Administrator",
@@ -332,19 +376,70 @@ test.describe("End-to-End Production Workflows", () => {
     await expect(page).toHaveURL(/\/dashboard$/);
   });
 
-  test("3. Administrator dashboard: metrics, complimentary access grant, devotional review/publish, bulk orders, and bookstore management", async ({
-    page,
+  test("3. Separate administration portal: isolated login, MFA setup, navigable URLs, reader/admin boundary, complimentary access, devotional publish & mobile layout", async ({
+    browser,
   }) => {
-    await page.setViewportSize({ width: 1440, height: 960 });
-    await page.goto("/login");
-    await page.getByLabel(/Email address/i).fill(adminEmail);
-    await page.getByLabel(/^Password/i).fill(adminPassword);
-    await page.getByRole("button", { name: /^Sign in$/i }).click();
-
-    await expect(page).toHaveURL(/\/(admin|dashboard)$/);
-    await page.goto("/admin");
+    // 1. Verify /admin is completely removed from the public/reader app (port 5173)
+    const publicContext = await browser.newContext();
+    const publicPage = await publicContext.newPage();
+    await publicPage.setViewportSize({ width: 1440, height: 960 });
+    await publicPage.goto("/admin");
     await expect(
-      page.getByRole("heading", { name: /The author's desk/i }),
+      publicPage.getByRole("heading", { name: /This page has turned/i }),
+    ).toBeVisible();
+
+    // Admin email cannot log into reader site
+    await publicPage.goto("/login");
+    await publicPage.getByLabel(/Email address/i).fill(adminEmail);
+    await publicPage.getByLabel(/^Password/i).fill(adminPassword);
+    await publicPage.getByRole("button", { name: /^Sign in$/i }).click();
+    await expect(
+      publicPage.getByText(/Email or password is incorrect/i),
+    ).toBeVisible();
+    await publicContext.close();
+
+    // 2. Open dedicated Administration Portal (port 5174)
+    const adminContext = await browser.newContext();
+    const page = await adminContext.newPage();
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ADMIN_URL}/login`);
+
+    // Reader email cannot log into admin portal
+    await page.getByLabel(/Administrator email/i).fill(readerEmail);
+    await page.getByLabel(/Administrator password/i).fill(readerUpdatedPassword);
+    await page.getByRole("button", { name: /Continue to verification/i }).click();
+    await expect(
+      page.getByText(/Administrator email or password is incorrect/i),
+    ).toBeVisible();
+
+    // Log in with dedicated admin credentials -> mandatory first-login MFA enrollment
+    await page.getByLabel(/Administrator email/i).fill(adminEmail);
+    await page.getByLabel(/Administrator password/i).fill(adminPassword);
+    await page.getByRole("button", { name: /Continue to verification/i }).click();
+
+    await expect(page).toHaveURL(/5174\/mfa-setup$/);
+    const manualKeyEl = page.locator(".mfa-manual-key");
+    await expect(manualKeyEl).toBeVisible();
+    e2eAdminMfaSecret = (await manualKeyEl.textContent())?.trim() || "";
+    expect(e2eAdminMfaSecret.length).toBeGreaterThanOrEqual(16);
+
+    await page
+      .getByLabel(/Enter the 6-digit code/i)
+      .fill(generateTestTotp(e2eAdminMfaSecret));
+    await page.getByRole("button", { name: /Verify & enable MFA/i }).click();
+
+    // Save recovery codes confirmation -> enter dashboard
+    await expect(
+      page.getByRole("heading", { name: /Store Your Recovery Codes/i }),
+    ).toBeVisible();
+    await page.locator('input[type="checkbox"]').check();
+    await page
+      .getByRole("button", { name: /Enter Administration Dashboard/i })
+      .click();
+
+    await expect(page).toHaveURL(/5174\/dashboard$/);
+    await expect(
+      page.getByRole("heading", { level: 1, name: /Executive Overview/i }),
     ).toBeVisible();
 
     // Verify Overview shows Verified revenue and Digital editions sold
@@ -355,8 +450,12 @@ test.describe("End-to-End Production Workflows", () => {
       page.getByText(/Digital editions sold/i).first(),
     ).toBeVisible();
 
-    // Readers tab: search for our E2E reader and grant complimentary access
-    await page.getByRole("button", { name: /^Readers$/i }).click();
+    // Readers route: navigate via sidebar & verify deep-link reload works cleanly
+    await page.getByRole("link", { name: /^Readers$/i }).click();
+    await expect(page).toHaveURL(/5174\/readers$/);
+    await page.reload();
+    await expect(page).toHaveURL(/5174\/readers$/);
+
     await page
       .getByPlaceholder(/Search readers by name, email, or plan/i)
       .fill(readerEmail);
@@ -374,8 +473,9 @@ test.describe("End-to-End Production Workflows", () => {
       .click();
     await expect(page.getByText(/Changes saved/i)).toBeVisible();
 
-    // Devotionals tab: filter for 2027-01-08 (draft), approve & publish it
-    await page.getByRole("button", { name: /^Devotionals$/i }).click();
+    // Devotionals route: approve & publish 2027-01-08
+    await page.getByRole("link", { name: /^Devotionals$/i }).click();
+    await expect(page).toHaveURL(/5174\/devotionals$/);
     await page
       .getByPlaceholder(/Find a title or date/i)
       .fill("2027-01-08");
@@ -384,10 +484,43 @@ test.describe("End-to-End Production Workflows", () => {
     await entryRow.getByRole("button", { name: /Approve & publish/i }).click();
     await expect(page.getByText(/Changes saved/i)).toBeVisible();
 
-    // Printed Orders tab: verify printed order from test 1 and unconfigured stock input
-    await page.getByRole("button", { name: /^Printed Orders$/i }).click();
+    // Printed Orders route: verify printed order and unconfigured stock
+    await page.getByRole("link", { name: /^Printed Orders$/i }).click();
+    await expect(page).toHaveURL(/5174\/printed-orders$/);
     await expect(page.getByText(readerEmail).first()).toBeVisible();
     await expect(page.locator('input[name="stockCount"]')).toHaveValue("");
+
+    // Visit remaining operational routes and verify each renders cleanly
+    for (const [linkName, urlRe, headingRe] of [
+      [/^Online Access$/i, /5174\/online-access$/, /Product A: 2027 Digital Devotional Access/i],
+      [/^Bulk Orders$/i, /5174\/bulk-orders$/, /Bulk.*Institutional/i],
+      [/^Payments$/i, /5174\/payments$/, /Payments.*Financial Administration/i],
+      [/^Notifications/i, /5174\/notifications$/, /Operational Notifications/i],
+      [/^Settings$/i, /5174\/settings$/, /Brand Identity.*Headlines/i],
+    ] as const) {
+      await page.getByRole("link", { name: linkName }).click();
+      await expect(page).toHaveURL(urlRe);
+      await expect(page.getByRole("heading", { name: headingRe })).toBeVisible();
+    }
+
+    // Activity & Security route: verify audit trail logged actions
+    await page.getByRole("link", { name: /Activity & Security/i }).click();
+    await expect(page).toHaveURL(/5174\/activity$/);
+    await expect(
+      page.getByText(/Administrative Audit & Security Log/i),
+    ).toBeVisible();
+
+    // Mobile admin viewport 390px: zero horizontal overflow
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${ADMIN_URL}/dashboard`);
+    const adminOverflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    expect(adminOverflow).toBe(false);
+
+    await adminContext.close();
   });
 
   test("4. Complimentary subscriber accesses published archive, bookmarks, reading progress, and 5-step accountability journal CRUD", async ({
@@ -465,22 +598,29 @@ test.describe("End-to-End Production Workflows", () => {
     );
     expect(readerOverflow).toBe(false);
 
-    // Clean up published state of 2027-01-08 via Admin
-    await page.setViewportSize({ width: 1440, height: 960 });
-    await page.getByRole("button", { name: "Sign out", exact: true }).click();
-    await expect(page).toHaveURL(/\/(login)?$/);
-    await page.goto("/login");
-    await page.getByLabel(/Email address/i).fill(adminEmail);
-    await page.getByLabel(/^Password/i).fill(adminPassword);
-    await page.getByRole("button", { name: /^Sign in$/i }).click();
-    await expect(page).toHaveURL(/\/(admin|dashboard)$/);
-    await page.goto("/admin");
-    await page.getByRole("button", { name: /^Devotionals$/i }).click();
-    await page
+    // Clean up published state of 2027-01-08 via standalone Admin Portal (testing MFA verify challenge)
+    const adminCtx = await page.context().browser()!.newContext();
+    const adminPage = await adminCtx.newPage();
+    await adminPage.setViewportSize({ width: 1440, height: 960 });
+    await adminPage.goto(`${ADMIN_URL}/login`);
+    await adminPage.getByLabel(/Administrator email/i).fill(adminEmail);
+    await adminPage.getByLabel(/Administrator password/i).fill(adminPassword);
+    await adminPage.getByRole("button", { name: /Continue to verification/i }).click();
+    await expect(adminPage).toHaveURL(/5174\/mfa-verify$/);
+    await adminPage
+      .getByLabel(/6-digit authenticator code/i)
+      .fill(generateTestTotp(e2eAdminMfaSecret));
+    await adminPage
+      .getByRole("button", { name: /Verify & enter dashboard/i })
+      .click();
+    await expect(adminPage).toHaveURL(/5174\/dashboard$/);
+    await adminPage.goto(`${ADMIN_URL}/devotionals`);
+    await adminPage
       .getByPlaceholder(/Find a title or date/i)
       .fill("2027-01-08");
-    const entryRow = page.locator("tr", { hasText: "2027-01-08" });
+    const entryRow = adminPage.locator("tr", { hasText: "2027-01-08" });
     await entryRow.getByRole("button", { name: /Unpublish/i }).click();
-    await expect(page.getByText(/Changes saved/i)).toBeVisible();
+    await expect(adminPage.getByText(/Changes saved/i)).toBeVisible();
+    await adminCtx.close();
   });
 });

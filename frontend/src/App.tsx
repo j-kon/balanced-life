@@ -33,7 +33,6 @@ import {
   SubscriptionPage,
 } from "./pages/reader/SubscriptionPage";
 import { AccountPage } from "./pages/reader/AccountPage";
-import { AdminPage } from "./pages/admin/AdminPage";
 
 function RouteScroll() {
   const { pathname } = useLocation();
@@ -191,14 +190,6 @@ export default function App() {
               element={
                 <Protected>
                   <AccountPage />
-                </Protected>
-              }
-            />
-            <Route
-              path="/admin"
-              element={
-                <Protected admin>
-                  <AdminPage />
                 </Protected>
               }
             />

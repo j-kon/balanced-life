@@ -6,7 +6,13 @@ import { and, eq, gt } from "drizzle-orm";
 import { getEnvConfig } from "./config.js";
 import { openDatabase } from "./db.js";
 import * as s from "./schema.js";
-import { publicUser, tokenHash } from "./auth.js";
+import {
+  ADMIN_SESSION_COOKIE,
+  READER_SESSION_COOKIE,
+  publicUser,
+  resolveAdminSession,
+  tokenHash,
+} from "./auth.js";
 import { HttpError, handleError } from "./errors.js";
 import {
   PaystackPaymentProvider,
@@ -21,6 +27,7 @@ import {
 import { registerPublicRoutes } from "./routes/public.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerReaderRoutes } from "./routes/reader.js";
+import { registerAdminAuthRoutes } from "./routes/adminAuth.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 
 export type BuildAppOptions = {
@@ -72,6 +79,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(rateLimit, { max: 400, timeWindow: "1 minute" });
   app.decorateRequest("user", null);
+  app.decorateRequest("admin", null);
+  app.decorateRequest("adminSessionTokenHash", null);
   app.decorateRequest("rawBody", "");
 
   app.addContentTypeParser(
@@ -92,40 +101,69 @@ export async function buildApp(options: BuildAppOptions = {}) {
     },
   );
 
-  const origins = new Set([
+  const publicOrigins = new Set([
     env.appOrigin,
     "http://localhost:5173",
     "http://127.0.0.1:5173",
   ]);
+  const adminOrigins = new Set([
+    env.adminOrigin,
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+  ]);
 
   app.addHook("onRequest", async (req, reply) => {
     reply.header("Cache-Control", "no-store");
-    const isPaystackWebhook = req.url.startsWith("/api/v1/webhooks/paystack");
+    const pathname = req.url.split("?")[0] || "";
+    const isPaystackWebhook = pathname.startsWith("/api/v1/webhooks/paystack");
+    const isAdminRoute =
+      pathname === "/api/v1/admin" || pathname.startsWith("/api/v1/admin/");
+
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !isPaystackWebhook) {
+      const expectedRequestedWith = isAdminRoute
+        ? "BalancedLifeAdmin"
+        : "BalancedLife";
+      const allowedOrigins = isAdminRoute ? adminOrigins : publicOrigins;
       if (
-        req.headers["x-requested-with"] !== "BalancedLife" ||
-        (req.headers.origin && !origins.has(req.headers.origin)) ||
+        req.headers["x-requested-with"] !== expectedRequestedWith ||
+        (req.headers.origin && !allowedOrigins.has(req.headers.origin)) ||
         req.headers["sec-fetch-site"] === "cross-site"
       ) {
         throw new HttpError(403, "Request origin could not be verified.");
       }
     }
 
-    const token = req.cookies.balanced_session;
-    if (token) {
+    if (isAdminRoute) {
+      const adminToken = req.cookies[ADMIN_SESSION_COOKIE];
+      if (adminToken) {
+        const resolved = resolveAdminSession(
+          store,
+          adminToken,
+          env.adminSessionIdleMinutes,
+        );
+        if (resolved) {
+          req.admin = resolved.admin;
+          req.adminSessionTokenHash = resolved.tokenHash;
+        }
+      }
+      return;
+    }
+
+    const readerToken = req.cookies[READER_SESSION_COOKIE];
+    if (readerToken) {
       const row = db
         .select({ user: s.users })
         .from(s.sessions)
         .innerJoin(s.users, eq(s.users.id, s.sessions.userId))
         .where(
           and(
-            eq(s.sessions.tokenHash, tokenHash(token)),
+            eq(s.sessions.tokenHash, tokenHash(readerToken)),
             gt(s.sessions.expiresAt, new Date().toISOString()),
           ),
         )
         .get();
 
-      if (row && row.user.status === "active") {
+      if (row && row.user.status === "active" && row.user.role === "reader") {
         req.user = publicUser(row.user);
       }
     }
@@ -173,6 +211,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
     env.appOrigin,
     pushProvider,
   );
+  registerAdminAuthRoutes(app, prefix, store, emailService, {
+    isProduction,
+    adminOrigin: env.adminOrigin,
+    mfaEncryptionKey: env.adminMfaEncryptionKey,
+    adminSessionIdleMinutes: env.adminSessionIdleMinutes,
+    adminSessionMaxHours: env.adminSessionMaxHours,
+  });
   registerAdminRoutes(app, prefix, store, paymentProvider, pushProvider);
 
   return app;

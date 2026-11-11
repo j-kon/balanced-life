@@ -26,9 +26,6 @@ export function Header() {
           <NavLink to="/pricing">Get access</NavLink>
           <NavLink to="/bookstore">Printed Book</NavLink>
           <NavLink to="/contact">Contact</NavLink>
-          {user?.role === "admin" && (
-            <NavLink to="/admin">Author's desk</NavLink>
-          )}
           <Link className="button small" to={user ? "/dashboard" : "/login"}>
             {user ? "My journey" : "Sign in"}
             <ArrowUpRight size={15} />

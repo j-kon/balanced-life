@@ -1,4 +1,5 @@
 import type {
+  AdminAuditItem,
   AppSettings,
   BulkOrderRecord,
   DigitalEntitlementRecord,
@@ -11,7 +12,7 @@ import type {
   Plan,
   PrintedOrderRecord,
   SubscriptionDetails,
-} from "../../types";
+} from "../types";
 
 export type AdminSectionId =
   | "Overview"
@@ -22,13 +23,14 @@ export type AdminSectionId =
   | "Bulk Orders"
   | "Payments"
   | "Notifications"
+  | "Activity & Security"
   | "Settings";
 
 export type AdminUserRow = {
   id: number;
   name: string;
   email: string;
-  role: "admin" | "reader";
+  role: "reader" | "admin";
   status: "active" | "suspended";
   suspendedReason: string;
   ageGroup?: string;
@@ -160,13 +162,7 @@ export type AdminOverviewData = {
     completions: number;
     bookmarks: number;
   }>;
-  audit: Array<{
-    id: number;
-    adminId: number;
-    adminName: string | null;
-    action: string;
-    createdAt: string;
-  }>;
+  audit: AdminAuditItem[];
   settings: AppSettings;
   paymentsConfig: {
     configured: boolean;
