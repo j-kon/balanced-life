@@ -24,26 +24,50 @@ export const daysUntil2027 = (currentDate: string) => {
   return Math.max(0, Math.ceil((start - now) / 86400000));
 };
 
+const inflightGets = new Map<string, Promise<unknown>>();
+
 export async function api<T = any>(
   path: string,
   body?: unknown,
   method = body === undefined ? "GET" : "POST",
 ): Promise<T> {
-  const res = await fetch("/api/v1" + path, {
-    method,
-    credentials: "same-origin",
-    headers:
-      body === undefined
-        ? {}
-        : {
-            "Content-Type": "application/json",
-            "X-Requested-With": "BalancedLife",
-          },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.message || "Something went wrong. Please try again.");
+  if (method === "GET" && body === undefined) {
+    const existing = inflightGets.get(path);
+    if (existing) {
+      return existing as Promise<T>;
+    }
   }
-  return data as T;
+
+  const requestPromise = (async () => {
+    const res = await fetch("/api/v1" + path, {
+      method,
+      credentials: "same-origin",
+      headers:
+        body === undefined
+          ? {}
+          : {
+              "Content-Type": "application/json",
+              "X-Requested-With": "BalancedLife",
+            },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(
+        data.message || "Something went wrong. Please try again.",
+      );
+    }
+    return data as T;
+  })();
+
+  if (method === "GET" && body === undefined) {
+    inflightGets.set(path, requestPromise);
+    requestPromise.finally(() => {
+      if (inflightGets.get(path) === requestPromise) {
+        inflightGets.delete(path);
+      }
+    });
+  }
+
+  return requestPromise;
 }

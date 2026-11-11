@@ -232,7 +232,7 @@ export function ReaderLayout({ children }: { children: ReactNode }) {
       <div className="reader-layout">
         <aside className="sidebar">
           <span className="eyebrow">Your quiet space</span>
-          <nav aria-label="Reader navigation">
+          <nav className="sidebar-primary-nav" aria-label="Reader">
             {readerLinks.map(({ to, label, icon: Icon }) => (
               <NavLink key={to} to={to}>
                 <Icon size={19} aria-hidden="true" />
@@ -271,9 +271,7 @@ export function ReaderLayout({ children }: { children: ReactNode }) {
 
           <nav className="sidebar-legal" aria-label="Legal and support">
             <Link to="/contact">Contact</Link>
-            <span aria-hidden="true">·</span>
             <Link to="/privacy">Privacy</Link>
-            <span aria-hidden="true">·</span>
             <Link to="/terms">Terms</Link>
           </nav>
         </aside>
@@ -284,7 +282,7 @@ export function ReaderLayout({ children }: { children: ReactNode }) {
         </main>
       </div>
 
-      <nav className="mobile-bottom" aria-label="Mobile reader navigation">
+      <nav className="mobile-bottom" aria-label="Mobile reader">
         {mobileBottomLinks.map(({ to, label, shortLabel, icon: Icon }) => (
           <NavLink key={to} to={to} aria-label={label}>
             <Icon size={20} aria-hidden="true" />

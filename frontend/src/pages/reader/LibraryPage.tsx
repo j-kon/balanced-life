@@ -41,7 +41,7 @@ export function LibraryPage({ saved = false }: { saved?: boolean }) {
   const hasAnySaved = Boolean(data?.some((e) => e.saved));
 
   return (
-    <>
+    <div className="library-stage">
       <div className="page-heading">
         <div>
           <span className="eyebrow">The 2027 collection</span>
@@ -57,7 +57,7 @@ export function LibraryPage({ saved = false }: { saved?: boolean }) {
       {!saved && <UpcomingYearNotice />}
 
       {(!saved || hasAnySaved) && (
-        <div className="filters">
+        <div className="filters library-filters">
           <label className="search-box">
             <Search size={18} />
             <input
@@ -175,7 +175,7 @@ export function LibraryPage({ saved = false }: { saved?: boolean }) {
           </Empty>
         </div>
       )}
-    </>
+    </div>
   );
 }
 

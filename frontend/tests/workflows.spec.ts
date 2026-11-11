@@ -59,11 +59,19 @@ const stateReaderEmail = "state-e2e@cossyteens.org";
 const stateReaderPassword = "StatePass!2027Secure";
 const pwaReaderEmail = "pwa-e2e@cossyteens.org";
 const pwaReaderPassword = "PwaReader!2027Secure";
+const auditReaderEmail = "audit-e2e@cossyteens.org";
+const auditReaderPassword = "AuditReader!2027Secure";
 
 function cleanupTestRecords(sqlite: Database.Database) {
   const testUsers = sqlite
-    .prepare(`SELECT id FROM users WHERE email IN (?, ?, ?, ?)`)
-    .all(adminEmail, readerEmail, stateReaderEmail, pwaReaderEmail) as {
+    .prepare(`SELECT id FROM users WHERE email IN (?, ?, ?, ?, ?)`)
+    .all(
+      adminEmail,
+      readerEmail,
+      stateReaderEmail,
+      pwaReaderEmail,
+      auditReaderEmail,
+    ) as {
     id: number;
   }[];
   const ids = testUsers.map((u) => u.id);
@@ -1324,22 +1332,6 @@ test.describe("End-to-End Production Workflows", () => {
       }
     }
 
-    // Desktop reader pages also omit marketing footer
-    await page.setViewportSize({ width: 1440, height: 960 });
-    for (const desktopPath of [
-      { label: /My journey/i, path: "/dashboard" },
-      { label: /My Growth Journal/i, path: "/journal" },
-      { label: /Saved readings/i, path: "/saved" },
-      { label: /Notifications/i, path: "/notifications" },
-    ]) {
-      await page
-        .locator(".sidebar")
-        .getByRole("link", { name: desktopPath.label })
-        .click();
-      await expect(page).toHaveURL(new RegExp(`${desktopPath.path}$`));
-      await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
-    }
-
     // Mobile landscape check (844x390)
     await page.setViewportSize({ width: 844, height: 390 });
     await page
@@ -1394,6 +1386,306 @@ test.describe("End-to-End Production Workflows", () => {
     });
 
     await standaloneCtx.close();
+    await ctx.close();
+  });
+
+  test("7. Comprehensive desktop (1024-1920px) & mobile/tablet (320-768px) UI audit, About/Footer/Sidebar/Banner spacing & themes", async ({
+    browser,
+  }) => {
+    const auditShotDir = path.resolve(
+      import.meta.dirname,
+      "../../tmp/audit-screenshots",
+    );
+    mkdirSync(auditShotDir, { recursive: true });
+
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+
+    const assertNoHorizontalOverflow = async (label: string) => {
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth >
+          document.documentElement.clientWidth,
+      );
+      expect(overflow, `Horizontal overflow on ${label}`).toBe(false);
+    };
+
+    // 1. Audit public desktop header, 3-column footer & pages across 1024, 1280, 1440, 1920
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/");
+    await expect(page.locator("header.public-header")).toBeVisible();
+    await expect(page.locator(".footer-brand-block")).toBeVisible();
+    await expect(page.locator(".footer-nav-col")).toBeVisible();
+    await expect(page.locator(".footer-contact-block")).toBeVisible();
+    await expect(
+      page.locator(".footer-contact-block").getByText(/Abuja, Nigeria/i),
+    ).toBeVisible();
+
+    // Footer 3 areas sit in horizontal columns cleanly on desktop without vertical collapsing
+    const footerMetrics = await page.evaluate(() => {
+      const b = document
+        .querySelector(".footer-brand-block")
+        ?.getBoundingClientRect();
+      const n = document
+        .querySelector(".footer-nav-col")
+        ?.getBoundingClientRect();
+      const c = document
+        .querySelector(".footer-contact-block")
+        ?.getBoundingClientRect();
+      return { b, n, c };
+    });
+    expect(footerMetrics.b && footerMetrics.n && footerMetrics.c).toBeTruthy();
+    expect(footerMetrics.n!.left).toBeGreaterThan(footerMetrics.b!.right - 1);
+    expect(footerMetrics.c!.left).toBeGreaterThan(footerMetrics.n!.right - 1);
+
+    await page
+      .locator("footer.marketing-footer")
+      .scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: path.join(auditShotDir, "01-home-footer-1280.png"),
+      fullPage: false,
+    });
+
+    // Public header inline navigation check at 1024px, 1280px, 1440px, 1920px
+    for (const width of [1024, 1280, 1440, 1920]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(page.locator("nav.public-nav")).toBeVisible();
+      await expect(page.locator("header.public-header .menu-toggle")).toBeHidden();
+      await assertNoHorizontalOverflow(`public home ${width}px`);
+      const headerHeight = await page
+        .locator("header.public-header")
+        .evaluate((el) => el.getBoundingClientRect().height);
+      expect(headerHeight).toBeLessThanOrEqual(115);
+      if (width === 1024) {
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.screenshot({
+          path: path.join(auditShotDir, "02-home-header-1024.png"),
+          fullPage: false,
+        });
+      }
+    }
+
+    // Check About Devotional callout + button separation (desktop + mobile)
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.locator("nav.public-nav").getByRole("link", { name: /The devotional/i }).click();
+    await expect(page).toHaveURL(/\/about$/);
+    await expect(page.locator(".about-access-callout")).toBeVisible();
+    await expect(
+      page.locator(".about-access-callout").getByText(/Printed Book/i),
+    ).toBeVisible();
+    await expect(
+      page.locator(".about-access-callout").getByText(/2027 Online Access/i),
+    ).toBeVisible();
+    const aboutBoxes = await page.evaluate(() => {
+      const callout = document
+        .querySelector(".about-access-callout")
+        ?.getBoundingClientRect();
+      const actions = document
+        .querySelector(".about-access-actions")
+        ?.getBoundingClientRect();
+      return { callout, actions };
+    });
+    expect(aboutBoxes.actions!.top - aboutBoxes.callout!.bottom).toBeGreaterThanOrEqual(20);
+    await page.locator(".about-access-callout").scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: path.join(auditShotDir, "03-about-callout-1280.png"),
+      fullPage: false,
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await assertNoHorizontalOverflow("about 390px");
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await page.locator(".about-access-callout").scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: path.join(auditShotDir, "04-about-callout-390.png"),
+      fullPage: false,
+    });
+
+    // Spot-check About Author, Pricing, Bookstore across 320px, 768px, 1280px
+    for (const routeLink of [
+      { name: /The author/i, path: /\/about-author$/ },
+      { name: /Get access/i, path: /\/pricing$/ },
+      { name: /Printed Book/i, path: /\/bookstore$/ },
+    ]) {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page
+        .locator("nav.public-nav")
+        .getByRole("link", { name: routeLink.name })
+        .click();
+      await expect(page).toHaveURL(routeLink.path);
+      await assertNoHorizontalOverflow(`public desktop ${routeLink.path}`);
+      for (const w of [768, 320]) {
+        await page.setViewportSize({ width: w, height: 800 });
+        await assertNoHorizontalOverflow(`public ${w}px ${routeLink.path}`);
+        await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+      }
+    }
+
+    // 2. Register a fresh free reader & check Free Dashboard + upcoming notice spacing + sidebar legal links
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/register");
+    await page.getByLabel(/Your name/i).fill("Audited Reader");
+    await page.getByLabel(/Email address/i).fill(auditReaderEmail);
+    await page.getByLabel(/^Password/i).fill(auditReaderPassword);
+    await page.getByRole("button", { name: /Create account/i }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.getByRole("button", { name: /Skip onboarding/i }).click();
+    await expect(page.locator(".onboarding-card")).toHaveCount(0);
+
+    // Check outdated wording removed from UpcomingYearNotice
+    const bannerText = await page.locator(".upcoming-banner").innerText();
+    expect(bannerText.toLowerCase()).not.toContain("membership");
+
+    // Check gap between UpcomingYearNotice banner and Free dashboard top cards (>= 20px)
+    const freeDashMetrics = await page.evaluate(() => {
+      const banner = document
+        .querySelector(".upcoming-banner")
+        ?.getBoundingClientRect();
+      const topRow = document
+        .querySelector(".dashboard-top")
+        ?.getBoundingClientRect();
+      return { banner, topRow };
+    });
+    expect(freeDashMetrics.banner && freeDashMetrics.topRow).toBeTruthy();
+    expect(freeDashMetrics.topRow!.top - freeDashMetrics.banner!.bottom).toBeGreaterThanOrEqual(20);
+
+    // Sidebar legal links sit horizontally with no separator nodes
+    const legalLayout = await page.evaluate(() => {
+      const container = document
+        .querySelector("nav.sidebar-legal")
+        ?.getBoundingClientRect();
+      const links = Array.from(
+        document.querySelectorAll("nav.sidebar-legal a"),
+      ).map((el) => el.getBoundingClientRect());
+      const spanCount = document.querySelectorAll("nav.sidebar-legal span").length;
+      return { container, links, spanCount };
+    });
+    expect(legalLayout.spanCount).toBe(0);
+    expect(legalLayout.links.length).toBe(3);
+    expect(legalLayout.container!.height).toBeLessThanOrEqual(52);
+    expect(legalLayout.links[1].left).toBeGreaterThan(legalLayout.links[0].right);
+    expect(legalLayout.links[2].left).toBeGreaterThan(legalLayout.links[1].right);
+
+    // Also verify sidebar legal links are above the fold inside sticky desktop viewport!
+    await page.screenshot({
+      path: path.join(auditShotDir, "05-free-dashboard-sidebar-1280.png"),
+      fullPage: false,
+    });
+
+    // 3. Check Library spacing between heading -> upcoming banner -> filters -> grid across desktop & 320px
+    await page.locator(".sidebar-primary-nav").getByRole("link", { name: /Devotional library/i }).click();
+    await expect(page).toHaveURL(/\/library$/);
+    await expect(page.locator(".library-stage .upcoming-banner")).toBeVisible();
+    await expect(page.locator(".library-stage .library-filters")).toBeVisible();
+    const libMetrics = await page.evaluate(() => {
+      const heading = document
+        .querySelector(".page-heading")
+        ?.getBoundingClientRect();
+      const banner = document
+        .querySelector(".library-stage .upcoming-banner")
+        ?.getBoundingClientRect();
+      const filters = document
+        .querySelector(".library-stage .library-filters")
+        ?.getBoundingClientRect();
+      return { heading, banner, filters };
+    });
+    expect(libMetrics.banner && libMetrics.heading && libMetrics.filters).toBeTruthy();
+    expect(libMetrics.banner!.top - libMetrics.heading!.bottom).toBeGreaterThanOrEqual(20);
+    expect(libMetrics.filters!.top - libMetrics.banner!.bottom).toBeGreaterThanOrEqual(20);
+    await page.screenshot({
+      path: path.join(auditShotDir, "06-library-desktop-1280.png"),
+      fullPage: false,
+    });
+
+    // Check 320px–768px Library + Saved + Journal + Notifications + Account + Subscription + More
+    for (const width of [320, 360, 375, 430, 768]) {
+      await page.setViewportSize({ width, height: 760 });
+      await assertNoHorizontalOverflow(`library ${width}px`);
+      await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    }
+    await page.setViewportSize({ width: 320, height: 760 });
+    await page.screenshot({
+      path: path.join(auditShotDir, "07-library-mobile-320.png"),
+      fullPage: false,
+    });
+
+    // Check Saved & Journal on 320px mobile
+    for (const tab of [
+      { name: /Saved readings/i, path: /\/saved$/ },
+      { name: /My Growth Journal/i, path: /\/journal$/ },
+    ]) {
+      await page.locator(".mobile-bottom").getByRole("link", { name: tab.name }).click();
+      await expect(page).toHaveURL(tab.path);
+      await assertNoHorizontalOverflow(`mobile 320px ${tab.path}`);
+    }
+
+    // Switch to Dark theme on desktop (1440px) and verify Account, Notifications, Online Access, Free Dashboard
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page
+      .locator(".sidebar-theme-box")
+      .getByRole("button", { name: /^Dark$/i })
+      .click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await page.locator(".sidebar-primary-nav").getByRole("link", { name: /Account & reminders/i }).click();
+    await expect(page).toHaveURL(/\/account$/);
+    await assertNoHorizontalOverflow("account dark 1440px");
+    await page.locator(".sidebar-primary-nav").getByRole("link", { name: /Notifications/i }).click();
+    await expect(page).toHaveURL(/\/notifications$/);
+    await assertNoHorizontalOverflow("notifications dark 1440px");
+    await page.locator(".sidebar-primary-nav").getByRole("link", { name: /My online access/i }).click();
+    await expect(page).toHaveURL(/\/subscription$/);
+    await assertNoHorizontalOverflow("subscription dark 1440px");
+
+    // Capture Free-reader dashboard in dark mode (1440px)
+    await page.locator(".sidebar-primary-nav").getByRole("link", { name: /My journey/i }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await assertNoHorizontalOverflow("dashboard dark 1440px");
+    await page.screenshot({
+      path: path.join(auditShotDir, "08-dashboard-dark-1440.png"),
+      fullPage: false,
+    });
+
+    // Grant active digital access to auditReaderEmail in SQLite, hop via Account -> My journey to inspect Active dashboard in dark mode
+    const auditDb = new Database(dbPath);
+    const auditUserRow = auditDb
+      .prepare("SELECT id FROM users WHERE email = ?")
+      .get(auditReaderEmail) as { id: number };
+    const nowIso = new Date().toISOString();
+    const expIso = "2028-01-01T00:00:00.000Z";
+    auditDb
+      .prepare(
+        `INSERT INTO digital_entitlements (user_id, edition_year, access_scope, access_type, status, starts_at, expires_at, duration_months, granted_at, updated_at)
+         VALUES (?, 2027, 'edition_2027', 'complimentary', 'active', ?, ?, 12, ?, ?)
+         ON CONFLICT(user_id, edition_year) DO UPDATE SET status='active', access_type='complimentary', starts_at=excluded.starts_at, expires_at=excluded.expires_at, updated_at=excluded.updated_at`,
+      )
+      .run(auditUserRow.id, nowIso, expIso, nowIso, nowIso);
+    auditDb.close();
+
+    await page.locator(".sidebar-primary-nav").getByRole("link", { name: /Notifications/i }).click();
+    await expect(page).toHaveURL(/\/notifications$/);
+    await page.locator(".sidebar-primary-nav").getByRole("link", { name: /My journey/i }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page.getByText(/Your 365-day progress/i)).toBeVisible();
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await assertNoHorizontalOverflow("active dashboard dark 1440px");
+    await page.screenshot({
+      path: path.join(auditShotDir, "09-active-dashboard-dark-1440.png"),
+      fullPage: false,
+    });
+
+    // Reset back to system theme cleanly & inspect signed-in Public Header across 1024, 1280, 1440
+    await page
+      .locator(".sidebar-theme-box")
+      .getByRole("button", { name: /^System$/i })
+      .click();
+    await page.locator("header.reader-app-header").getByRole("link", { name: /Public site/i }).click();
+    await expect(page).toHaveURL(/\/$/);
+    for (const width of [1024, 1280, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(page.locator("header.public-header .header-signout-btn")).toBeVisible();
+      await assertNoHorizontalOverflow(`signed-in public header ${width}px`);
+    }
+
     await ctx.close();
   });
 });

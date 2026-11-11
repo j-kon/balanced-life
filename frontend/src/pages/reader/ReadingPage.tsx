@@ -32,14 +32,20 @@ export function SamplePage() {
       {!data && !error ? (
         <Loading />
       ) : (
-        <Empty title="The author's sample is coming">
-          A free reading will be available after the original manuscript is
-          reviewed and marked as a sample.
-        </Empty>
+        <div className="empty-stage">
+          <Empty
+            title="The author's sample is coming"
+            action={
+              <Link to="/pricing" className="button">
+                Explore 2027 Online Access <ArrowRight size={17} />
+              </Link>
+            }
+          >
+            A free reading will be available after the original manuscript is
+            reviewed and marked as a sample.
+          </Empty>
+        </div>
       )}
-      <Link to="/pricing" className="button">
-        Explore memberships <ArrowRight size={17} />
-      </Link>
     </div>
   );
 }
@@ -120,10 +126,10 @@ export function ReadingPage() {
             className="button outline"
             to={user ? "/subscription" : "/login"}
           >
-            {user ? "View membership options" : "Sign in to continue"}
+            {user ? "View my online access" : "Sign in to continue"}
           </Link>
           <Link className="text-link" to="/pricing">
-            See membership plans <ArrowRight size={15} />
+            See access &amp; book options <ArrowRight size={15} />
           </Link>
         </div>
       )}

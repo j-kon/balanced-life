@@ -112,7 +112,7 @@ export function TermsPage() {
         orders remain pending until an administrator confirms settled funds in
         the official {config.settings.organizationName} bank accounts. If a
         payment is refunded, reversed, or found to be fraudulent, the associated
-        digital entitlement or subscription will be revoked.
+        2027 online access entitlement will be revoked.
       </p>
       <h2>4. Young Readers &amp; Account Conduct</h2>
       <p>

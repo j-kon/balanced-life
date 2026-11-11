@@ -627,7 +627,7 @@ export function AccountPage() {
                   }
                 />
                 <span>
-                  Receive membership renewal and expiration reminders
+                  Receive online access renewal and expiration reminders
                 </span>
               </label>
 

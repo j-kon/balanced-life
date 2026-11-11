@@ -83,28 +83,42 @@ export function AboutDevotionalPage() {
       <h2>{settings.organizationName}</h2>
       <p>{settings.organizationDescription}</p>
 
-      <div className="notice">
-        <BookOpen />
-        <div>
-          <strong>Two Clear Ways to Experience The Balanced Life Devotional</strong>
-          <p>
-            Order the <strong>Printed Book ({money(settings.hardcoverPriceKobo)})</strong>{" "}
-            per copy with delivery arranged separately, or unlock{" "}
-            <strong>
-              2027 Online Access ({money(settings.digitalEditionPriceKobo)})
-            </strong>{" "}
-            for {settings.digitalAccessDurationMonths || 12} calendar months of
-            digital reading with no automatic recurring charges.
-          </p>
+      <div className="notice about-access-callout">
+        <BookOpen aria-hidden="true" />
+        <div className="about-callout-body">
+          <strong className="notice-heading">
+            Two Clear Ways to Experience The Balanced Life Devotional
+          </strong>
+          <ul className="about-offer-list">
+            <li className="about-offer-item">
+              <span className="about-offer-label">
+                Printed Book ({money(settings.hardcoverPriceKobo)})
+              </span>
+              <span className="about-offer-desc">
+                {money(settings.hardcoverPriceKobo)} per copy, with delivery
+                charged separately.
+              </span>
+            </li>
+            <li className="about-offer-item">
+              <span className="about-offer-label">
+                2027 Online Access ({money(settings.digitalEditionPriceKobo)})
+              </span>
+              <span className="about-offer-desc">
+                {money(settings.digitalEditionPriceKobo)} for{" "}
+                {settings.digitalAccessDurationMonths || 12} calendar months,
+                no automatic recurring charge.
+              </span>
+            </li>
+          </ul>
         </div>
       </div>
 
-      <div className="actions">
+      <div className="actions about-access-actions">
         <Link to="/sample" className="button">
           Read the free sample <ArrowRight size={18} />
         </Link>
         <Link to="/digital-edition" className="button outline">
-          Get the Digital Copy ({money(settings.digitalEditionPriceKobo)}){" "}
+          Get Digital Access ({money(settings.digitalEditionPriceKobo)}){" "}
           <ArrowUpRight size={17} />
         </Link>
         <Link to="/about-author" className="text-link">
@@ -132,10 +146,12 @@ export function AboutAuthorPage() {
           <h1>{config.settings.authorName}</h1>
           <p className="lead">{config.settings.authorTitle}</p>
           <p>{config.settings.authorBio}</p>
-          <div className="notice">
-            <PenLine />
+          <div className="notice about-author-notice">
+            <PenLine aria-hidden="true" />
             <div>
-              <strong>{config.settings.brandStatement}</strong>
+              <strong className="notice-heading">
+                {config.settings.brandStatement}
+              </strong>
               <p>
                 Through {config.settings.organizationName}, she mentors,
                 counsels, and equips teenagers and young adults (Ages 13–25) to

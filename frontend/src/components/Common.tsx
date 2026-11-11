@@ -201,18 +201,20 @@ export function UpcomingYearNotice() {
   const { config } = useApp();
   if (!config.isUpcomingYear) return null;
   const days = daysUntil2027(config.currentDate);
+  const months = config.settings.digitalAccessDurationMonths || 12;
   return (
     <div className="notice upcoming-banner">
-      <Calendar size={20} />
+      <Calendar size={20} aria-hidden="true" />
       <div>
-        <strong>
+        <strong className="notice-heading">
           The 2027 Devotional Year begins January 1, 2027
           {days > 0 ? ` (${days} days away)` : ""}.
         </strong>
         <p>
           You are exploring the 2027 edition ahead of the new year. Read the
-          free January 1 sample or unlock full online access with a 2027 Digital
-          Edition purchase or membership.
+          free January 1 sample or unlock {months} calendar months of 2027
+          online access with a one-time payment and no automatic recurring
+          charge.
         </p>
       </div>
     </div>

@@ -206,7 +206,7 @@ function NotificationSummaryPanel({
 }) {
   const recent = notifications.slice(0, 3);
   return (
-    <div className="panel stack" style={{ marginTop: "18px" }}>
+    <div className="panel stack">
       <div className="section-title" style={{ margin: 0 }}>
         <div>
           <span className="eyebrow" style={{ marginBottom: "4px" }}>
@@ -401,10 +401,10 @@ export function DashboardPage() {
               accessStatus === "expiring_soon") && (
               <>
                 {accessStatus === "expiring_soon" && data.access.expiresAt && (
-                  <div className="notice">
+                  <div className="notice dashboard-status-notice">
                     <AlertCircle size={20} />
                     <div>
-                      <strong>
+                      <strong className="notice-heading">
                         Your 12-month online access expires in{" "}
                         {data.access.daysRemaining ?? 0} day
                         {data.access.daysRemaining === 1 ? "" : "s"} (
@@ -571,7 +571,7 @@ export function DashboardPage() {
                     )}
                   </section>
 
-                  <aside>
+                  <aside className="dashboard-aside">
                     <Link to="/journal" className="journal-promo">
                       <PenLine size={25} />
                       <h3>My Growth Journal</h3>
@@ -586,10 +586,7 @@ export function DashboardPage() {
                       </span>
                     </Link>
 
-                    <div
-                      className="membership-summary panel"
-                      style={{ marginTop: "18px" }}
-                    >
+                    <div className="membership-summary panel">
                       <span className="eyebrow">Online Access Status</span>
                       <h3>
                         {data.access.legacyPersistent
@@ -652,10 +649,10 @@ export function DashboardPage() {
 
             {accessStatus === "scheduled" && (
               <>
-                <div className="notice success">
+                <div className="notice success dashboard-status-notice">
                   <Calendar size={22} />
                   <div>
-                    <strong>
+                    <strong className="notice-heading">
                       Your online access is confirmed for the 2027 devotional
                       year.
                     </strong>
@@ -730,7 +727,7 @@ export function DashboardPage() {
                     </div>
                   </section>
 
-                  <aside>
+                  <aside className="dashboard-aside">
                     <div className="panel stack">
                       <h3>Reading Preferences</h3>
                       <p>
@@ -755,10 +752,10 @@ export function DashboardPage() {
 
             {accessStatus === "pending_payment" && (
               <>
-                <div className="notice">
+                <div className="notice dashboard-status-notice">
                   <Clock size={22} />
                   <div>
-                    <strong>
+                    <strong className="notice-heading">
                       Payment Not Yet Verified (
                       {data.access.pendingPurchase?.paymentMethod ===
                       "bank_transfer"
@@ -821,7 +818,7 @@ export function DashboardPage() {
                       ))}
                     </div>
                   </section>
-                  <aside>
+                  <aside className="dashboard-aside">
                     <NotificationSummaryPanel
                       notifications={data.notifications}
                       unreadCount={unreadNotifications}
@@ -833,10 +830,12 @@ export function DashboardPage() {
 
             {accessStatus === "expired" && (
               <>
-                <div className="notice">
+                <div className="notice dashboard-status-notice">
                   <AlertCircle size={22} />
                   <div>
-                    <strong>Your 12-Month Online Access Has Expired</strong>
+                    <strong className="notice-heading">
+                      Your 12-Month Online Access Has Expired
+                    </strong>
                     <p>
                       Ended on{" "}
                       <strong>
@@ -879,7 +878,7 @@ export function DashboardPage() {
                       ))}
                     </div>
                   </section>
-                  <aside>
+                  <aside className="dashboard-aside">
                     <div className="panel stack">
                       <h3>Preserved on Your Account</h3>
                       <ul className="check-list">
@@ -918,10 +917,12 @@ export function DashboardPage() {
 
             {accessStatus === "revoked" && (
               <>
-                <div className="notice">
+                <div className="notice dashboard-status-notice">
                   <ShieldAlert size={22} />
                   <div>
-                    <strong>Online Access Support Notice</strong>
+                    <strong className="notice-heading">
+                      Online Access Support Notice
+                    </strong>
                     <p>
                       Online reading access linked to your earlier entitlement has
                       been revoked
@@ -956,7 +957,7 @@ export function DashboardPage() {
                       </>
                     )}
                   </section>
-                  <aside>
+                  <aside className="dashboard-aside">
                     <NotificationSummaryPanel
                       notifications={data.notifications}
                       unreadCount={unreadNotifications}
@@ -1069,7 +1070,7 @@ export function DashboardPage() {
                     )}
                   </section>
 
-                  <aside>
+                  <aside className="dashboard-aside">
                     <div className="panel stack">
                       <span className="eyebrow" style={{ marginBottom: 0 }}>
                         Printed Companion

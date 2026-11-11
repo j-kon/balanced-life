@@ -103,10 +103,10 @@ export function NotificationsCenterPage() {
       </div>
 
       {browserPermission === "denied" || browserPermission === "unsupported" ? (
-        <div className="notice">
+        <div className="notice page-status-notice">
           <BellOff size={18} />
           <div>
-            <strong>
+            <strong className="notice-heading">
               Browser push alerts are off — your in-app inbox still works
             </strong>
             <p>
