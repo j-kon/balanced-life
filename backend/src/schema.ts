@@ -244,9 +244,24 @@ export const printedOrders = sqliteTable("printed_orders", {
   deliveredAt: text("delivered_at"),
   cancelledAt: text("cancelled_at"),
   refundedAt: text("refunded_at"),
+  stockDeducted: integer("stock_deducted", { mode: "boolean" })
+    .notNull()
+    .default(false),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const printedOrderAccessTokens = sqliteTable(
+  "printed_order_access_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    orderId: integer("order_id")
+      .notNull()
+      .references(() => printedOrders.id, { onDelete: "cascade" }),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+);
 
 export const printedOrderItems = sqliteTable("printed_order_items", {
   id: integer("id").primaryKey({ autoIncrement: true }),

@@ -71,30 +71,38 @@ npm run import:manuscript -- --write  # Import missing manuscript entries as unr
 ## Key Architecture & Domain Rules
 
 ### 1. Authentication & Accounts
-- Real reader registration (`/register`), login (`/login`), logout, profile updates, and password updates (`/app/account`).
-- HTTP-only, `SameSite=Lax` opaque session cookies (`balanced_session`, SHA-256 hashed in SQLite `sessions`).
-- Account recovery flow (`/forgot-password` and `/reset-password`) backed by hashed, expiring single-use tokens in `password_reset_tokens` and an email provider abstraction (`PASSWORD_RESET_WEBHOOK_URL`).
+- Real reader registration (`/register`), login (`/login`), logout, profile updates, and password updates (`/account`).
+- HTTP-only, `SameSite=Strict` opaque session cookies (`balanced_session`, SHA-256 hashed in SQLite `sessions`).
+- Account recovery flow (`/forgot-password` and `/reset-password`) backed by hashed, expiring single-use tokens in `password_reset_tokens` and an email provider abstraction (`EMAIL_WEBHOOK_URL` / `PASSWORD_RESET_WEBHOOK_URL`).
 - Strict server-side role checks (`requireUser`, `requireAdmin`) and account suspension enforcement (`status: 'active' | 'suspended'`).
 
 ### 2. 2027 Devotional Content & Editorial Workflow
 - Covers **January 1 through December 31, 2027** (365 entries).
 - **7 entries** (`2027-01-01` through `2027-01-07`) are editorially verified and published; `2027-01-01` serves as the open sample devotional.
-- **358 entries** remain stored as `draft` until reviewed and approved by an administrator in `/app/admin` (including `2027-02-13`, which is flagged `needs_revision` with editorial notes).
-- Uses the real system clock. Before January 1, 2027, the application displays upcoming-year messaging while allowing readers to preview the January 1 sample and eligible subscribers to browse published archive entries.
+- **358 entries** remain stored as `draft` until reviewed and approved by an administrator in `/admin` (including `2027-02-13`, which is flagged `needs_revision` with editorial notes).
+- Uses the real system clock. Before January 1, 2027, the application displays upcoming-year messaging while allowing readers to preview the January 1 sample and eligible subscribers to read published archive entries.
 - Full devotional content (`reflection`, `thinkAbout`, `prayer`, `challenge`) is stripped on the server for locked entries.
 - The original PDF (`private/manuscript/devotional-2027.pdf`) is never copied to public assets or exposed over HTTP.
 
-### 3. Commerce: Printed Copy, Digital Edition, Memberships & Bulk Orders
-- **Printed Copy (₦5,000)**: Ordered via `/bookstore` with delivery inquiries tracked in `/admin` (`Bookstore` tab).
-- **2027 Digital Edition (₦3,500)**: Dedicated one-time purchase (`/digital-edition`) granting persistent online access to all published 2027 devotionals (`digital_purchases` and `digital_entitlements`), separate from recurring subscriptions. Supports instant Paystack checkout & webhooks plus optional admin-reconciled Access Bank transfer checkout (`bankTransferEnabled` false by default pending owner approval).
-- **Bulk & Institutional Orders (`/bulk-orders`)**: Dedicated workflow for parents, schools, churches, and youth organizations with admin quotation, custom discount percentage, conversion, and fulfillment tracking (`bulk_orders`).
-- **Provisional Digital Membership Plans (`/pricing`)**:
-  - **Monthly Plan**: ₦1,000
-  - **Quarterly Plan**: ₦2,700
-  - **Six-Month Plan**: ₦4,800
-  - **Yearly Plan**: ₦8,500
+### 3. Two-Product Commercial Model, Bulk Orders & Administration
+
+There are only **two products** offered for sale:
+
+- **Product A — 2027 Online Access (₦3,500)**:
+  - Dedicated one-time payment via `/digital-edition` granting **12 calendar months** of online reading access to published readings from the 2027 edition (`digital_purchases` and `digital_entitlements`), with **no automatic recurring charge**.
+  - Early purchases verified before January 1, 2027 begin their 12-month term on `2027-01-01T00:00:00.000Z` (enforcing both start date and expiry date on all premium-reading APIs); purchases verified on or after January 1, 2027 start immediately upon payment verification.
+  - Supports manual 12-month renewal anytime (extending from the later of current expiry or renewal date). Expired entitlements block premium reading content (`403`) while permanently preserving reader accounts, bookmarks, reading progress, and private Growth Journals.
+  - Legacy pre-migration persistent entitlements (`legacy_persistent = 1`, `legacy_review_required = 1`) are safely preserved so existing customers never silently lose rights.
+- **Product B — Printed Devotional Book (₦5,000 per copy + separate delivery fee)**:
+  - Physical copy ordering via `/bookstore` collecting customer delivery details (`printed_orders` and `printed_order_items`).
+  - **Delivery fees are determined separately** and are never invented (`deliveryFeeKobo` remains `null` until an administrator provides a quotation or configures a standard fixed fee). Customers review and approve the final order total before initiating payment.
+  - Order lookup, delivery-address viewing, quote approval, and payment initiation require **authenticated account ownership** (`userId`) or a **valid, expiring hashed order-access token** (never unauthenticated email matching).
+  - Inventory count is explicitly unconfigured (`null`) until confirmed by the publisher/owner in admin settings.
+  - Administrators manage quotes, bank-transfer confirmation, couriers, tracking references, printable packing slips, and fulfillment (`/admin`), with an unpaid-dispatch guard blocking dispatch without verified payment or an audited exception reason.
+- **Bulk & Institutional Orders (`/contact` & `/admin`)**: Custom bulk quotation, discount, and order-conversion workflow for parents, schools, churches, and youth organizations (`bulk_orders`).
 - When `PAYSTACK_SECRET_KEY` is not configured, online payment initiation returns HTTP `503` and the UI displays an honest configuration state—no simulated or fabricated payment successes occur.
-- Administrators can grant or revoke **Complimentary Membership** (`access_type = 'complimentary'`) with an audit note via `/admin`. Complimentary memberships unlock subscriber readings for local testing and ministry gifts, are explicitly labeled in the UI, and are **never counted as verified payment revenue**.
+- Administrators can grant or revoke **Complimentary Online Access** (`access_type = 'complimentary'`) with an audit note via `/admin`. Complimentary access unlocks reader access cleanly, is explicitly labeled in the UI, and is **never counted as verified payment revenue**.
+- **Modular Admin Dashboard (`/admin`)**: Desktop left sidebar & mobile navigation across **Executive Overview** (12 KPIs & charts), **Online Access**, **Printed Orders**, **Readers**, **Devotionals**, **Bulk Orders**, **Payments**, **Notifications**, and **Settings**.
 
 ### 4. 5-Step Daily Growth & Accountability Experience + Mobile PWA
 - Structured around the 5-step daily growth framework: **1. Connect with Jesus**, **2. Learn**, **3. Reflect**, **4. Apply**, and **5. Track Your Growth**.

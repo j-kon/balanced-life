@@ -205,7 +205,13 @@ test.describe("End-to-End Production Workflows", () => {
       .getByRole("button", { name: /Place Printed Book Order/i })
       .click();
     await expect(
+      page.getByText(/Inventory unconfigured/i),
+    ).toBeVisible();
+    await expect(
       page.getByRole("heading", { name: /Order BLD-PRT-/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Keep your private Order Access Token safe/i),
     ).toBeVisible();
     await expect(page.getByText(/₦15,000/i).first()).toBeVisible();
 
@@ -335,7 +341,7 @@ test.describe("End-to-End Production Workflows", () => {
     await page.getByLabel(/^Password/i).fill(adminPassword);
     await page.getByRole("button", { name: /^Sign in$/i }).click();
 
-    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page).toHaveURL(/\/(admin|dashboard)$/);
     await page.goto("/admin");
     await expect(
       page.getByRole("heading", { name: /The author's desk/i }),
@@ -378,9 +384,10 @@ test.describe("End-to-End Production Workflows", () => {
     await entryRow.getByRole("button", { name: /Approve & publish/i }).click();
     await expect(page.getByText(/Changes saved/i)).toBeVisible();
 
-    // Printed Orders tab: verify printed order from test 1
+    // Printed Orders tab: verify printed order from test 1 and unconfigured stock input
     await page.getByRole("button", { name: /^Printed Orders$/i }).click();
     await expect(page.getByText(readerEmail).first()).toBeVisible();
+    await expect(page.locator('input[name="stockCount"]')).toHaveValue("");
   });
 
   test("4. Complimentary subscriber accesses published archive, bookmarks, reading progress, and 5-step accountability journal CRUD", async ({
@@ -466,7 +473,7 @@ test.describe("End-to-End Production Workflows", () => {
     await page.getByLabel(/Email address/i).fill(adminEmail);
     await page.getByLabel(/^Password/i).fill(adminPassword);
     await page.getByRole("button", { name: /^Sign in$/i }).click();
-    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page).toHaveURL(/\/(admin|dashboard)$/);
     await page.goto("/admin");
     await page.getByRole("button", { name: /^Devotionals$/i }).click();
     await page

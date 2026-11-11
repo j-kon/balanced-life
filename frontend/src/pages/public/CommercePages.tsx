@@ -198,6 +198,7 @@ export function DigitalEditionPage() {
   const available = config.settings.digitalEditionAvailability === "available";
   const ent = data?.entitlement;
   const isExpired = ent?.status === "expired";
+  const isScheduled = ent?.status === "scheduled" && !data?.active;
 
   return (
     <div className="container section">
@@ -327,6 +328,54 @@ export function DigitalEditionPage() {
                 </div>
               )}
 
+              {isScheduled && ent && (
+                <div className="notice success">
+                  <CheckCircle2 size={22} />
+                  <div>
+                    <strong>
+                      2027 Digital Edition Confirmed (Scheduled Start:{" "}
+                      {ent.startsAt
+                        ? new Date(ent.startsAt).toLocaleDateString("en-GB")
+                        : "01/01/2027"}
+                      )
+                    </strong>
+                    <p>
+                      Your 12-month online access begins on{" "}
+                      <strong>
+                        {ent.startsAt
+                          ? new Date(ent.startsAt).toLocaleDateString("en-GB")
+                          : "01/01/2027"}
+                      </strong>
+                      {ent.expiresAt ? (
+                        <>
+                          {" "}
+                          through{" "}
+                          <strong>
+                            {new Date(ent.expiresAt).toLocaleDateString("en-GB")}
+                          </strong>
+                        </>
+                      ) : null}
+                      . Free sample readings remain open now, and full 2027
+                      readings unlock automatically on your start date.
+                    </p>
+                    <div className="actions" style={{ marginTop: "12px" }}>
+                      <Link className="button small" to="/sample">
+                        Read Free Sample <ArrowRight size={15} />
+                      </Link>
+                      <button
+                        type="button"
+                        className="button outline small"
+                        onClick={() => setShowRenewalCheckout((prev) => !prev)}
+                      >
+                        {showRenewalCheckout
+                          ? "Hide Additional 12-Month Extension"
+                          : `Extend by Another ${durationMonths} Months (${money(priceKobo)})`}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {isExpired && ent && (
                 <div className="notice">
                   <AlertCircle size={22} />
@@ -345,7 +394,7 @@ export function DigitalEditionPage() {
                 </div>
               )}
 
-              {(!data?.active || showRenewalCheckout) && (
+              {(!data?.active && !isScheduled) || showRenewalCheckout ? (
                 <>
                   {/* OPTION 1: PAYSTACK ONLINE CHECKOUT */}
                   <div className="panel stack">
@@ -509,7 +558,7 @@ export function DigitalEditionPage() {
                     </div>
                   )}
                 </>
-              )}
+              ) : null}
             </div>
           )}
 
@@ -602,6 +651,31 @@ export function DigitalEditionPage() {
   );
 }
 
+function readStoredOrderToken(orderNumber?: string | null): string {
+  if (!orderNumber) return "";
+  try {
+    return (
+      sessionStorage.getItem(
+        `bl_printed_token_${orderNumber.trim().toUpperCase()}`,
+      ) || ""
+    );
+  } catch {
+    return "";
+  }
+}
+
+function storeOrderToken(orderNumber: string, token?: string) {
+  if (!orderNumber || !token) return;
+  try {
+    sessionStorage.setItem(
+      `bl_printed_token_${orderNumber.trim().toUpperCase()}`,
+      token,
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export function BookstorePage() {
   const { user, toast, config } = useApp();
   const location = useLocation();
@@ -612,14 +686,18 @@ export function BookstorePage() {
   const [activeOrder, setActiveOrder] = useState<PrintedOrderRecord | null>(
     null,
   );
+  const [orderAccessToken, setOrderAccessToken] = useState("");
   const [myOrders, setMyOrders] = useState<PrintedOrderRecord[]>([]);
   const [lookupOrderNumber, setLookupOrderNumber] = useState("");
-  const [lookupEmail, setLookupEmail] = useState(user?.email || "");
+  const [lookupToken, setLookupToken] = useState("");
+  const [accessEmail, setAccessEmail] = useState(user?.email || "");
+  const [accessLinkSentMsg, setAccessLinkSentMsg] = useState("");
   const [transferRef, setTransferRef] = useState("");
   const [payerNote, setPayerNote] = useState("");
 
   const unitPriceKobo = config.settings.hardcoverPriceKobo;
   const subtotalKobo = Math.max(1, quantity) * unitPriceKobo;
+  const confirmedStock = config.settings.printedBookStockCount ?? null;
   const fixedDeliveryKobo =
     config.settings.deliveryPricingMode === "fixed_fee" &&
     config.settings.defaultDeliveryFeeKobo !== null &&
@@ -628,11 +706,15 @@ export function BookstorePage() {
       : null;
 
   const availabilityLabel =
-    config.settings.hardcoverAvailability === "available"
-      ? "Available for order & delivery"
+    config.settings.hardcoverAvailability === "out_of_stock"
+      ? "Currently out of stock"
       : config.settings.hardcoverAvailability === "preorder"
         ? "Open for 2027 pre-order"
-        : "Currently out of stock";
+        : confirmedStock === null
+          ? "Available · Inventory unconfigured"
+          : confirmedStock === 0
+            ? "Currently out of confirmed stock"
+            : `Available (${confirmedStock} copies confirmed in stock)`;
 
   const loadMyOrders = async () => {
     if (!user) {
@@ -653,19 +735,47 @@ export function BookstorePage() {
 
   useEffect(() => {
     loadMyOrders();
-    if (user?.email && !lookupEmail) {
-      setLookupEmail(user.email);
+    if (user?.email && !accessEmail) {
+      setAccessEmail(user.email);
     }
   }, [user]);
 
-  const queryRef = new URLSearchParams(location.search).get("reference");
+  const searchParams = new URLSearchParams(location.search);
+  const queryRef = searchParams.get("reference");
+  const queryOrder = searchParams.get("order");
+  const queryToken = searchParams.get("token");
+
+  useEffect(() => {
+    if (!queryOrder || queryRef) return;
+    const resolvedToken = queryToken || readStoredOrderToken(queryOrder);
+    if (!user && !resolvedToken) return;
+    if (resolvedToken) {
+      storeOrderToken(queryOrder, resolvedToken);
+      setOrderAccessToken(resolvedToken);
+    }
+    setBusy(true);
+    setError("");
+    const qs = new URLSearchParams({ orderNumber: queryOrder });
+    if (resolvedToken) qs.set("token", resolvedToken);
+    api<PrintedOrderRecord>(`/printed-orders/lookup?${qs.toString()}`)
+      .then((found) => {
+        setActiveOrder(found);
+      })
+      .catch((e) => {
+        setError((e as Error).message);
+      })
+      .finally(() => setBusy(false));
+  }, [queryOrder, queryToken, user]);
 
   useEffect(() => {
     if (!queryRef) return;
+    const resolvedToken =
+      queryToken || orderAccessToken || readStoredOrderToken(queryOrder);
     setBusy(true);
     setError("");
     api<{ order: PrintedOrderRecord }>("/printed-orders/verify", {
       reference: queryRef,
+      ...(resolvedToken ? { orderAccessToken: resolvedToken } : {}),
     })
       .then((res) => {
         toast("Payment verified! Your printed book order is now confirmed.");
@@ -699,6 +809,10 @@ export function BookstorePage() {
           f.get("customerDeliveryNotes") || "",
         ).trim(),
       });
+      if (created.orderAccessToken) {
+        storeOrderToken(created.orderNumber, created.orderAccessToken);
+        setOrderAccessToken(created.orderAccessToken);
+      }
       setActiveOrder(created);
       toast(`Printed book order ${created.orderNumber} created.`);
       await loadMyOrders();
@@ -714,9 +828,19 @@ export function BookstorePage() {
     setBusy(true);
     setError("");
     try {
+      const tokenToUse =
+        lookupToken.trim() || readStoredOrderToken(lookupOrderNumber);
+      const qs = new URLSearchParams({
+        orderNumber: lookupOrderNumber.trim(),
+      });
+      if (tokenToUse) qs.set("token", tokenToUse);
       const found = await api<PrintedOrderRecord>(
-        `/printed-orders/lookup?orderNumber=${encodeURIComponent(lookupOrderNumber.trim())}&email=${encodeURIComponent(lookupEmail.trim())}`,
+        `/printed-orders/lookup?${qs.toString()}`,
       );
+      if (tokenToUse) {
+        storeOrderToken(found.orderNumber, tokenToUse);
+        setOrderAccessToken(tokenToUse);
+      }
       setActiveOrder(found);
       toast(`Loaded order ${found.orderNumber}.`);
     } catch (err) {
@@ -725,6 +849,31 @@ export function BookstorePage() {
       setBusy(false);
     }
   }
+
+  async function handleRequestAccessLink(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setAccessLinkSentMsg("");
+    try {
+      const res = await api<{ ok: boolean; message: string }>(
+        "/printed-orders/request-access",
+        {
+          orderNumber: lookupOrderNumber.trim(),
+          email: accessEmail.trim(),
+        },
+      );
+      setAccessLinkSentMsg(res.message);
+      toast("Access link request processed.");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const activeOrderToken =
+    orderAccessToken || readStoredOrderToken(activeOrder?.orderNumber);
 
   return (
     <div className="container section bookstore">
@@ -805,6 +954,20 @@ export function BookstorePage() {
                 </p>
               </div>
             </div>
+
+            {activeOrderToken && !user && (
+              <div className="panel" style={{ background: "var(--cream)" }}>
+                <strong>Keep your private Order Access Token safe</strong>
+                <p style={{ margin: "6px 0" }}>
+                  Use your order number <code>{activeOrder.orderNumber}</code>{" "}
+                  and this expiring access token to track status, approve your
+                  delivery fee quote, or complete payment later:
+                </p>
+                <code style={{ wordBreak: "break-all" }}>
+                  {activeOrderToken}
+                </code>
+              </div>
+            )}
 
             <div className="table-wrap">
               <table>
@@ -909,7 +1072,9 @@ export function BookstorePage() {
                       try {
                         const updated = await api<PrintedOrderRecord>(
                           `/printed-orders/${activeOrder.id}/approve-quote`,
-                          { email: activeOrder.email },
+                          activeOrderToken
+                            ? { orderAccessToken: activeOrderToken }
+                            : {},
                         );
                         setActiveOrder(updated);
                         toast(
@@ -934,8 +1099,7 @@ export function BookstorePage() {
 
             {/* Step: Ready for Payment */}
             {activeOrder.deliveryFeeKobo !== null &&
-              (activeOrder.deliveryQuoteStatus === "customer_approved" ||
-                activeOrder.deliveryQuoteStatus === "fixed_applied") &&
+              activeOrder.deliveryQuoteStatus === "customer_approved" &&
               activeOrder.paymentStatus === "pending" && (
                 <div className="stack">
                   <div className="panel stack">
@@ -958,7 +1122,9 @@ export function BookstorePage() {
                               order: PrintedOrderRecord;
                             }>(`/printed-orders/${activeOrder.id}/pay`, {
                               paymentMethod: "paystack",
-                              email: activeOrder.email,
+                              ...(activeOrderToken
+                                ? { orderAccessToken: activeOrderToken }
+                                : {}),
                             });
                             if (
                               res.authorizationUrl &&
@@ -967,7 +1133,7 @@ export function BookstorePage() {
                               window.location.href = res.authorizationUrl;
                             } else {
                               navigate(
-                                `/bookstore?reference=${encodeURIComponent(res.reference)}`,
+                                `/bookstore?order=${encodeURIComponent(activeOrder.orderNumber)}&reference=${encodeURIComponent(res.reference)}`,
                               );
                             }
                           } catch (err) {
@@ -1028,7 +1194,9 @@ export function BookstorePage() {
                               paymentMethod: "bank_transfer",
                               transferReference: transferRef,
                               payerNote,
-                              email: activeOrder.email,
+                              ...(activeOrderToken
+                                ? { orderAccessToken: activeOrderToken }
+                                : {}),
                             });
                             setActiveOrder(res.order);
                             setTransferRef("");
@@ -1281,7 +1449,7 @@ export function BookstorePage() {
           </div>
         )}
 
-        {/* Order Lookup by Order Number + Email */}
+        {/* Order Lookup via Authenticated Ownership or Expiring Order Access Token */}
         <details className="panel" style={{ marginTop: "20px" }}>
           <summary style={{ cursor: "pointer", fontWeight: 600 }}>
             Already placed a printed book order? Track status, approve delivery
@@ -1292,6 +1460,11 @@ export function BookstorePage() {
             className="stack"
             style={{ marginTop: "14px" }}
           >
+            <p className="muted" style={{ margin: 0 }}>
+              {user
+                ? "Enter your order number (or include an order access token if ordered as a guest)."
+                : "Enter your order number and the expiring order access token issued at checkout or sent via email."}
+            </p>
             <div className="form-row-2">
               <label>
                 Order number
@@ -1303,13 +1476,12 @@ export function BookstorePage() {
                 />
               </label>
               <label>
-                Order email address
+                Order access token {user ? "(optional for your account)" : ""}
                 <input
-                  type="email"
-                  required
-                  value={lookupEmail}
-                  onChange={(e) => setLookupEmail(e.target.value)}
-                  placeholder="you@example.com"
+                  required={!user}
+                  value={lookupToken}
+                  onChange={(e) => setLookupToken(e.target.value)}
+                  placeholder="Paste your expiring order access token…"
                 />
               </label>
             </div>
@@ -1317,6 +1489,58 @@ export function BookstorePage() {
               Find Printed Order <ArrowRight size={15} />
             </button>
           </form>
+
+          {!user && (
+            <form
+              onSubmit={handleRequestAccessLink}
+              className="stack"
+              style={{
+                marginTop: "18px",
+                paddingTop: "14px",
+                borderTop: "1px solid var(--border)",
+              }}
+            >
+              <strong>Lost your order access token?</strong>
+              <p className="muted" style={{ margin: 0 }}>
+                {config.email.configured
+                  ? "Enter your order number and email address to receive a temporary verified access link."
+                  : "Sign in with the account used to place the order, or contact Cossy Teens Consult Enterprises with your order number."}
+              </p>
+              {config.email.configured && (
+                <>
+                  <div className="form-row-2">
+                    <label>
+                      Order number
+                      <input
+                        required
+                        value={lookupOrderNumber}
+                        onChange={(e) => setLookupOrderNumber(e.target.value)}
+                        placeholder="e.g. BLD-PRT-..."
+                      />
+                    </label>
+                    <label>
+                      Order email address
+                      <input
+                        type="email"
+                        required
+                        value={accessEmail}
+                        onChange={(e) => setAccessEmail(e.target.value)}
+                        placeholder="you@example.com"
+                      />
+                    </label>
+                  </div>
+                  <button className="button outline small" disabled={busy}>
+                    Email Temporary Access Link <ArrowRight size={15} />
+                  </button>
+                  {accessLinkSentMsg && (
+                    <p className="muted" style={{ margin: 0 }}>
+                      {accessLinkSentMsg}
+                    </p>
+                  )}
+                </>
+              )}
+            </form>
+          )}
         </details>
       </div>
     </div>

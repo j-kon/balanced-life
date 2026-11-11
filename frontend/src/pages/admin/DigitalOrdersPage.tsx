@@ -286,6 +286,7 @@ export function DigitalOrdersPage({
         >
           <option value="all">All access &amp; payment statuses</option>
           <option value="active">Active access</option>
+          <option value="scheduled">Scheduled (Starts Jan 1, 2027)</option>
           <option value="pending">Pending verification</option>
           <option value="verifying_transfer">Verifying bank transfer</option>
           <option value="succeeded">Succeeded / Verified</option>

@@ -163,33 +163,31 @@ export function registerAdminRoutes(
         (dp) => dp.userId === u.id && dp.status === "succeeded",
       ).length;
       const userPrintedOrdersCount = printedOrders.filter(
-        (po) =>
-          po.userId === u.id ||
-          po.email.toLowerCase() === u.email.toLowerCase(),
+        (po) => po.userId === u.id,
       ).length;
 
       const onlineAccessActive = Boolean(
-        (digitalEntitlement && digitalEntitlement.status === "active") ||
-          sub?.active,
+        digitalEntitlement?.active || sub?.active,
       );
       const onlineAccessStatus =
-        digitalEntitlement?.status === "active" || sub?.active
+        digitalEntitlement?.active || sub?.active
           ? "active"
-          : digitalEntitlement?.status === "revoked" ||
-              sub?.effectiveStatus === "revoked"
-            ? "revoked"
-            : digitalEntitlement?.status === "expired" ||
-                sub?.effectiveStatus === "expired"
-              ? "expired"
-              : "none";
+          : digitalEntitlement?.status === "scheduled" ||
+              sub?.effectiveStatus === "scheduled"
+            ? "scheduled"
+            : digitalEntitlement?.status === "revoked" ||
+                sub?.effectiveStatus === "revoked"
+              ? "revoked"
+              : digitalEntitlement?.status === "expired" ||
+                  sub?.effectiveStatus === "expired"
+                ? "expired"
+                : "none";
 
       return {
         ...u,
         subscription: sub,
         digitalEntitlement,
-        hasDigitalEdition: Boolean(
-          digitalEntitlement && digitalEntitlement.status === "active",
-        ),
+        hasDigitalEdition: Boolean(digitalEntitlement?.active),
         onlineAccessActive,
         onlineAccessStatus,
         onlineAccessStartsAt:
@@ -263,17 +261,21 @@ export function registerAdminRoutes(
       const accessStatus =
         dp.status === "refunded"
           ? "refunded"
-          : dp.status === "pending" || dp.status === "verifying_transfer"
-            ? "pending"
-            : dp.status === "failed"
-              ? "failed"
-              : entitlement?.status === "revoked"
-                ? "revoked"
-                : entitlement?.status === "expired"
-                  ? "expired"
-                  : entitlement?.status === "active"
-                    ? "active"
-                    : "none";
+          : dp.status === "revoked"
+            ? "revoked"
+            : dp.status === "pending" || dp.status === "verifying_transfer"
+              ? "pending"
+              : dp.status === "failed"
+                ? "failed"
+                : entitlement?.status === "scheduled"
+                  ? "scheduled"
+                  : entitlement?.status === "revoked"
+                    ? "revoked"
+                    : entitlement?.status === "expired"
+                      ? "expired"
+                      : entitlement?.active
+                        ? "active"
+                        : "none";
 
       return {
         ...dp,
@@ -368,11 +370,20 @@ export function registerAdminRoutes(
     ).length;
 
     const activeEntitlementsCount = readerUsers.filter(
-      (u) => u.digitalEntitlement?.status === "active",
+      (u) => Boolean(u.digitalEntitlement?.active),
+    ).length;
+
+    const paidDigitalPurchasesCount = digitalPurchaseRows.filter(
+      (dp) => dp.status === "succeeded",
     ).length;
 
     const subscriptionRevenueKobo = paymentRows
-      .filter((p) => p.status === "succeeded" && p.provider === "paystack")
+      .filter(
+        (p) =>
+          p.status === "succeeded" &&
+          p.provider === "paystack" &&
+          p.currency === "NGN",
+      )
       .reduce((sum, p) => sum + p.amountKobo, 0);
 
     const digitalRevenueKobo = digitalPurchaseRows
@@ -415,7 +426,12 @@ export function registerAdminRoutes(
           amountKobo: dp.amountKobo,
         })),
       ...paymentRows
-        .filter((p) => p.status === "succeeded" && p.provider === "paystack")
+        .filter(
+          (p) =>
+            p.status === "succeeded" &&
+            p.provider === "paystack" &&
+            p.currency === "NGN",
+        )
         .map((p) => ({
           date: (p.verifiedAt || p.createdAt).slice(0, 10),
           amountKobo: p.amountKobo,
@@ -702,7 +718,8 @@ export function registerAdminRoutes(
           (u) => u.accessType === "complimentary",
         ).length,
         expiredMemberships: expiredSubs.length,
-        digitalEditionsSold: activeEntitlementsCount,
+        activeEntitlementsCount,
+        digitalEditionsSold: paidDigitalPurchasesCount,
         pendingDigitalPurchases: digitalPurchaseRows.filter(
           (dp) => dp.status === "pending" || dp.status === "verifying_transfer",
         ).length,

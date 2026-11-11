@@ -1,11 +1,11 @@
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lte, or } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import { HttpError } from "../errors.js";
 import type { PaymentProvider } from "./payments.js";
-import type { PublicUser } from "../auth.js";
-import { getAppSettings } from "./settings.js";
+import { newToken, tokenHash, type PublicUser } from "../auth.js";
+import { getAppSettings, updateAppSettings } from "./settings.js";
 import { createNotificationEvent } from "./notifications.js";
 
 export const EDITION_2027_START_ISO = "2027-01-01T00:00:00.000Z";
@@ -85,8 +85,9 @@ export type DigitalEntitlementRecord = {
   editionYear: number;
   accessType: "paid" | "complimentary";
   accessScope: "edition_2027" | "includes_membership_updates";
-  status: "active" | "expired" | "revoked" | "refunded";
+  status: "scheduled" | "active" | "expired" | "revoked" | "refunded";
   effectiveStatus:
+    | "scheduled"
     | "active"
     | "expiring_soon"
     | "expired"
@@ -136,7 +137,10 @@ export function getUserDigitalEntitlement(
   const isRefunded = row.status === "refunded";
   const isTerminated = isRevoked || isRefunded;
 
-  // Legacy persistent entitlements from before migration 0006 are preserved and never silently shortened
+  // Legacy persistent entitlements from before migration 0006 are preserved and never silently shortened.
+  // Date-bounded entitlements strictly enforce both start date and expiry date.
+  const isNotStarted =
+    !isTerminated && !row.legacyPersistent && row.startsAt > nowIso;
   const isExpired =
     !isTerminated && !row.legacyPersistent && row.expiresAt <= nowIso;
 
@@ -148,7 +152,7 @@ export function getUserDigitalEntitlement(
       .run();
   }
 
-  const active = !isTerminated && !isExpired;
+  const active = !isTerminated && !isNotStarted && !isExpired;
   const daysRemaining = active
     ? Math.max(0, Math.ceil((expiresMs - nowMs) / 86400000))
     : 0;
@@ -164,7 +168,9 @@ export function getUserDigitalEntitlement(
       ? "refunded"
       : isExpired
         ? "expired"
-        : "active";
+        : isNotStarted
+          ? "scheduled"
+          : "active";
 
   const effectiveStatus: DigitalEntitlementRecord["effectiveStatus"] = isRevoked
     ? "revoked"
@@ -172,9 +178,11 @@ export function getUserDigitalEntitlement(
       ? "refunded"
       : isExpired
         ? "expired"
-        : expiringSoon
-          ? "expiring_soon"
-          : "active";
+        : isNotStarted
+          ? "scheduled"
+          : expiringSoon
+            ? "expiring_soon"
+            : "active";
 
   return {
     id: row.id,
@@ -456,14 +464,20 @@ function activateDigitalEntitlementForPurchase(
     })
     .run();
 
+  const startDisplay = new Date(window.startsAt).toLocaleDateString("en-GB");
   const expiryDisplay = new Date(window.expiresAt).toLocaleDateString("en-GB");
+  const isScheduled = window.startsAt > now;
   createNotificationEvent(store, {
     userId: existingPurchase.userId,
     category: "digital_purchase",
-    title: window.isRenewal
-      ? "2027 Online Access Renewed (12 Months)"
-      : "2027 Digital Edition Activated (12 Months)",
-    body: `Your 12-month online access to The Balanced Life Devotional (2027 Edition) is active through ${expiryDisplay}.`,
+    title: isScheduled
+      ? "2027 Online Access Confirmed (Starts Jan 1, 2027)"
+      : window.isRenewal
+        ? "2027 Online Access Renewed (12 Months)"
+        : "2027 Digital Edition Activated (12 Months)",
+    body: isScheduled
+      ? `Your 12-month online access to The Balanced Life Devotional (2027 Edition) is confirmed and scheduled from ${startDisplay} through ${expiryDisplay}.`
+      : `Your 12-month online access to The Balanced Life Devotional (2027 Edition) is active through ${expiryDisplay}.`,
     actionUrl: "/subscription",
     dedupeKey: `dig_purchase_verified_${existingPurchase.id}`,
   });
@@ -628,6 +642,26 @@ export function reconcileDigitalPurchaseAdmin(
     const notes = input.adminNotes?.trim() || existing.adminNotes;
 
     if (input.action === "approve") {
+      if (existing.status === "succeeded") {
+        throw new HttpError(
+          400,
+          "This digital purchase has already been verified and activated.",
+        );
+      }
+      if (existing.status === "refunded") {
+        throw new HttpError(400, "Refunded purchases cannot be re-approved.");
+      }
+      if (
+        existing.paymentMethod === "bank_transfer" &&
+        !existing.transferReference?.trim() &&
+        notes.length < 3
+      ) {
+        throw new HttpError(
+          400,
+          "Provide verification notes or a bank transfer reference before approving.",
+        );
+      }
+
       const { purchase } = activateDigitalEntitlementForPurchase(
         store,
         existing,
@@ -650,6 +684,13 @@ export function reconcileDigitalPurchaseAdmin(
     }
 
     if (input.action === "reject") {
+      if (existing.status === "succeeded" || existing.status === "refunded") {
+        throw new HttpError(
+          400,
+          "Settled or refunded purchases cannot be marked rejected. Use Refund or Revoke instead.",
+        );
+      }
+
       const updated = db
         .update(s.digitalPurchases)
         .set({
@@ -671,6 +712,13 @@ export function reconcileDigitalPurchaseAdmin(
         .run();
 
       return updated;
+    }
+
+    if (input.action === "refund" && existing.status !== "succeeded") {
+      throw new HttpError(
+        400,
+        "Only succeeded digital purchases can be marked as refunded.",
+      );
     }
 
     // refund or revoke
@@ -695,9 +743,12 @@ export function reconcileDigitalPurchaseAdmin(
         updatedAt: now,
       })
       .where(
-        or(
-          eq(s.digitalEntitlements.purchaseId, purchaseId),
+        and(
           eq(s.digitalEntitlements.userId, existing.userId),
+          or(
+            eq(s.digitalEntitlements.purchaseId, purchaseId),
+            isNull(s.digitalEntitlements.purchaseId),
+          ),
         ),
       )
       .run();
@@ -729,6 +780,7 @@ export function grantComplimentaryOnlineAccessAdmin(
   targetUserId: number,
   input: {
     months?: number;
+    startsAt?: string;
     expiresAt?: string;
     reason: string;
   },
@@ -757,20 +809,39 @@ export function grantComplimentaryOnlineAccessAdmin(
       )
       .get();
 
-    const anchor =
-      now < EDITION_2027_START_ISO ? EDITION_2027_START_ISO : now;
-    const base =
+    let requestedStart = now;
+    if (input.startsAt) {
+      const parsedStart = new Date(input.startsAt);
+      if (Number.isNaN(parsedStart.getTime())) {
+        throw new HttpError(400, "Invalid complimentary start date.");
+      }
+      requestedStart = parsedStart.toISOString();
+    }
+
+    const hasValidExisting =
       current &&
       current.status !== "revoked" &&
       current.status !== "refunded" &&
-      current.expiresAt > anchor
-        ? current.expiresAt
-        : anchor;
+      current.expiresAt > requestedStart;
 
-    const computedExpiresAt =
-      input.expiresAt && !Number.isNaN(new Date(input.expiresAt).getTime())
-        ? new Date(input.expiresAt).toISOString()
-        : addCalendarMonths(base, durationMonths);
+    const base = hasValidExisting ? current.expiresAt : requestedStart;
+
+    let computedExpiresAt = addCalendarMonths(base, durationMonths);
+    if (input.expiresAt) {
+      const parsedExp = new Date(input.expiresAt);
+      if (Number.isNaN(parsedExp.getTime())) {
+        throw new HttpError(400, "Invalid complimentary expiry date.");
+      }
+      computedExpiresAt = parsedExp.toISOString();
+    }
+    if (computedExpiresAt <= requestedStart) {
+      throw new HttpError(400, "Expiry date must be after start date.");
+    }
+
+    const effectiveStartsAt =
+      !input.startsAt && hasValidExisting && current
+        ? current.startsAt
+        : requestedStart;
 
     const values = {
       userId: targetUserId,
@@ -779,8 +850,7 @@ export function grantComplimentaryOnlineAccessAdmin(
       accessType: "complimentary" as const,
       accessScope: "edition_2027" as const,
       status: "active" as const,
-      startsAt:
-        current && current.status === "active" ? current.startsAt : anchor,
+      startsAt: effectiveStartsAt,
       expiresAt: computedExpiresAt,
       durationMonths,
       renewalCount: current ? current.renewalCount : 0,
@@ -919,6 +989,81 @@ export function revokeOnlineAccessAdmin(
 // PRODUCT B: PRINTED DEVOTIONAL BOOK ORDERS & DELIVERY WORKFLOW
 // ============================================================================
 
+export function issuePrintedOrderAccessToken(
+  store: Store,
+  orderId: number,
+  ttlMinutes = 7 * 24 * 60,
+): { token: string; expiresAt: string } {
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const expiresAt = new Date(nowMs + ttlMinutes * 60000).toISOString();
+  const rawToken = newToken();
+
+  store.db
+    .delete(s.printedOrderAccessTokens)
+    .where(lte(s.printedOrderAccessTokens.expiresAt, nowIso))
+    .run();
+
+  store.db
+    .insert(s.printedOrderAccessTokens)
+    .values({
+      tokenHash: tokenHash(rawToken),
+      orderId,
+      expiresAt,
+      createdAt: nowIso,
+    })
+    .run();
+
+  return { token: rawToken, expiresAt };
+}
+
+export function verifyPrintedOrderAccessToken(
+  store: Store,
+  orderId: number,
+  rawToken?: string | null,
+): boolean {
+  const cleaned = rawToken?.trim();
+  if (!cleaned) return false;
+  const nowIso = new Date().toISOString();
+  const row = store.db
+    .select()
+    .from(s.printedOrderAccessTokens)
+    .where(
+      and(
+        eq(s.printedOrderAccessTokens.tokenHash, tokenHash(cleaned)),
+        eq(s.printedOrderAccessTokens.orderId, orderId),
+        gt(s.printedOrderAccessTokens.expiresAt, nowIso),
+      ),
+    )
+    .get();
+  return Boolean(row);
+}
+
+export function authorizePrintedOrderAccess(
+  store: Store,
+  order: { id: number; userId: number | null },
+  options: { user?: PublicUser | null; token?: string | null },
+) {
+  if (options.user?.role === "admin") {
+    return;
+  }
+  if (
+    options.user &&
+    options.user.status === "active" &&
+    order.userId !== null &&
+    order.userId === options.user.id
+  ) {
+    return;
+  }
+  if (verifyPrintedOrderAccessToken(store, order.id, options.token)) {
+    return;
+  }
+  throw new HttpError(
+    403,
+    "You are not authorized to access or modify this printed order. Sign in with the purchasing account or use a valid, unexpired order access token.",
+  );
+}
+
 export function getPrintedOrderById(store: Store, orderId: number) {
   const order = store.db
     .select()
@@ -934,16 +1079,46 @@ export function getPrintedOrderById(store: Store, orderId: number) {
   return { ...order, items };
 }
 
+export function lookupPrintedOrderAuthorized(
+  store: Store,
+  orderNumber: string,
+  options: { user?: PublicUser | null; token?: string | null },
+) {
+  const hasToken = Boolean(options.token?.trim());
+  const hasUser = Boolean(options.user);
+  if (!hasToken && !hasUser) {
+    throw new HttpError(
+      403,
+      "Order lookup requires signing in to the purchasing account or providing a valid, unexpired order access token.",
+    );
+  }
+
+  const order = store.db
+    .select()
+    .from(s.printedOrders)
+    .where(eq(s.printedOrders.orderNumber, orderNumber.trim().toUpperCase()))
+    .get();
+
+  if (!order) {
+    if (!hasUser || options.user?.role !== "admin") {
+      throw new HttpError(
+        403,
+        "Order number or order access token is invalid or has expired.",
+      );
+    }
+    throw new HttpError(404, "Printed book order not found.");
+  }
+
+  authorizePrintedOrderAccess(store, order, options);
+  return getPrintedOrderById(store, order.id)!;
+}
+
 export function getUserPrintedOrders(store: Store, user: PublicUser) {
+  // Strictly scope to authenticated ownership via userId (never email matching).
   const rows = store.db
     .select()
     .from(s.printedOrders)
-    .where(
-      or(
-        eq(s.printedOrders.userId, user.id),
-        eq(s.printedOrders.email, user.email),
-      ),
-    )
+    .where(eq(s.printedOrders.userId, user.id))
     .orderBy(desc(s.printedOrders.createdAt))
     .all();
 
@@ -975,44 +1150,63 @@ export function createPrintedOrder(
   },
   userId?: number | null,
 ) {
-  const settings = getAppSettings(store);
-  if (settings.hardcoverAvailability === "out_of_stock") {
-    throw new HttpError(
-      400,
-      "The printed edition is currently out of stock. Please contact Cossy Teens Consult Enterprises.",
-    );
-  }
-
-  const quantity = Math.max(1, Math.round(input.quantity));
-  const unitPriceKobo =
-    input.unitPriceOverrideKobo && input.unitPriceOverrideKobo > 0
-      ? input.unitPriceOverrideKobo
-      : settings.hardcoverPriceKobo;
-  const subtotalKobo = unitPriceKobo * quantity;
-
-  // Never invent a delivery fee. Only use defaultDeliveryFeeKobo if administrator explicitly configured fixed_fee mode.
-  const hasConfiguredFixedFee =
-    settings.deliveryPricingMode === "fixed_fee" &&
-    settings.defaultDeliveryFeeKobo !== null &&
-    settings.defaultDeliveryFeeKobo >= 0;
-
-  const deliveryFeeKobo = hasConfiguredFixedFee
-    ? settings.defaultDeliveryFeeKobo
-    : null;
-  const deliveryQuoteStatus = hasConfiguredFixedFee
-    ? "quoted"
-    : "pending_quote";
-  const finalTotalKobo =
-    deliveryFeeKobo !== null ? subtotalKobo + deliveryFeeKobo : null;
-  const fulfillmentStatus = hasConfiguredFixedFee
-    ? "awaiting_payment"
-    : "awaiting_delivery_quotation";
-
-  const now = new Date().toISOString();
-  const datePart = now.slice(0, 10).replace(/-/g, "");
-  const orderNumber = `BLD-PRT-${datePart}-${randomBytes(3).toString("hex").toUpperCase()}`;
-
   return store.sqlite.transaction(() => {
+    const settings = getAppSettings(store);
+    if (settings.hardcoverAvailability === "out_of_stock") {
+      throw new HttpError(
+        400,
+        "The printed edition is currently out of stock. Please contact Cossy Teens Consult Enterprises.",
+      );
+    }
+
+    const quantity = Math.max(1, Math.round(input.quantity));
+    let stockDeducted = false;
+    if (
+      settings.hardcoverAvailability === "available" &&
+      settings.printedBookStockCount !== null
+    ) {
+      if (quantity > settings.printedBookStockCount) {
+        throw new HttpError(
+          400,
+          settings.printedBookStockCount === 0
+            ? "The printed edition is currently out of confirmed stock."
+            : `Only ${settings.printedBookStockCount} printed cop${settings.printedBookStockCount === 1 ? "y is" : "ies are"} currently confirmed in stock.`,
+        );
+      }
+      updateAppSettings(store, {
+        printedBookStockCount: settings.printedBookStockCount - quantity,
+      });
+      stockDeducted = true;
+    }
+
+    const unitPriceKobo =
+      input.unitPriceOverrideKobo && input.unitPriceOverrideKobo > 0
+        ? input.unitPriceOverrideKobo
+        : settings.hardcoverPriceKobo;
+    const subtotalKobo = unitPriceKobo * quantity;
+
+    // Never invent a delivery fee. Only use defaultDeliveryFeeKobo if administrator explicitly configured fixed_fee mode.
+    const hasConfiguredFixedFee =
+      settings.deliveryPricingMode === "fixed_fee" &&
+      settings.defaultDeliveryFeeKobo !== null &&
+      settings.defaultDeliveryFeeKobo >= 0;
+
+    const deliveryFeeKobo = hasConfiguredFixedFee
+      ? settings.defaultDeliveryFeeKobo
+      : null;
+    const deliveryQuoteStatus = hasConfiguredFixedFee
+      ? "quoted"
+      : "pending_quote";
+    const finalTotalKobo =
+      deliveryFeeKobo !== null ? subtotalKobo + deliveryFeeKobo : null;
+    const fulfillmentStatus = hasConfiguredFixedFee
+      ? "awaiting_payment"
+      : "awaiting_delivery_quotation";
+
+    const now = new Date().toISOString();
+    const datePart = now.slice(0, 10).replace(/-/g, "");
+    const orderNumber = `BLD-PRT-${datePart}-${randomBytes(3).toString("hex").toUpperCase()}`;
+
     const order = store.db
       .insert(s.printedOrders)
       .values({
@@ -1041,6 +1235,7 @@ export function createPrintedOrder(
         paymentStatus: "pending",
         fulfillmentStatus,
         customerDeliveryNotes: input.customerDeliveryNotes?.trim() || "",
+        stockDeducted,
         createdAt: now,
         updatedAt: now,
       })
@@ -1060,6 +1255,8 @@ export function createPrintedOrder(
       })
       .run();
 
+    const issuedAccess = issuePrintedOrderAccessToken(store, order.id);
+
     if (userId) {
       createNotificationEvent(store, {
         userId,
@@ -1073,28 +1270,32 @@ export function createPrintedOrder(
       });
     }
 
-    return getPrintedOrderById(store, order.id)!;
+    return {
+      ...getPrintedOrderById(store, order.id)!,
+      orderAccessToken: issuedAccess.token,
+      orderAccessTokenExpiresAt: issuedAccess.expiresAt,
+    };
   })();
 }
 
 export function approvePrintedOrderQuoteCustomer(
   store: Store,
   orderId: number,
-  options: { userId?: number | null; email?: string },
+  options: { user?: PublicUser | null; token?: string | null },
 ) {
   const existing = getPrintedOrderById(store, orderId);
   if (!existing) {
     throw new HttpError(404, "Printed book order not found.");
   }
 
-  const matchesUser =
-    (options.userId && existing.userId === options.userId) ||
-    (options.email &&
-      existing.email.toLowerCase() === options.email.trim().toLowerCase());
-  if (!matchesUser) {
-    throw new HttpError(403, "You are not authorized to modify this order.");
-  }
+  authorizePrintedOrderAccess(store, existing, options);
 
+  if (existing.fulfillmentStatus === "cancelled") {
+    throw new HttpError(400, "This printed book order was cancelled.");
+  }
+  if (existing.paymentStatus === "paid") {
+    throw new HttpError(400, "This printed book order has already been paid.");
+  }
   if (existing.deliveryFeeKobo === null || existing.finalTotalKobo === null) {
     throw new HttpError(
       400,
@@ -1107,7 +1308,7 @@ export function approvePrintedOrderQuoteCustomer(
     .update(s.printedOrders)
     .set({
       deliveryQuoteStatus: "customer_approved",
-      customerApprovedQuoteAt: now,
+      customerApprovedQuoteAt: existing.customerApprovedQuoteAt || now,
       fulfillmentStatus:
         existing.fulfillmentStatus === "awaiting_delivery_quotation" ||
         existing.fulfillmentStatus === "new"
@@ -1129,24 +1330,17 @@ export async function initiatePrintedOrderPayment(
     currency?: "NGN" | "USD" | "GBP";
     transferReference?: string;
     payerNote?: string;
-    email?: string;
   },
   provider: PaymentProvider,
   appOrigin: string,
-  userId?: number | null,
+  authContext: { user?: PublicUser | null; token?: string | null },
 ) {
   const existing = getPrintedOrderById(store, orderId);
   if (!existing) {
     throw new HttpError(404, "Printed book order not found.");
   }
 
-  const matchesUser =
-    (userId && existing.userId === userId) ||
-    (input.email &&
-      existing.email.toLowerCase() === input.email.trim().toLowerCase());
-  if (!matchesUser) {
-    throw new HttpError(403, "You are not authorized to pay for this order.");
-  }
+  authorizePrintedOrderAccess(store, existing, authContext);
 
   if (existing.paymentStatus === "paid") {
     throw new HttpError(400, "This printed book order has already been paid.");
@@ -1158,6 +1352,12 @@ export async function initiatePrintedOrderPayment(
     throw new HttpError(
       400,
       "A delivery fee quotation must be provided before payment can be initiated.",
+    );
+  }
+  if (existing.deliveryQuoteStatus !== "customer_approved") {
+    throw new HttpError(
+      400,
+      "Please review and approve the final order total including delivery fee before initiating payment.",
     );
   }
 
@@ -1189,8 +1389,6 @@ export async function initiatePrintedOrderPayment(
         paymentReference: existing.paymentReference || reference,
         transferReference: transferRef,
         payerNote: input.payerNote?.trim() || existing.payerNote,
-        deliveryQuoteStatus: "customer_approved",
-        customerApprovedQuoteAt: existing.customerApprovedQuoteAt || now,
         paymentStatus: "awaiting_verification",
         fulfillmentStatus: "awaiting_payment",
         updatedAt: now,
@@ -1231,8 +1429,6 @@ export async function initiatePrintedOrderPayment(
       paymentMethod: "paystack",
       paymentReference: initialized.reference,
       authorizationUrl: initialized.authorizationUrl,
-      deliveryQuoteStatus: "customer_approved",
-      customerApprovedQuoteAt: existing.customerApprovedQuoteAt || now,
       paymentStatus: "pending",
       fulfillmentStatus: "awaiting_payment",
       updatedAt: now,
@@ -1251,6 +1447,11 @@ export async function verifyPrintedOrderPayment(
   store: Store,
   reference: string,
   provider: PaymentProvider,
+  authContext?: {
+    user?: PublicUser | null;
+    token?: string | null;
+    isWebhook?: boolean;
+  },
 ) {
   const existing = store.db
     .select()
@@ -1259,7 +1460,27 @@ export async function verifyPrintedOrderPayment(
     .get();
 
   if (!existing) {
+    if (authContext && !authContext.isWebhook && !authContext.user && !authContext.token) {
+      throw new HttpError(
+        403,
+        "You are not authorized to verify this printed order payment.",
+      );
+    }
     throw new HttpError(404, "Printed book payment reference not found.");
+  }
+
+  if (!authContext?.isWebhook) {
+    authorizePrintedOrderAccess(store, existing, {
+      user: authContext?.user,
+      token: authContext?.token,
+    });
+  }
+
+  if (existing.paymentMethod !== "paystack") {
+    throw new HttpError(
+      400,
+      "Bank-transfer printed orders must be verified by an administrator after confirming settled funds.",
+    );
   }
 
   if (existing.paymentStatus === "paid") {
@@ -1387,6 +1608,17 @@ export function updatePrintedOrderAdmin(
 
     const now = new Date().toISOString();
 
+    if (
+      existing.paymentStatus === "paid" &&
+      input.deliveryFeeKobo !== undefined &&
+      input.deliveryFeeKobo !== existing.deliveryFeeKobo
+    ) {
+      throw new HttpError(
+        400,
+        "Delivery fee cannot be changed after payment has been confirmed.",
+      );
+    }
+
     const nextDeliveryFeeKobo =
       input.deliveryFeeKobo === undefined
         ? existing.deliveryFeeKobo
@@ -1397,15 +1629,22 @@ export function updatePrintedOrderAdmin(
         ? existing.subtotalKobo + nextDeliveryFeeKobo
         : null;
 
+    const deliveryFeeChanged =
+      input.deliveryFeeKobo !== undefined &&
+      input.deliveryFeeKobo !== existing.deliveryFeeKobo;
+
     let nextQuoteStatus =
       input.deliveryQuoteStatus ?? existing.deliveryQuoteStatus;
-    if (
-      input.deliveryFeeKobo !== undefined &&
-      input.deliveryFeeKobo !== null &&
-      existing.deliveryQuoteStatus === "pending_quote" &&
-      !input.deliveryQuoteStatus
-    ) {
-      nextQuoteStatus = "quoted";
+    let nextCustomerApprovedAt = existing.customerApprovedQuoteAt;
+
+    if (deliveryFeeChanged) {
+      if (nextDeliveryFeeKobo === null) {
+        nextQuoteStatus = "pending_quote";
+        nextCustomerApprovedAt = null;
+      } else if (!input.deliveryQuoteStatus) {
+        nextQuoteStatus = "quoted";
+        nextCustomerApprovedAt = null;
+      }
     }
 
     const nextPaymentStatus = input.paymentStatus ?? existing.paymentStatus;
@@ -1432,6 +1671,60 @@ export function updatePrintedOrderAdmin(
       nextFulfillmentStatus = "processing";
     }
 
+    // Validate status transitions
+    const isAlreadyCancelled = existing.fulfillmentStatus === "cancelled";
+    const isAlreadyDelivered = existing.fulfillmentStatus === "delivered";
+    const isActiveShippingOrProcessing =
+      nextFulfillmentStatus === "processing" ||
+      nextFulfillmentStatus === "ready_for_dispatch" ||
+      nextFulfillmentStatus === "shipped" ||
+      nextFulfillmentStatus === "delivered";
+
+    if (isAlreadyCancelled && isActiveShippingOrProcessing) {
+      throw new HttpError(
+        400,
+        "A cancelled printed order cannot be transitioned to processing, dispatched, or delivered.",
+      );
+    }
+
+    if (
+      isAlreadyDelivered &&
+      [
+        "new",
+        "awaiting_delivery_quotation",
+        "awaiting_payment",
+        "processing",
+        "ready_for_dispatch",
+      ].includes(nextFulfillmentStatus)
+    ) {
+      throw new HttpError(
+        400,
+        "A delivered printed order cannot be reverted to an earlier pending status.",
+      );
+    }
+
+    if (
+      (nextPaymentStatus === "paid" ||
+        nextFulfillmentStatus === "awaiting_payment") &&
+      (nextDeliveryFeeKobo === null || nextDeliveryFeeKobo === undefined)
+    ) {
+      throw new HttpError(
+        400,
+        "Set the delivery fee quotation (use 0 for pickup/free delivery) before moving this order to awaiting payment or paid.",
+      );
+    }
+
+    if (
+      nextPaymentStatus === "refunded" &&
+      existing.paymentStatus !== "paid" &&
+      existing.paymentStatus !== "refunded"
+    ) {
+      throw new HttpError(
+        400,
+        "Only paid printed orders can be marked as refunded.",
+      );
+    }
+
     // Enforce backend guard: prevent marking unpaid orders as ready_for_dispatch, shipped, or delivered
     // without an explicit, audited administrative exception note.
     const requiresPaidGuard =
@@ -1450,6 +1743,23 @@ export function updatePrintedOrderAdmin(
           `Cannot mark unpaid printed order as ${nextFulfillmentStatus} without an explicit administrative exception reason.`,
         );
       }
+    }
+
+    // Restore confirmed stock if transitioning to cancelled when stock was deducted
+    let nextStockDeducted = existing.stockDeducted;
+    if (
+      nextFulfillmentStatus === "cancelled" &&
+      !isAlreadyCancelled &&
+      existing.stockDeducted
+    ) {
+      const settings = getAppSettings(store);
+      if (settings.printedBookStockCount !== null) {
+        updateAppSettings(store, {
+          printedBookStockCount:
+            settings.printedBookStockCount + existing.quantity,
+        });
+      }
+      nextStockDeducted = false;
     }
 
     const paidAt =
@@ -1481,6 +1791,7 @@ export function updatePrintedOrderAdmin(
         deliveryQuoteNote:
           input.deliveryQuoteNote ?? existing.deliveryQuoteNote,
         finalTotalKobo: nextFinalTotalKobo,
+        customerApprovedQuoteAt: nextCustomerApprovedAt,
         paymentStatus: nextPaymentStatus,
         fulfillmentStatus: nextFulfillmentStatus,
         dispatchExceptionNote: exceptionNote,
@@ -1494,6 +1805,7 @@ export function updatePrintedOrderAdmin(
           nextPaymentStatus === "paid" && existing.paymentStatus !== "paid"
             ? adminId
             : existing.verifiedByAdminId,
+        stockDeducted: nextStockDeducted,
         paidAt,
         refundedAt,
         shippedAt,

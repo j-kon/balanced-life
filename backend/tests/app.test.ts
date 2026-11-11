@@ -15,6 +15,7 @@ import type {
 } from "../src/services/payments.js";
 import type {
   EmailService,
+  OrderAccessEmailInput,
   PasswordResetEmailInput,
 } from "../src/services/email.js";
 import {
@@ -73,9 +74,14 @@ class MockPaystackProvider implements PaymentProvider {
 class MockEmailService implements EmailService {
   readonly configured = true;
   public sent: PasswordResetEmailInput[] = [];
+  public sentOrderLinks: OrderAccessEmailInput[] = [];
 
   async sendPasswordReset(input: PasswordResetEmailInput) {
     this.sent.push(input);
+  }
+
+  async sendOrderAccessLink(input: OrderAccessEmailInput) {
+    this.sentOrderLinks.push(input);
   }
 }
 
@@ -801,10 +807,42 @@ test("dedicated Digital Edition purchase (Paystack + webhook + failed verificati
   );
   assert.equal(verifyRes.statusCode, 200);
   assert.equal(verifyRes.json().replayed, true);
-  assert.equal(verifyRes.json().entitlement.status, "active");
+  // Pre-2027 purchase starts 2027-01-01 and MUST NOT be active prematurely before start date
+  assert.equal(verifyRes.json().entitlement.status, "scheduled");
+  assert.equal(verifyRes.json().entitlement.active, false);
+  assert.equal(verifyRes.json().entitlement.startsAt, "2027-01-01T00:00:00.000Z");
   assert.equal(verifyRes.json().entitlement.editionYear, 2027);
 
-  // Buyer can now read non-sample 2027 devotional without a recurring subscription
+  // Premature digital access BEFORE start date is blocked (403)
+  const prematureRes = await send(
+    "GET",
+    `/devotionals/${lockedEntry.id}`,
+    undefined,
+    buyerCookie,
+  );
+  assert.equal(prematureRes.statusCode, 403);
+
+  // Overview revenue equals the 350,000 kobo verified digital purchase immediately upon settlement
+  const overview = (
+    await send("GET", "/admin/overview", undefined, adminCookie)
+  ).json();
+  assert.equal(overview.metrics.digitalRevenueKobo, 350000);
+  assert.equal(overview.metrics.verifiedRevenueKobo, 350000);
+  assert.equal(overview.metrics.digitalEditionsSold, 1);
+
+  // Simulate entitlement reaching its active start window -> premium reading unlocks
+  const buyerUserId = buyerReg.json().user.id;
+  const dbActivate = openDatabase(databasePath);
+  try {
+    dbActivate.sqlite
+      .prepare(
+        `UPDATE digital_entitlements SET starts_at = '2026-01-01T00:00:00.000Z' WHERE user_id = ?`,
+      )
+      .run(buyerUserId);
+  } finally {
+    dbActivate.sqlite.close();
+  }
+
   const unlockedRes = await send(
     "GET",
     `/devotionals/${lockedEntry.id}`,
@@ -813,14 +851,6 @@ test("dedicated Digital Edition purchase (Paystack + webhook + failed verificati
   );
   assert.equal(unlockedRes.statusCode, 200);
   assert.equal(unlockedRes.json().reflection, entryFixture.reflection);
-
-  // Overview revenue equals the 350,000 kobo digital edition purchase
-  const overview = (
-    await send("GET", "/admin/overview", undefined, adminCookie)
-  ).json();
-  assert.equal(overview.metrics.digitalRevenueKobo, 350000);
-  assert.equal(overview.metrics.verifiedRevenueKobo, 350000);
-  assert.equal(overview.metrics.digitalEditionsSold, 1);
 
   // 3. Bank-transfer workflow when enabled by admin
   const transferBuyerReg = await send("POST", "/auth/register", {
@@ -888,7 +918,7 @@ test("dedicated Digital Edition purchase (Paystack + webhook + failed verificati
     false,
   );
 
-  // Admin reconciliation approves and activates entitlement
+  // Admin reconciliation approves purchase (scheduled starting 2027-01-01 when purchased pre-2027)
   const approveRes = await send(
     "POST",
     `/admin/digital-purchases/${purchaseId}/reconcile`,
@@ -896,11 +926,28 @@ test("dedicated Digital Edition purchase (Paystack + webhook + failed verificati
     adminCookie,
   );
   assert.equal(approveRes.statusCode, 200);
-  assert.equal(
-    (await send("GET", "/me/digital-edition", undefined, transferCookie)).json()
-      .active,
-    true,
+  assert.equal(approveRes.json().status, "succeeded");
+  const transferDigitalState = (
+    await send("GET", "/me/digital-edition", undefined, transferCookie)
+  ).json();
+  assert.equal(transferDigitalState.entitlement.status, "scheduled");
+  assert.equal(transferDigitalState.active, false);
+
+  // Double-approve and invalid reject after settlement are blocked (400)
+  const doubleApprove = await send(
+    "POST",
+    `/admin/digital-purchases/${purchaseId}/reconcile`,
+    { action: "approve", adminNotes: "Accidental duplicate click" },
+    adminCookie,
   );
+  assert.equal(doubleApprove.statusCode, 400);
+  const badReject = await send(
+    "POST",
+    `/admin/digital-purchases/${purchaseId}/reconcile`,
+    { action: "reject", adminNotes: "Should not reject settled purchase" },
+    adminCookie,
+  );
+  assert.equal(badReject.statusCode, 400);
 });
 
 test("bulk-order workflow stores null discount by default and supports admin quotation, discount, and fulfillment", async () => {
@@ -1257,15 +1304,80 @@ test("Product A: 12-month calendar calculation, pre-2027 start anchor, manual re
   );
   assert.equal(verifyRes.statusCode, 200);
   const ent = verifyRes.json().entitlement;
-  assert.equal(ent.status, "active");
+  assert.equal(ent.status, "scheduled");
+  assert.equal(ent.active, false);
+  assert.equal(ent.startsAt, "2027-01-01T00:00:00.000Z");
+  assert.equal(ent.expiresAt, "2028-01-01T00:00:00.000Z");
   assert.equal(ent.durationMonths, 12);
-  assert.ok(ent.startsAt);
-  assert.ok(ent.expiresAt);
 
-  // Reader creates journal reflections, progress, and bookmarks
+  // Reader creates journal reflections, progress, and bookmarks once inside active window
   const devList = (await send("GET", "/devotionals")).json();
   const sampleEntry = devList.find((d: { sample: boolean }) => d.sample);
   const lockedEntry = devList.find((d: { sample: boolean }) => !d.sample);
+
+  // Premature digital access BEFORE start date MUST fail across ALL premium reading endpoints (403)
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/devotionals/${lockedEntry.id}`,
+        undefined,
+        termCookie,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        `/me/progress/${lockedEntry.id}`,
+        { completed: true },
+        termCookie,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        `/me/bookmarks/${lockedEntry.id}`,
+        { saved: true },
+        termCookie,
+      )
+    ).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/me/journal",
+        {
+          devotionalId: lockedEntry.id,
+          title: "Blocked Premature Reflection",
+          body: "Should not attach to locked devotional before start date.",
+        },
+        termCookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // Simulate reaching the active entitlement period (starts_at <= now < expires_at)
+  const dbStart = openDatabase(databasePath);
+  try {
+    dbStart.sqlite
+      .prepare(
+        `UPDATE digital_entitlements
+         SET starts_at = '2026-01-01T00:00:00.000Z'
+         WHERE user_id = ?`,
+      )
+      .run(termUserId);
+  } finally {
+    dbStart.sqlite.close();
+  }
 
   await send(
     "POST",
@@ -1350,7 +1462,7 @@ test("Product A: 12-month calendar calculation, pre-2027 start anchor, manual re
   assert.equal(jRes.json().length, 1);
   assert.equal(jRes.json()[0].title, "My 12-Month Reflection");
 
-  // 4. Reader manually renews 12-month access -> access restores immediately!
+  // 4. Reader manually renews 12-month access -> renewal extends to 2028-01-01!
   const renewCheckout = await send(
     "POST",
     "/digital-purchases/checkout",
@@ -1367,8 +1479,21 @@ test("Product A: 12-month calendar calculation, pre-2027 start anchor, manual re
     termCookie,
   );
   assert.equal(renewVerify.statusCode, 200);
-  assert.equal(renewVerify.json().entitlement.status, "active");
   assert.equal(renewVerify.json().entitlement.renewalCount, 1);
+
+  // Simulate active window starting for the renewed term -> access restored!
+  const dbRestore = openDatabase(databasePath);
+  try {
+    dbRestore.sqlite
+      .prepare(
+        `UPDATE digital_entitlements
+         SET starts_at = '2026-01-01T00:00:00.000Z'
+         WHERE user_id = ?`,
+      )
+      .run(termUserId);
+  } finally {
+    dbRestore.sqlite.close();
+  }
 
   // Access to locked entry is restored!
   const readRestored = await send(
@@ -1443,6 +1568,10 @@ test("Product A: Preserving legacy persistent entitlements so existing paying cu
 });
 
 test("Product B: Printed Book orders, quantity & subtotal math, quotation approval, unpaid dispatch guard, and fulfillment lifecycle", async () => {
+  // 0. Default inventory is explicitly unconfigured (null), never assumed 500
+  const cfgBefore = (await send("GET", "/config")).json();
+  assert.equal(cfgBefore.settings.printedBookStockCount, null);
+
   // 1. Customer creates printed order with full delivery information
   const createRes = await send("POST", "/printed-orders", {
     fullName: "Chinedu Okafor",
@@ -1459,6 +1588,7 @@ test("Product B: Printed Book orders, quantity & subtotal math, quotation approv
   assert.equal(createRes.statusCode, 200);
   const order = createRes.json();
   assert.ok(order.orderNumber.startsWith("BLD-PRT-"));
+  assert.ok(order.orderAccessToken && order.orderAccessToken.length >= 32);
   assert.equal(order.quantity, 2);
   assert.equal(order.unitPriceKobo, 500000); // ₦5,000 per copy
   assert.equal(order.subtotalKobo, 1000000); // ₦10,000
@@ -1468,13 +1598,62 @@ test("Product B: Printed Book orders, quantity & subtotal math, quotation approv
   assert.equal(order.paymentStatus, "pending");
   assert.equal(order.fulfillmentStatus, "awaiting_delivery_quotation");
 
-  // Lookup order by orderNumber + email
-  const lookupRes = await send(
+  // SECURITY: Email-only lookup MUST be rejected (403) without token or authenticated ownership
+  const unauthLookup = await send(
     "GET",
     `/printed-orders/lookup?orderNumber=${order.orderNumber}&email=chinedu@example.org`,
   );
+  assert.equal(unauthLookup.statusCode, 403);
+
+  // SECURITY: Wrong token MUST be rejected (403)
+  const badTokenLookup = await send(
+    "GET",
+    `/printed-orders/lookup?orderNumber=${order.orderNumber}&token=invalid_token_12345`,
+  );
+  assert.equal(badTokenLookup.statusCode, 403);
+
+  // SECURITY: Registering an unverified user with the guest's email MUST NOT grant access via cookie or /me/printed-orders
+  const imposterReg = await send("POST", "/auth/register", {
+    name: "Imposter Account",
+    email: "chinedu@example.org",
+    password: "Imposter-Password-2027!",
+  });
+  assert.equal(imposterReg.statusCode, 200);
+  const imposterCookie = String(imposterReg.headers["set-cookie"]).split(";")[0];
+  assert.equal(
+    (await send("GET", "/me/printed-orders", undefined, imposterCookie)).json()
+      .length,
+    0,
+  );
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/printed-orders/lookup?orderNumber=${order.orderNumber}`,
+        undefined,
+        imposterCookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // Lookup order with valid issued expiring orderAccessToken succeeds
+  const lookupRes = await send(
+    "GET",
+    `/printed-orders/lookup?orderNumber=${order.orderNumber}&token=${order.orderAccessToken}`,
+  );
   assert.equal(lookupRes.statusCode, 200);
   assert.equal(lookupRes.json().id, order.id);
+  assert.equal(lookupRes.json().streetAddress, "14 Awolowo Way, Ikeja");
+
+  // Admin cannot mark order paid or awaiting_payment while deliveryFeeKobo is null
+  const nullPaidErr = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { paymentStatus: "paid" },
+    adminCookie,
+  );
+  assert.equal(nullPaidErr.statusCode, 400);
 
   // 2. Admin quotes delivery fee of ₦2,500 (250,000 kobo)
   const quoteRes = await send(
@@ -1490,15 +1669,62 @@ test("Product B: Printed Book orders, quantity & subtotal math, quotation approv
   assert.equal(quoteRes.json().finalTotalKobo, 1250000); // 1,000,000 + 250,000 = ₦12,500
   assert.equal(quoteRes.json().deliveryQuoteStatus, "quoted");
 
-  // 3. Customer approves delivery quotation
+  // Customer CANNOT initiate payment BEFORE approving the final quote (400)
+  const preApprovePay = await send(
+    "POST",
+    `/printed-orders/${order.id}/pay`,
+    { paymentMethod: "paystack", orderAccessToken: order.orderAccessToken },
+  );
+  assert.equal(preApprovePay.statusCode, 400);
+
+  // Unauthorized/imposter user CANNOT approve quotation (403)
+  const unauthApprove = await send(
+    "POST",
+    `/printed-orders/${order.id}/approve-quote`,
+    {},
+    imposterCookie,
+  );
+  assert.equal(unauthApprove.statusCode, 403);
+
+  // 3. Customer approves delivery quotation using valid token
   const approveRes = await send(
     "POST",
     `/printed-orders/${order.id}/approve-quote`,
-    { email: "chinedu@example.org" },
+    { orderAccessToken: order.orderAccessToken },
   );
   assert.equal(approveRes.statusCode, 200);
   assert.equal(approveRes.json().deliveryQuoteStatus, "customer_approved");
   assert.equal(approveRes.json().fulfillmentStatus, "awaiting_payment");
+
+  // Revising delivery fee resets customer approval cleanly
+  const revisedQuote = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { deliveryFeeKobo: 300000 },
+    adminCookie,
+  );
+  assert.equal(revisedQuote.json().deliveryQuoteStatus, "quoted");
+  const blockedPayAfterRevision = await send(
+    "POST",
+    `/printed-orders/${order.id}/pay`,
+    { paymentMethod: "paystack", orderAccessToken: order.orderAccessToken },
+  );
+  assert.equal(blockedPayAfterRevision.statusCode, 400);
+
+  // Restore ₦2,500 fee and customer re-approves
+  await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { deliveryFeeKobo: 250000 },
+    adminCookie,
+  );
+  const reApprove = await send(
+    "POST",
+    `/printed-orders/${order.id}/approve-quote`,
+    { orderAccessToken: order.orderAccessToken },
+  );
+  assert.equal(reApprove.statusCode, 200);
+  assert.equal(reApprove.json().deliveryQuoteStatus, "customer_approved");
 
   // 4. Unpaid dispatch guard: attempting to mark order ready_for_dispatch, shipped, or delivered while unpaid fails with 400
   const guardRes1 = await send(
@@ -1518,24 +1744,49 @@ test("Product B: Printed Book orders, quantity & subtotal math, quotation approv
   );
   assert.equal(guardRes2.statusCode, 400);
 
-  // 5. Customer initiates Paystack payment and payment is verified
+  // 5. Unauthorized payment initiation fails (403); authorized initiation succeeds
+  const unauthPayInit = await send(
+    "POST",
+    `/printed-orders/${order.id}/pay`,
+    { paymentMethod: "paystack" },
+    imposterCookie,
+  );
+  assert.equal(unauthPayInit.statusCode, 403);
+
   const payInit = await send(
     "POST",
     `/printed-orders/${order.id}/pay`,
-    { paymentMethod: "paystack", email: "chinedu@example.org" },
+    { paymentMethod: "paystack", orderAccessToken: order.orderAccessToken },
   );
   assert.equal(payInit.statusCode, 200);
   const payRef = payInit.json().reference;
   assert.ok(payRef.startsWith("BLD_PRT_"));
 
-  const verifyPay = await send(
+  // Unauthorized verify WITHOUT token or owner auth fails (403)
+  const unauthVerify = await send(
     "POST",
     "/printed-orders/verify",
     { reference: payRef },
   );
+  assert.equal(unauthVerify.statusCode, 403);
+
+  const verifyPay = await send(
+    "POST",
+    "/printed-orders/verify",
+    { reference: payRef, orderAccessToken: order.orderAccessToken },
+  );
   assert.equal(verifyPay.statusCode, 200);
   assert.equal(verifyPay.json().order.paymentStatus, "paid");
   assert.equal(verifyPay.json().order.fulfillmentStatus, "processing");
+
+  // Delivery fee cannot be modified after payment confirmation
+  const modifyPaidFee = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { deliveryFeeKobo: 500000 },
+    adminCookie,
+  );
+  assert.equal(modifyPaidFee.statusCode, 400);
 
   // 6. Admin assigns courier, tracking reference, and marks shipped
   const shipRes = await send(
@@ -1564,6 +1815,15 @@ test("Product B: Printed Book orders, quantity & subtotal math, quotation approv
   assert.equal(deliverRes.json().fulfillmentStatus, "delivered");
   assert.ok(deliverRes.json().deliveredAt);
 
+  // Reverting delivered order back to pending status is rejected (400)
+  const revertDelivered = await send(
+    "PATCH",
+    `/admin/printed-orders/${order.id}`,
+    { fulfillmentStatus: "awaiting_payment" },
+    adminCookie,
+  );
+  assert.equal(revertDelivered.statusCode, 400);
+
   // 7. Verify printed order appears in admin overview and revenue increases accurately
   const adminOverview = (
     await send("GET", "/admin/overview", undefined, adminCookie)
@@ -1571,6 +1831,200 @@ test("Product B: Printed Book orders, quantity & subtotal math, quotation approv
   assert.equal(adminOverview.metrics.deliveredOrders >= 1, true);
   assert.equal(adminOverview.metrics.printedBookRevenueKobo >= 1250000, true);
   assert.ok(adminOverview.metrics.totalSalesKobo >= 1250000);
+});
+
+test("Security & Inventory Regression: authenticated printed-order ownership, expired tokens, access link request, bank-transfer verify guard, cancelled transition guard, and confirmed inventory enforcement", async () => {
+  // 1. Authenticated reader places an order and accesses it without needing a token
+  const buyerReg = await send("POST", "/auth/register", {
+    name: "Auth Printed Buyer",
+    email: "auth-printed@example.org",
+    password: "Auth-Printed-Pass-2027!",
+  });
+  assert.equal(buyerReg.statusCode, 200);
+  const buyerCookie = String(buyerReg.headers["set-cookie"]).split(";")[0];
+
+  // Configure owner-confirmed inventory of 3 copies (and enable bank transfers)
+  const settings = (await send("GET", "/admin/settings", undefined, adminCookie)).json();
+  const stockSet = await send(
+    "PUT",
+    "/admin/settings",
+    {
+      ...settings,
+      hardcoverAvailability: "available",
+      printedBookStockCount: 3,
+      bankTransferEnabled: true,
+    },
+    adminCookie,
+  );
+  assert.equal(stockSet.statusCode, 200);
+  assert.equal(stockSet.json().printedBookStockCount, 3);
+
+  // Attempting to order 4 copies when only 3 are confirmed in stock fails (400)
+  const overStockRes = await send(
+    "POST",
+    "/printed-orders",
+    {
+      fullName: "Auth Printed Buyer",
+      email: "auth-printed@example.org",
+      phone: "+2348099988776",
+      streetAddress: "10 Admiralty Way, Lekki",
+      city: "Lekki",
+      state: "Lagos",
+      country: "Nigeria",
+      quantity: 4,
+    },
+    buyerCookie,
+  );
+  assert.equal(overStockRes.statusCode, 400);
+
+  // Ordering 2 copies succeeds and decrements confirmed stock from 3 -> 1
+  const okOrderRes = await send(
+    "POST",
+    "/printed-orders",
+    {
+      fullName: "Auth Printed Buyer",
+      email: "auth-printed@example.org",
+      phone: "+2348099988776",
+      streetAddress: "10 Admiralty Way, Lekki",
+      city: "Lekki",
+      state: "Lagos",
+      country: "Nigeria",
+      quantity: 2,
+    },
+    buyerCookie,
+  );
+  assert.equal(okOrderRes.statusCode, 200);
+  const authOrder = okOrderRes.json();
+  assert.equal(
+    (await send("GET", "/config")).json().settings.printedBookStockCount,
+    1,
+  );
+
+  // Authenticated owner sees it via /me/printed-orders & /printed-orders/lookup without token
+  const myOrders = (
+    await send("GET", "/me/printed-orders", undefined, buyerCookie)
+  ).json();
+  assert.equal(myOrders.some((o: { id: number }) => o.id === authOrder.id), true);
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/printed-orders/lookup?orderNumber=${authOrder.orderNumber}`,
+        undefined,
+        buyerCookie,
+      )
+    ).statusCode,
+    200,
+  );
+
+  // 2. Request expiring access link via email -> generates emailed token; expired token is denied
+  emailService.sentOrderLinks = [];
+  const reqAccess = await send("POST", "/printed-orders/request-access", {
+    orderNumber: authOrder.orderNumber,
+    email: "auth-printed@example.org",
+  });
+  assert.equal(reqAccess.statusCode, 200);
+  assert.equal(emailService.sentOrderLinks.length, 1);
+  const emailedUrl = new URL(emailService.sentOrderLinks[0].accessUrl);
+  const emailedToken = emailedUrl.searchParams.get("token");
+  assert.ok(emailedToken);
+
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/printed-orders/lookup?orderNumber=${authOrder.orderNumber}&token=${emailedToken}`,
+      )
+    ).statusCode,
+    200,
+  );
+
+  // Force all tokens for this order to expire -> token lookup now fails (403)
+  const dbExp = openDatabase(databasePath);
+  try {
+    dbExp.sqlite
+      .prepare(
+        `UPDATE printed_order_access_tokens
+         SET expires_at = '2020-01-01T00:00:00.000Z'
+         WHERE order_id = ?`,
+      )
+      .run(authOrder.id);
+  } finally {
+    dbExp.sqlite.close();
+  }
+  assert.equal(
+    (
+      await send(
+        "GET",
+        `/printed-orders/lookup?orderNumber=${authOrder.orderNumber}&token=${emailedToken}`,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // 3. Quote + approve + bank_transfer submit -> public /printed-orders/verify MUST reject bank transfers (400)
+  await send(
+    "PATCH",
+    `/admin/printed-orders/${authOrder.id}`,
+    { deliveryFeeKobo: 150000 },
+    adminCookie,
+  );
+  await send(
+    "POST",
+    `/printed-orders/${authOrder.id}/approve-quote`,
+    {},
+    buyerCookie,
+  );
+  const btPay = await send(
+    "POST",
+    `/printed-orders/${authOrder.id}/pay`,
+    { paymentMethod: "bank_transfer", transferReference: "NIP-BOOK-554433" },
+    buyerCookie,
+  );
+  assert.equal(btPay.statusCode, 200);
+  const verifyBtAttempt = await send(
+    "POST",
+    "/printed-orders/verify",
+    { reference: btPay.json().reference },
+    buyerCookie,
+  );
+  assert.equal(verifyBtAttempt.statusCode, 400);
+
+  // 4. Cancelling the order restores the 2 copies back to confirmed inventory (1 -> 3), and cancelled order cannot be shipped
+  const cancelRes = await send(
+    "PATCH",
+    `/admin/printed-orders/${authOrder.id}`,
+    { fulfillmentStatus: "cancelled" },
+    adminCookie,
+  );
+  assert.equal(cancelRes.statusCode, 200);
+  assert.equal(
+    (await send("GET", "/config")).json().settings.printedBookStockCount,
+    3,
+  );
+  assert.equal(
+    (
+      await send(
+        "PATCH",
+        `/admin/printed-orders/${authOrder.id}`,
+        { fulfillmentStatus: "shipped", dispatchExceptionNote: "Should fail" },
+        adminCookie,
+      )
+    ).statusCode,
+    400,
+  );
+
+  // Reset stock back to unconfigured (null) to leave clean config state
+  await send(
+    "PUT",
+    "/admin/settings",
+    { ...settings, printedBookStockCount: null },
+    adminCookie,
+  );
+  assert.equal(
+    (await send("GET", "/config")).json().settings.printedBookStockCount,
+    null,
+  );
 });
 
 test("Admin Dashboard Overview: 12 KPIs, chart series, webhook idempotency, and privacy integrity", async () => {

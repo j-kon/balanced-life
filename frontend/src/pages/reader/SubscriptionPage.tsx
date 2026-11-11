@@ -33,7 +33,10 @@ export function SubscriptionPage() {
   useEffect(() => {
     if (!reference) return;
     let live = true;
-    api("/subscriptions/verify", { reference })
+    const verifyEndpoint = reference.startsWith("BLD_DIG_")
+      ? "/digital-purchases/verify"
+      : "/subscriptions/verify";
+    api(verifyEndpoint, { reference })
       .then(() => {
         if (live) {
           toast("Your earlier payment has been verified.");
@@ -51,6 +54,7 @@ export function SubscriptionPage() {
 
   const active = digital.data?.active || legacy.data?.subscription?.active;
   const ent = digital.data?.entitlement;
+  const isScheduled = ent?.status === "scheduled" && !active;
   const durationMonths = config.settings.digitalAccessDurationMonths || 12;
 
   return (
@@ -76,20 +80,56 @@ export function SubscriptionPage() {
             <span className="pill">
               {active
                 ? "Online Access Active"
-                : ent?.status === "expired"
-                  ? "Access Expired"
-                  : "Free Account"}
+                : isScheduled
+                  ? "Scheduled (Starts Jan 1, 2027)"
+                  : ent?.status === "expired"
+                    ? "Access Expired"
+                    : "Free Account"}
             </span>
             <h2>
               {digital.data.active
                 ? "2027 Digital Devotional Access"
-                : legacy.data.subscription?.active
-                  ? "Existing Account Access"
-                  : ent?.status === "expired"
-                    ? "Renew Your 2027 Digital Access"
-                    : "Begin your 2027 journey"}
+                : isScheduled
+                  ? "2027 Digital Access Confirmed"
+                  : legacy.data.subscription?.active
+                    ? "Existing Account Access"
+                    : ent?.status === "expired"
+                      ? "Renew Your 2027 Digital Access"
+                      : "Begin your 2027 journey"}
             </h2>
-            {digital.data.active && ent ? (
+            {isScheduled && ent ? (
+              <>
+                <p>
+                  <CheckCircle2 size={18} /> Your 12-month 2027 Digital Edition
+                  access is confirmed and scheduled to begin on{" "}
+                  <strong>
+                    {ent.startsAt
+                      ? new Date(ent.startsAt).toLocaleDateString("en-GB")
+                      : "01/01/2027"}
+                  </strong>
+                  {ent.expiresAt && (
+                    <>
+                      {" "}
+                      through{" "}
+                      <strong>
+                        {new Date(ent.expiresAt).toLocaleDateString("en-GB")}
+                      </strong>
+                    </>
+                  )}
+                  . Free sample readings remain accessible now, and full 2027
+                  reading unlocks on your start date.
+                </p>
+                <div className="actions">
+                  <Link className="button" to="/library">
+                    Browse library &amp; sample <ArrowRight size={17} />
+                  </Link>
+                  <Link className="button outline" to="/digital-edition">
+                    Extend by {durationMonths} Months (
+                    {money(config.settings.digitalEditionPriceKobo)})
+                  </Link>
+                </div>
+              </>
+            ) : digital.data.active && ent ? (
               <>
                 <p>
                   <CheckCircle2 size={18} /> Your account has active online

@@ -674,6 +674,7 @@ export function evaluateUserScheduledReminders(
       store,
       userId,
       settings.renewalReminderDays,
+      nowIso,
     );
     if (sub?.renewalReminder) {
       const expiryKey = `${sub.id}_${sub.expiresAt.slice(0, 10)}_${sub.renewalReminder.expired ? "expired" : "due"}`;
@@ -765,7 +766,9 @@ export function evaluateUserScheduledReminders(
   }
 
   // Verify access permission: free sample OR active membership / 2027 Digital Edition
-  const canAccessEntry = Boolean(entry.sample || hasPremiumAccess(store, user));
+  const canAccessEntry = Boolean(
+    entry.sample || hasPremiumAccess(store, user, nowIso),
+  );
   if (!canAccessEntry) {
     return {
       skippedReason: "no_premium_access",

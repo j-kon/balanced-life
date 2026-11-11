@@ -89,8 +89,8 @@ export function ReaderShell({ children }: { children: ReactNode }) {
             onClick={async () => {
               try {
                 await api("/auth/logout", {});
+                navigate("/", { replace: true });
                 await refresh();
-                navigate("/");
               } catch (e) {
                 toast((e as Error).message);
               }

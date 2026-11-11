@@ -235,6 +235,11 @@ export const printedOrderCreateSchema = z.object({
 
 export const printedOrderLookupSchema = z.object({
   orderNumber: z.string().trim().min(4).max(60),
+  token: z.string().trim().min(10).max(200).optional(),
+});
+
+export const printedOrderAccessRequestSchema = z.object({
+  orderNumber: z.string().trim().min(4).max(60),
   email: z
     .email("Enter a valid email address.")
     .max(254)
@@ -242,22 +247,17 @@ export const printedOrderLookupSchema = z.object({
 });
 
 export const printedOrderQuoteApproveSchema = z.object({
-  email: z
-    .email()
-    .max(254)
-    .transform((v) => v.toLowerCase())
-    .optional(),
+  token: z.string().trim().min(10).max(200).optional(),
+  orderAccessToken: z.string().trim().min(10).max(200).optional(),
 });
 
 export const printedOrderPayInitiateSchema = z.object({
   paymentMethod: z.enum(["paystack", "bank_transfer"]).default("paystack"),
+  currency: z.enum(["NGN", "USD", "GBP"]).optional(),
   transferReference: z.string().trim().max(120).optional(),
   payerNote: z.string().trim().max(1000).optional(),
-  email: z
-    .email()
-    .max(254)
-    .transform((v) => v.toLowerCase())
-    .optional(),
+  token: z.string().trim().min(10).max(200).optional(),
+  orderAccessToken: z.string().trim().min(10).max(200).optional(),
 });
 
 export const printedOrderVerifySchema = z.object({
@@ -267,6 +267,8 @@ export const printedOrderVerifySchema = z.object({
     .min(6)
     .max(120)
     .regex(/^[a-zA-Z0-9_-]+$/),
+  token: z.string().trim().min(10).max(200).optional(),
+  orderAccessToken: z.string().trim().min(10).max(200).optional(),
 });
 
 export const adminPrintedOrderUpdateSchema = z.object({
@@ -309,6 +311,7 @@ export const adminPrintedOrderUpdateSchema = z.object({
 
 export const complimentaryOnlineAccessGrantSchema = z.object({
   months: z.coerce.number().int().min(1).max(60).optional(),
+  startsAt: z.string().trim().max(60).optional(),
   expiresAt: z.string().trim().max(60).optional(),
   reason: z
     .string()
@@ -506,11 +509,11 @@ export const settingsUpdateSchema = z.object({
     .enum(["available", "preorder", "out_of_stock"])
     .optional(),
   hardcoverNote: z.string().trim().max(1000).optional(),
-  printedBookStockCount: z.coerce
-    .number()
-    .int()
-    .min(0)
-    .max(1000000)
+  printedBookStockCount: z
+    .preprocess(
+      (v) => (v === "" ? null : v),
+      z.coerce.number().int().min(0).max(1000000).nullable().optional(),
+    )
     .optional(),
   deliveryPricingMode: z
     .enum(["quotation_required", "fixed_fee"])

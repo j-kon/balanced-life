@@ -1,4 +1,4 @@
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, gt, lte } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
@@ -29,7 +29,7 @@ export type EnrichedSubscription = {
   planAmountKobo: number;
   accessType: "paid" | "complimentary";
   status: "active" | "cancelled" | "expired" | "revoked";
-  effectiveStatus: "active" | "cancelling" | "expired" | "revoked";
+  effectiveStatus: "active" | "scheduled" | "cancelling" | "expired" | "revoked";
   active: boolean;
   startedAt: string;
   expiresAt: string;
@@ -49,6 +49,7 @@ export function getSubscriptionDetails(
   store: Store,
   userId: number,
   reminderDays = 7,
+  referenceNowIso?: string,
 ): EnrichedSubscription | null {
   const { db } = store;
   const row = db
@@ -74,28 +75,31 @@ export function getSubscriptionDetails(
 
   if (!row) return null;
 
-  const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
+  const nowIso = referenceNowIso || new Date().toISOString();
+  const nowMs = new Date(nowIso).getTime();
   const expiresMs = new Date(row.expiresAt).getTime();
   const isRevoked = row.status === "revoked";
+  const isNotStarted = !isRevoked && row.startedAt > nowIso;
   const isExpired = !isRevoked && row.expiresAt <= nowIso;
 
   // Persist transition to expired if the clock has passed expiresAt
-  if (isExpired && row.status !== "expired") {
+  if (isExpired && row.status !== "expired" && !referenceNowIso) {
     db.update(s.subscriptions)
       .set({ status: "expired", updatedAt: nowIso })
       .where(eq(s.subscriptions.id, row.id))
       .run();
   }
 
-  const active = !isRevoked && !isExpired;
+  const active = !isRevoked && !isNotStarted && !isExpired;
   const effectiveStatus: EnrichedSubscription["effectiveStatus"] = isRevoked
     ? "revoked"
     : isExpired
       ? "expired"
-      : row.cancelAtPeriodEnd || row.status === "cancelled"
-        ? "cancelling"
-        : "active";
+      : isNotStarted
+        ? "scheduled"
+        : row.cancelAtPeriodEnd || row.status === "cancelled"
+          ? "cancelling"
+          : "active";
 
   const daysRemaining = active
     ? Math.max(0, Math.ceil((expiresMs - nowMs) / 86400000))
@@ -146,16 +150,18 @@ export function getSubscriptionDetails(
 export function hasSubscriptionAccess(
   store: Store,
   user: PublicUser | null,
+  referenceNowIso?: string,
 ): boolean {
   if (!user || user.status === "suspended") return false;
   if (user.role === "admin") return true;
-  const now = new Date().toISOString();
+  const now = referenceNowIso || new Date().toISOString();
   const sub = store.db
     .select()
     .from(s.subscriptions)
     .where(
       and(
         eq(s.subscriptions.userId, user.id),
+        lte(s.subscriptions.startedAt, now),
         gt(s.subscriptions.expiresAt, now),
       ),
     )
@@ -166,11 +172,12 @@ export function hasSubscriptionAccess(
 export function hasPremiumAccess(
   store: Store,
   user: PublicUser | null,
+  referenceNowIso?: string,
 ): boolean {
   if (!user || user.status === "suspended") return false;
   if (user.role === "admin") return true;
-  if (hasSubscriptionAccess(store, user)) return true;
-  return hasActiveDigitalEntitlement(store, user.id, 2027);
+  if (hasSubscriptionAccess(store, user, referenceNowIso)) return true;
+  return hasActiveDigitalEntitlement(store, user.id, 2027, referenceNowIso);
 }
 
 export function grantComplimentaryAccess(

@@ -26,7 +26,7 @@ export type AppSettings = {
   hardcoverPriceKobo: number;
   hardcoverAvailability: "available" | "preorder" | "out_of_stock";
   hardcoverNote: string;
-  printedBookStockCount: number;
+  printedBookStockCount: number | null;
   deliveryPricingMode: "quotation_required" | "fixed_fee";
   defaultDeliveryFeeKobo: number | null;
   deliveryPolicyNote: string;
@@ -87,11 +87,14 @@ export function getAppSettings(store: Store): AppSettings {
         ? map.hardcoverAvailability
         : "available",
     hardcoverNote: map.hardcoverNote,
-    printedBookStockCount:
-      map.printedBookStockCount !== undefined &&
-      map.printedBookStockCount !== ""
-        ? Math.max(0, Number(map.printedBookStockCount) || 0)
-        : 500,
+    printedBookStockCount: (() => {
+      const raw = map.printedBookStockCount;
+      if (raw === undefined || raw === null || String(raw).trim() === "") {
+        return null;
+      }
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : null;
+    })(),
     deliveryPricingMode:
       map.deliveryPricingMode === "fixed_fee"
         ? "fixed_fee"

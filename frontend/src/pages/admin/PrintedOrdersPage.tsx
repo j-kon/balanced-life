@@ -64,11 +64,13 @@ export function PrintedOrdersPage({
           const defaultFeeRaw = String(
             f.get("defaultDeliveryFeeNgn") || "",
           ).trim();
+          const stockRaw = String(f.get("stockCount") || "").trim();
           save(
             "/admin/settings",
             {
               hardcoverPriceKobo: Math.round(Number(f.get("price")) * 100),
-              printedBookStockCount: Number(f.get("stockCount") || 0),
+              printedBookStockCount:
+                stockRaw === "" ? null : Math.max(0, Number(stockRaw)),
               hardcoverAvailability: f.get("availability"),
               deliveryPricingMode: f.get("deliveryPricingMode"),
               defaultDeliveryFeeKobo:
@@ -96,14 +98,14 @@ export function PrintedOrdersPage({
             />
           </label>
           <label>
-            Printed book inventory / stock count
+            Owner-confirmed printed stock inventory (leave blank if unconfigured)
             <input
               name="stockCount"
               type="number"
               min={0}
               max={1000000}
-              defaultValue={data.settings.printedBookStockCount ?? 500}
-              required
+              defaultValue={data.settings.printedBookStockCount ?? ""}
+              placeholder="Unconfigured — enter confirmed stock count"
             />
           </label>
         </div>

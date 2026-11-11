@@ -34,13 +34,15 @@ export const defaultConfig: AppConfig = {
     contactAddress: "Lagos, Nigeria",
     hardcoverPriceKobo: 500000,
     hardcoverAvailability: "available",
+    printedBookStockCount: null,
     hardcoverNote:
       "Printed copies of The Balanced Life Devotional (₦5,000) are available for individual readers, parents, schools, churches, and youth organizations.",
     digitalEditionPriceKobo: 350000,
+    digitalAccessDurationMonths: 12,
     digitalEditionAvailability: "available",
     digitalEditionScope: "edition_2027",
     digitalEditionNote:
-      "A one-time Digital Copy purchase (₦3,500) grants persistent online reading access to the 2027 edition of The Balanced Life Devotional inside your reader account.",
+      "One payment of ₦3,500 grants 12 calendar months of online reading access to the 2027 edition of The Balanced Life Devotional (starting January 1, 2027 for early purchases, or from payment verification thereafter). Manual renewal is supported with no automatic recurring charge.",
     bulkDiscountNote:
       "Special bulk arrangements are available for schools, churches, youth groups, and organizations.",
     bankTransferEnabled: false,

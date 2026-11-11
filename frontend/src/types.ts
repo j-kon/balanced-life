@@ -92,7 +92,7 @@ export type AppSettings = {
   hardcoverPriceKobo: number;
   hardcoverAvailability: "available" | "preorder" | "out_of_stock";
   hardcoverNote: string;
-  printedBookStockCount?: number;
+  printedBookStockCount?: number | null;
   deliveryPricingMode?: "quotation_required" | "fixed_fee";
   defaultDeliveryFeeKobo?: number | null;
   deliveryPolicyNote?: string;
@@ -143,7 +143,7 @@ export type SubscriptionDetails = {
   planAmountKobo: number;
   accessType: "paid" | "complimentary";
   status: "active" | "cancelled" | "expired" | "revoked";
-  effectiveStatus: "active" | "cancelling" | "expired" | "revoked";
+  effectiveStatus: "active" | "scheduled" | "cancelling" | "expired" | "revoked";
   active: boolean;
   startedAt: string;
   expiresAt: string;
@@ -184,7 +184,14 @@ export type DigitalEntitlementRecord = {
   editionYear: number;
   accessType?: "paid" | "complimentary";
   accessScope: "edition_2027" | "includes_membership_updates";
-  status: "active" | "expired" | "revoked" | "refunded";
+  status: "scheduled" | "active" | "expired" | "revoked" | "refunded";
+  effectiveStatus?:
+    | "scheduled"
+    | "active"
+    | "expiring_soon"
+    | "expired"
+    | "revoked"
+    | "refunded";
   startsAt?: string;
   expiresAt?: string | null;
   durationMonths?: number;
@@ -225,7 +232,7 @@ export type DigitalPurchaseRecord = {
     | "revoked";
   accessScope?: "edition_2027" | "includes_membership_updates";
   entitlementStatus?: string;
-  accessStatus?: "active" | "pending" | "expired" | "refunded" | "revoked" | "failed" | "none";
+  accessStatus?: "scheduled" | "active" | "pending" | "expired" | "refunded" | "revoked" | "failed" | "none";
   startsAt?: string | null;
   expiresAt?: string | null;
   daysRemaining?: number | null;
@@ -311,6 +318,8 @@ export type PrintedOrderRecord = {
   createdAt: string;
   updatedAt: string;
   items?: PrintedOrderItemRecord[];
+  orderAccessToken?: string;
+  orderAccessTokenExpiresAt?: string;
 };
 
 export type BulkOrderRecord = {

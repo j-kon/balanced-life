@@ -511,7 +511,7 @@ export function registerReaderRoutes(
     const entitlement = getUserDigitalEntitlement(store, user.id, 2027);
     return {
       entitlement,
-      active: Boolean(entitlement && entitlement.status === "active"),
+      active: Boolean(entitlement && entitlement.active),
       purchases: getUserDigitalPurchases(store, user.id),
       product: {
         editionYear: 2027,

@@ -156,7 +156,7 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   digitalAccessDurationMonths: "12",
   digitalEditionNote:
     "One payment of ₦3,500 grants 12 calendar months of online reading access to the 2027 edition of The Balanced Life Devotional (starting January 1, 2027 for early purchases, or from payment verification thereafter). Manual 12-month renewal is supported with no automatic recurring charges.",
-  printedBookStockCount: "500",
+  printedBookStockCount: "",
   deliveryPricingMode: "quotation_required",
   defaultDeliveryFeeKobo: "",
   deliveryPolicyNote:

@@ -10,6 +10,7 @@ import {
   bulkOrderCreateSchema,
   idOf,
   inquiryCreateSchema,
+  printedOrderAccessRequestSchema,
   printedOrderCreateSchema,
   printedOrderLookupSchema,
   printedOrderPayInitiateSchema,
@@ -25,8 +26,9 @@ import {
   approvePrintedOrderQuoteCustomer,
   createBulkOrder,
   createPrintedOrder,
-  getPrintedOrderById,
   initiatePrintedOrderPayment,
+  issuePrintedOrderAccessToken,
+  lookupPrintedOrderAuthorized,
   verifyAndActivateDigitalPurchase,
   verifyPrintedOrderPayment,
 } from "../services/commerce.js";
@@ -315,21 +317,74 @@ export function registerPublicRoutes(
     },
   );
 
-  app.get(prefix + "/printed-orders/lookup", async (req) => {
-    const input = printedOrderLookupSchema.parse(req.query || {});
-    const row = db
-      .select({ id: s.printedOrders.id, email: s.printedOrders.email })
-      .from(s.printedOrders)
-      .where(eq(s.printedOrders.orderNumber, input.orderNumber.toUpperCase()))
-      .get();
-    if (!row || row.email.toLowerCase() !== input.email.toLowerCase()) {
-      throw new HttpError(
-        404,
-        "No printed book order matched that order number and email address.",
-      );
-    }
-    return getPrintedOrderById(store, row.id);
-  });
+  app.get(
+    prefix + "/printed-orders/lookup",
+    { config: { rateLimit: { max: 30, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = printedOrderLookupSchema.parse(req.query || {});
+      const headerToken =
+        (req.headers["x-order-token"] as string | undefined) ||
+        (req.headers["x-order-access-token"] as string | undefined) ||
+        null;
+      return lookupPrintedOrderAuthorized(store, input.orderNumber, {
+        user: req.user,
+        token: input.token || headerToken,
+      });
+    },
+  );
+
+  app.post(
+    prefix + "/printed-orders/request-access",
+    { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = printedOrderAccessRequestSchema.parse(req.body || {});
+      if (!emailService.configured || !emailService.sendOrderAccessLink) {
+        throw new HttpError(
+          503,
+          "Automated order-access link delivery is not configured in this environment. Set EMAIL_WEBHOOK_URL to enable email links, or sign in with the purchasing account / contact Cossy Teens Consult Enterprises.",
+        );
+      }
+
+      const row = db
+        .select({
+          id: s.printedOrders.id,
+          orderNumber: s.printedOrders.orderNumber,
+          fullName: s.printedOrders.fullName,
+          email: s.printedOrders.email,
+        })
+        .from(s.printedOrders)
+        .where(
+          eq(
+            s.printedOrders.orderNumber,
+            input.orderNumber.trim().toUpperCase(),
+          ),
+        )
+        .get();
+
+      if (row && row.email.toLowerCase() === input.email.toLowerCase()) {
+        const expiresInMinutes = 60;
+        const issued = issuePrintedOrderAccessToken(
+          store,
+          row.id,
+          expiresInMinutes,
+        );
+        const accessUrl = `${appOrigin}/bookstore?order=${encodeURIComponent(row.orderNumber)}&token=${encodeURIComponent(issued.token)}`;
+        await emailService.sendOrderAccessLink({
+          to: row.email,
+          name: row.fullName,
+          orderNumber: row.orderNumber,
+          accessUrl,
+          expiresInMinutes,
+        });
+      }
+
+      return {
+        ok: true,
+        message:
+          "If a printed book order matches that order number and email address, an expiring access link has been sent.",
+      };
+    },
+  );
 
   app.post(
     prefix + "/printed-orders/:id/approve-quote",
@@ -337,9 +392,13 @@ export function registerPublicRoutes(
     async (req) => {
       const orderId = idOf(req);
       const input = printedOrderQuoteApproveSchema.parse(req.body || {});
+      const headerToken =
+        (req.headers["x-order-token"] as string | undefined) ||
+        (req.headers["x-order-access-token"] as string | undefined) ||
+        null;
       return approvePrintedOrderQuoteCustomer(store, orderId, {
-        userId: req.user?.id,
-        email: input.email || req.user?.email,
+        user: req.user,
+        token: input.orderAccessToken || input.token || headerToken,
       });
     },
   );
@@ -350,16 +409,20 @@ export function registerPublicRoutes(
     async (req) => {
       const orderId = idOf(req);
       const input = printedOrderPayInitiateSchema.parse(req.body || {});
+      const headerToken =
+        (req.headers["x-order-token"] as string | undefined) ||
+        (req.headers["x-order-access-token"] as string | undefined) ||
+        null;
       return initiatePrintedOrderPayment(
         store,
         orderId,
-        {
-          ...input,
-          email: input.email || req.user?.email,
-        },
+        input,
         paymentProvider,
         appOrigin,
-        req.user?.id ?? null,
+        {
+          user: req.user,
+          token: input.orderAccessToken || input.token || headerToken,
+        },
       );
     },
   );
@@ -368,8 +431,17 @@ export function registerPublicRoutes(
     prefix + "/printed-orders/verify",
     { config: { rateLimit: { max: 30, timeWindow: "15 minutes" } } },
     async (req) => {
-      const { reference } = printedOrderVerifySchema.parse(req.body);
-      return verifyPrintedOrderPayment(store, reference, paymentProvider);
+      const { reference, token, orderAccessToken } =
+        printedOrderVerifySchema.parse(req.body);
+      const headerToken =
+        (req.headers["x-order-token"] as string | undefined) ||
+        (req.headers["x-order-access-token"] as string | undefined) ||
+        null;
+      return verifyPrintedOrderPayment(store, reference, paymentProvider, {
+        user: req.user,
+        token: orderAccessToken || token || headerToken,
+        isWebhook: false,
+      });
     },
   );
 
@@ -414,7 +486,9 @@ export function registerPublicRoutes(
         .where(eq(s.printedOrders.paymentReference, reference))
         .get();
       if (printedOrder) {
-        await verifyPrintedOrderPayment(store, reference, paymentProvider);
+        await verifyPrintedOrderPayment(store, reference, paymentProvider, {
+          isWebhook: true,
+        });
         return { received: true, processed: true, kind: "printed_order" };
       }
 
