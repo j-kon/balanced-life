@@ -1,0 +1,75 @@
+name: CI Verification
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  verify:
+    name: Lint, Build, Test, E2E & Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies cleanly
+        run: npm ci
+
+      - name: Run root and workspace linters
+        run: |
+          npx eslint .
+          npm run lint
+
+      - name: Verify production builds across frontend, admin, and backend
+        run: npm run build
+
+      - name: Run backend security, commerce, RBAC, MFA & migration tests
+        env:
+          NODE_ENV: test
+          ADMIN_MFA_ENCRYPTION_KEY: ci-ephemeral-test-mfa-encryption-key-32bytes
+        run: npm test
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Install Playwright Chromium for isolated browser E2E
+        run: npx playwright install --with-deps chromium
+
+      - name: Run isolated Playwright E2E suite across public, reader & admin portals
+        env:
+          CI: "true"
+          DATABASE_PATH: /tmp/balanced-ci-e2e/devotional.sqlite
+          ADMIN_MFA_ENCRYPTION_KEY: ci-ephemeral-e2e-mfa-encryption-key-32b
+          APP_ORIGIN: http://127.0.0.1:5173
+          ADMIN_ORIGIN: http://127.0.0.1:5174
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/balanced-ci-e2e
+          npm run db:migrate
+          npm run dev > /tmp/balanced-ci-e2e/dev.log 2>&1 &
+          DEV_PID=$!
+          cleanup() {
+            kill "$DEV_PID" 2>/dev/null || true
+            rm -rf /tmp/balanced-ci-e2e
+          }
+          trap cleanup EXIT
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:4000/api/v1/health >/dev/null \
+              && curl -fsS http://127.0.0.1:5173/ >/dev/null \
+              && curl -fsS http://127.0.0.1:5174/ >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4000/api/v1/health >/dev/null
+          npm run test:e2e
+

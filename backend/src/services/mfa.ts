@@ -81,6 +81,13 @@ function resolveEncryptionKey(
   return key;
 }
 
+export function assertMfaConfiguration(
+  configuredKey: string | undefined,
+  isProduction: boolean,
+): void {
+  resolveEncryptionKey(configuredKey, isProduction);
+}
+
 export function encryptMfaSecret(
   secretBase32: string,
   configuredKey: string | undefined,

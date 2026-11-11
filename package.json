@@ -13,6 +13,8 @@
     "test": "npm run test -w backend",
     "lint": "npm run lint --workspaces",
     "db:migrate": "npm run db:migrate -w backend",
+    "db:backup": "npm run db:backup -w backend --",
+    "db:restore-verify": "npm run db:restore-verify -w backend --",
     "admin:create": "npm run admin:create -w backend --",
     "import:manuscript": "npm run import:manuscript -w backend --",
     "notifications:run": "npm run notifications:run -w backend --",

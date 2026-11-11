@@ -24,7 +24,11 @@ import {
   ForgotPasswordPage,
   ResetPasswordPage,
 } from "./pages/public/AuthPages";
-import { PrivacyPage, TermsPage } from "./pages/public/LegalPages";
+import {
+  InstallPage,
+  PrivacyPage,
+  TermsPage,
+} from "./pages/public/LegalPages";
 import { DashboardPage } from "./pages/reader/DashboardPage";
 import { LibraryPage } from "./pages/reader/LibraryPage";
 import { ReadingPage, SamplePage } from "./pages/reader/ReadingPage";
@@ -110,6 +114,7 @@ export default function App() {
             <Route path="/bookstore" element={<BookstorePage />} />
             <Route path="/bulk-orders" element={<Navigate to="/contact" replace />} />
             <Route path="/contact" element={<ContactPage />} />
+            <Route path="/install" element={<InstallPage />} />
             <Route path="/privacy" element={<PrivacyPage />} />
             <Route path="/terms" element={<TermsPage />} />
             <Route path="/login" element={<AuthPage />} />

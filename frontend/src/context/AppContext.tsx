@@ -46,29 +46,7 @@ export const defaultConfig: AppConfig = {
     bulkDiscountNote:
       "Special bulk arrangements are available for schools, churches, youth groups, and organizations.",
     bankTransferEnabled: false,
-    bankAccounts: [
-      {
-        currency: "NGN",
-        label: "Naira Account",
-        bankName: "Access Bank",
-        accountName: "Cossy Teens Consult Enterprises",
-        accountNumber: "1996043204",
-      },
-      {
-        currency: "USD",
-        label: "USD Account",
-        bankName: "Access Bank",
-        accountName: "Cossy Teens Consult",
-        accountNumber: "2002256283",
-      },
-      {
-        currency: "GBP",
-        label: "GBP Account",
-        bankName: "Access Bank",
-        accountName: "Cossy Teens Consult",
-        accountNumber: "2002391667",
-      },
-    ],
+    bankAccounts: [],
     allowRegistration: true,
     enableAutoRenewal: true,
     renewalReminderDays: 7,

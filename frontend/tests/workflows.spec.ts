@@ -38,10 +38,13 @@ function generateTestTotp(secretBase32: string) {
   return String(binary % 1_000_000).padStart(6, "0");
 }
 
-const dbPath = path.resolve(
-  import.meta.dirname,
-  "../../backend/data/devotional.sqlite",
-);
+const backendDir = path.resolve(import.meta.dirname, "../../backend");
+const configuredDbPath = process.env.DATABASE_PATH?.trim();
+const dbPath = configuredDbPath
+  ? path.isAbsolute(configuredDbPath)
+    ? configuredDbPath
+    : path.resolve(backendDir, configuredDbPath)
+  : path.resolve(backendDir, "data/devotional.sqlite");
 
 const ADMIN_URL = "http://127.0.0.1:5174";
 const adminEmail = "admin-e2e@cossyteens.org";
@@ -215,6 +218,11 @@ test.describe("End-to-End Production Workflows", () => {
     await page.goto("/terms");
     await expect(
       page.getByRole("heading", { name: /Terms of Use/i }),
+    ).toBeVisible();
+
+    await page.goto("/install");
+    await expect(
+      page.getByRole("heading", { name: /Install .* on Your Phone/i }),
     ).toBeVisible();
 
     await page.goto("/forgot-password");

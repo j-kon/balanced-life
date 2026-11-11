@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+import { Bell, BookOpen, Shield, Smartphone } from "lucide-react";
 import { useApp } from "../../context/AppContext";
 import { money } from "../../api";
 
@@ -124,6 +126,90 @@ export function TermsPage() {
         <strong>{config.settings.contactEmail}</strong> or{" "}
         <strong>{config.settings.contactPhone}</strong>.
       </p>
+    </div>
+  );
+}
+
+export function InstallPage() {
+  const { config, user } = useApp();
+  return (
+    <div className="container section narrow install-guide-page">
+      <span className="eyebrow">Mobile App &amp; Daily Reminders</span>
+      <h1>Install {config.settings.siteTitle} on Your Phone</h1>
+      <p className="lead">
+        Add {config.settings.siteTitle} to your home screen for one-tap daily
+        reading, 5-step accountability journaling, and daily reminder
+        notifications on Android or iPhone.
+      </p>
+      <hr />
+      <div className="panel stack">
+        <div className="section-title" style={{ margin: 0 }}>
+          <h2>
+            <Smartphone size={20} /> Android (Chrome or Edge)
+          </h2>
+        </div>
+        <ol className="stack">
+          <li>
+            Open <strong>{config.settings.contactWebsite}</strong> in Chrome or
+            Edge on your Android phone.
+          </li>
+          <li>
+            Tap the install prompt banner when offered, or open the browser
+            menu (<strong>&#8942;</strong>) in the top corner.
+          </li>
+          <li>
+            Tap <strong>Install app</strong> or{" "}
+            <strong>Add to Home screen</strong> and confirm.
+          </li>
+        </ol>
+      </div>
+
+      <div className="panel stack" style={{ marginTop: "20px" }}>
+        <div className="section-title" style={{ margin: 0 }}>
+          <h2>
+            <BookOpen size={20} /> iPhone &amp; iPad (Safari, iOS 16.4+)
+          </h2>
+        </div>
+        <ol className="stack">
+          <li>
+            Open <strong>{config.settings.contactWebsite}</strong> in Safari
+            (required by Apple for Home Screen installation and push alerts).
+          </li>
+          <li>
+            Tap the <strong>Share</strong> icon in Safari&apos;s toolbar.
+          </li>
+          <li>
+            Scroll down and tap <strong>Add to Home Screen</strong>, then tap{" "}
+            <strong>Add</strong>.
+          </li>
+          <li>
+            Launch the app directly from the Home Screen icon before enabling
+            push reminders.
+          </li>
+        </ol>
+      </div>
+
+      <div className="panel stack" style={{ marginTop: "20px" }}>
+        <div className="section-title" style={{ margin: 0 }}>
+          <h2>
+            <Shield size={20} /> Offline &amp; Privacy Guarantee
+          </h2>
+        </div>
+        <p style={{ margin: 0 }}>
+          The installed app caches only public visual assets. Your private
+          Growth Journal entries, paid devotional chapters, and account details
+          stay strictly protected inside authenticated requests over HTTPS.
+        </p>
+        <div className="actions">
+          <Link className="button" to={user ? "/account" : "/login"}>
+            <Bell size={16} />{" "}
+            {user ? "Configure reminders in Account" : "Sign in for reminders"}
+          </Link>
+          <Link className="button outline" to="/library">
+            Open devotional library
+          </Link>
+        </div>
+      </div>
     </div>
   );
 }

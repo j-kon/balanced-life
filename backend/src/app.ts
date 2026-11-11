@@ -29,6 +29,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerReaderRoutes } from "./routes/reader.js";
 import { registerAdminAuthRoutes } from "./routes/adminAuth.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { assertMfaConfiguration } from "./services/mfa.js";
 
 export type BuildAppOptions = {
   databasePath?: string;
@@ -42,6 +43,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   const env = getEnvConfig();
   const environment = options.environment || env.environment;
   const isProduction = environment === "production";
+
+  if (isProduction) {
+    assertMfaConfiguration(env.adminMfaEncryptionKey, true);
+    if (!process.env.APP_ORIGIN?.trim() || !process.env.ADMIN_ORIGIN?.trim()) {
+      throw new Error(
+        "APP_ORIGIN and ADMIN_ORIGIN must be explicitly configured when NODE_ENV=production.",
+      );
+    }
+  }
 
   const store = openDatabase(options.databasePath);
   const { db, sqlite } = store;
@@ -76,7 +86,24 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
 
   await app.register(cookie);
-  await app.register(helmet, { contentSecurityPolicy: false });
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        connectSrc: ["'self'"],
+        manifestSrc: ["'self'"],
+        workerSrc: ["'self'"],
+        upgradeInsecureRequests: isProduction ? [] : null,
+      },
+    },
+  });
   await app.register(rateLimit, { max: 400, timeWindow: "1 minute" });
   app.decorateRequest("user", null);
   app.decorateRequest("admin", null);
@@ -101,16 +128,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
     },
   );
 
-  const publicOrigins = new Set([
-    env.appOrigin,
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-  ]);
-  const adminOrigins = new Set([
-    env.adminOrigin,
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-  ]);
+  const publicOrigins = new Set(
+    isProduction
+      ? [env.appOrigin]
+      : [env.appOrigin, "http://localhost:5173", "http://127.0.0.1:5173"],
+  );
+  const adminOrigins = new Set(
+    isProduction
+      ? [env.adminOrigin]
+      : [env.adminOrigin, "http://localhost:5174", "http://127.0.0.1:5174"],
+  );
 
   app.addHook("onRequest", async (req, reply) => {
     reply.header("Cache-Control", "no-store");

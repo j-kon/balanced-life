@@ -6,6 +6,8 @@
     "dev": "node --import tsx --watch src/server.ts",
     "build": "tsc",
     "db:migrate": "node --import tsx scripts/migrate.ts",
+    "db:backup": "node --import tsx scripts/backup-db.ts",
+    "db:restore-verify": "node --import tsx scripts/backup-db.ts --verify",
     "admin:create": "node --import tsx scripts/create-admin.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "lint": "tsc --noEmit && eslint src tests scripts",

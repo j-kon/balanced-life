@@ -2670,3 +2670,122 @@ test("Migration 0008 safely preserves historical admin audit logs and revokes/de
   }
 });
 
+test("Production hardening: fail-fast ADMIN_MFA_ENCRYPTION_KEY and origin validation, strict CSP header, production origin isolation, and WAL-safe SQLite online backup", async () => {
+  const prevKey = process.env.ADMIN_MFA_ENCRYPTION_KEY;
+  const prevAppOrigin = process.env.APP_ORIGIN;
+  const prevAdminOrigin = process.env.ADMIN_ORIGIN;
+  try {
+    process.env.APP_ORIGIN = "https://cossyteens.com";
+    process.env.ADMIN_ORIGIN = "https://admin.cossyteens.com";
+
+    // 1. Production boot fails fast when ADMIN_MFA_ENCRYPTION_KEY is missing or weak
+    delete process.env.ADMIN_MFA_ENCRYPTION_KEY;
+    await assert.rejects(
+      () => buildApp({ databasePath: ":memory:", environment: "production" }),
+      /ADMIN_MFA_ENCRYPTION_KEY is required/i,
+    );
+    process.env.ADMIN_MFA_ENCRYPTION_KEY = "short";
+    await assert.rejects(
+      () => buildApp({ databasePath: ":memory:", environment: "production" }),
+      /at least 16 characters/i,
+    );
+
+    // Production boot fails fast if APP_ORIGIN / ADMIN_ORIGIN are omitted
+    process.env.ADMIN_MFA_ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    delete process.env.ADMIN_ORIGIN;
+    await assert.rejects(
+      () => buildApp({ databasePath: ":memory:", environment: "production" }),
+      /APP_ORIGIN and ADMIN_ORIGIN must be explicitly configured/i,
+    );
+
+    // 2. Valid production env boots cleanly, emits strict CSP, and blocks localhost / cross-portal origins
+    process.env.ADMIN_ORIGIN = "https://admin.cossyteens.com";
+    const prodApp = await buildApp({
+      databasePath: ":memory:",
+      environment: "production",
+    });
+    try {
+      const healthRes = await prodApp.inject({
+        method: "GET",
+        url: "/api/v1/health",
+      });
+      assert.equal(healthRes.statusCode, 200);
+      const csp = String(healthRes.headers["content-security-policy"] || "");
+      assert.match(csp, /default-src 'self'/);
+      assert.match(csp, /frame-ancestors 'none'/);
+      assert.match(csp, /object-src 'none'/);
+      assert.match(csp, /script-src 'self'/);
+      assert.match(csp, /upgrade-insecure-requests/);
+
+      // Localhost and reader-portal origins are blocked on admin routes in production mode
+      const devOriginRejected = await prodApp.inject({
+        method: "POST",
+        url: "/api/v1/admin/auth/login",
+        headers: {
+          "x-requested-with": "BalancedLifeAdmin",
+          origin: "http://localhost:5174",
+        },
+        payload: { email: "missing@cossyteens.com", password: "invalid" },
+      });
+      assert.equal(devOriginRejected.statusCode, 403);
+
+      const readerOriginOnAdmin = await prodApp.inject({
+        method: "POST",
+        url: "/api/v1/admin/auth/login",
+        headers: {
+          "x-requested-with": "BalancedLifeAdmin",
+          origin: "https://cossyteens.com",
+        },
+        payload: { email: "missing@cossyteens.com", password: "invalid" },
+      });
+      assert.equal(readerOriginOnAdmin.statusCode, 403);
+
+      const adminOriginOnReader = await prodApp.inject({
+        method: "POST",
+        url: "/api/v1/auth/login",
+        headers: {
+          "x-requested-with": "BalancedLife",
+          origin: "https://admin.cossyteens.com",
+        },
+        payload: { email: "missing@example.com", password: "invalid" },
+      });
+      assert.equal(adminOriginOnReader.statusCode, 403);
+    } finally {
+      await prodApp.close();
+    }
+  } finally {
+    if (prevKey === undefined) delete process.env.ADMIN_MFA_ENCRYPTION_KEY;
+    else process.env.ADMIN_MFA_ENCRYPTION_KEY = prevKey;
+    if (prevAppOrigin === undefined) delete process.env.APP_ORIGIN;
+    else process.env.APP_ORIGIN = prevAppOrigin;
+    if (prevAdminOrigin === undefined) delete process.env.ADMIN_ORIGIN;
+    else process.env.ADMIN_ORIGIN = prevAdminOrigin;
+  }
+
+  // 3. WAL-safe SQLite online .backup() captures WAL writes and passes integrity + FK restoration checks
+  const backupFolder = mkdtempSync(join(tmpdir(), "balanced-wal-backup-"));
+  const backupPath = join(backupFolder, "snapshot.sqlite");
+  try {
+    const live = openDatabase(databasePath);
+    await live.sqlite.backup(backupPath);
+    live.sqlite.close();
+
+    const verifyDb = new Database(backupPath, { readonly: true });
+    assert.equal(verifyDb.pragma("integrity_check", { simple: true }), "ok");
+    assert.equal(
+      (verifyDb.pragma("foreign_key_check") as unknown[]).length,
+      0,
+    );
+    const adminCount = (
+      verifyDb.prepare("SELECT count(*) AS n FROM admin_users").get() as {
+        n: number;
+      }
+    ).n;
+    assert.ok(adminCount >= 1);
+    verifyDb.close();
+  } finally {
+    rmSync(backupFolder, { recursive: true, force: true });
+  }
+});
+
