@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { ArrowRight, CheckCircle2, ShoppingBag } from "lucide-react";
+import { ArrowRight, CheckCircle2, CreditCard, ShoppingBag } from "lucide-react";
 import { useApp } from "../../context/AppContext";
 import { useData } from "../../hooks/useData";
-import { ErrorBox, Loading } from "../../components/Common";
+import { Empty, ErrorBox, Loading } from "../../components/Common";
 import { api, money } from "../../api";
 import type {
   SubscriptionDetails,
@@ -282,61 +282,83 @@ export function SubscriptionPage() {
               </table>
             </div>
           ) : (
-            <p className="muted">
-              Your online reading payments will appear here.
-            </p>
+            <Empty
+              compact
+              icon={<CreditCard size={24} />}
+              title="No digital access purchases yet"
+              action={
+                <Link className="button outline small" to="/digital-edition">
+                  Get 2027 Online Access ({money(config.settings.digitalEditionPriceKobo)})
+                </Link>
+              }
+            >
+              When you unlock 12-month online reading or submit a bank transfer
+              reference, your payment history will appear here.
+            </Empty>
           )}
 
+          <h2 id="orders">Your Printed Book Orders</h2>
           {legacy.data.printedOrders &&
-            legacy.data.printedOrders.length > 0 && (
-              <>
-                <h2>Your Printed Book Orders</h2>
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Order #</th>
-                        <th>Date</th>
-                        <th>Copies</th>
-                        <th>Total</th>
-                        <th>Payment</th>
-                        <th>Fulfillment</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {legacy.data.printedOrders.map((po) => (
-                        <tr key={po.id}>
-                          <td>
-                            <Link to="/bookstore">
-                              <strong>{po.orderNumber}</strong>
-                            </Link>
-                          </td>
-                          <td>
-                            {new Date(po.createdAt).toLocaleDateString("en-GB")}
-                          </td>
-                          <td>{po.quantity}</td>
-                          <td>
-                            {po.finalTotalKobo !== null
-                              ? money(po.finalTotalKobo)
-                              : `${money(po.subtotalKobo)} + delivery`}
-                          </td>
-                          <td>
-                            <span className="pill">
-                              {po.paymentStatus.replace(/_/g, " ")}
-                            </span>
-                          </td>
-                          <td>
-                            <span className="pill">
-                              {po.fulfillmentStatus.replace(/_/g, " ")}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
+          legacy.data.printedOrders.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Order #</th>
+                    <th>Date</th>
+                    <th>Copies</th>
+                    <th>Total</th>
+                    <th>Payment</th>
+                    <th>Fulfillment</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {legacy.data.printedOrders.map((po) => (
+                    <tr key={po.id}>
+                      <td>
+                        <Link to="/bookstore">
+                          <strong>{po.orderNumber}</strong>
+                        </Link>
+                      </td>
+                      <td>
+                        {new Date(po.createdAt).toLocaleDateString("en-GB")}
+                      </td>
+                      <td>{po.quantity}</td>
+                      <td>
+                        {po.finalTotalKobo !== null
+                          ? money(po.finalTotalKobo)
+                          : `${money(po.subtotalKobo)} + delivery`}
+                      </td>
+                      <td>
+                        <span className="pill">
+                          {po.paymentStatus.replace(/_/g, " ")}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="pill">
+                          {po.fulfillmentStatus.replace(/_/g, " ")}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty
+              compact
+              icon={<ShoppingBag size={24} />}
+              title="No printed book orders yet"
+              action={
+                <Link className="button outline small" to="/bookstore">
+                  Order Printed Book ({money(config.settings.hardcoverPriceKobo)})
+                </Link>
+              }
+            >
+              Order physical hardcover copies anytime and manage delivery
+              quotes and status updates here.
+            </Empty>
+          )}
 
           {legacy.data.payments.length > 0 && (
             <details className="panel">

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { CheckCircle2, ChevronRight, X } from "lucide-react";
 import { api } from "./api";
@@ -7,11 +7,16 @@ import {
   AppContext,
   defaultConfig,
   defaultGuestAccess,
+  useApp,
 } from "./context/AppContext";
 import { ThemeProvider } from "./context/ThemeContext";
+import {
+  useIsCompactViewport,
+  useIsStandalonePwa,
+} from "./hooks/useViewport";
 import { ErrorBox, Loading } from "./components/Common";
-import { Footer, Header } from "./layouts/PublicLayout";
-import { Protected, ReaderShell } from "./layouts/ReaderLayout";
+import { PublicLayout } from "./layouts/PublicLayout";
+import { Protected, ReaderLayout } from "./layouts/ReaderLayout";
 import { HomePage } from "./pages/public/HomePage";
 import {
   AboutAuthorPage,
@@ -43,11 +48,38 @@ import { AccountPage } from "./pages/reader/AccountPage";
 import { NotificationsCenterPage } from "./pages/reader/NotificationsPage";
 
 function RouteScroll() {
-  const { pathname } = useLocation();
+  const { pathname, hash } = useLocation();
   useEffect(() => {
+    if (hash) {
+      const target = document.getElementById(hash.slice(1));
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+    }
     window.scrollTo(0, 0);
-  }, [pathname]);
+  }, [pathname, hash]);
   return null;
+}
+
+/**
+ * Keeps authenticated mobile & standalone PWA readers inside the app shell when they open
+ * commerce, installation, support, or legal screens from the More menu, while preserving
+ * normal PublicLayout for logged-out visitors and desktop browsing.
+ */
+function ContextualAppOrPublicPage({ children }: { children: ReactNode }) {
+  const { user } = useApp();
+  const isStandalone = useIsStandalonePwa();
+  const isCompact = useIsCompactViewport();
+
+  if (user && (isStandalone || isCompact)) {
+    return (
+      <ReaderLayout>
+        <div className="reader-embedded-page">{children}</div>
+      </ReaderLayout>
+    );
+  }
+  return <PublicLayout>{children}</PublicLayout>;
 }
 
 export default function App() {
@@ -58,6 +90,7 @@ export default function App() {
   const [startupError, setStartupError] = useState("");
   const [config, setConfig] = useState<AppConfig>(defaultConfig);
   const [message, setMessage] = useState("");
+  const [toastPaused, setToastPaused] = useState(false);
 
   const refresh = async () => {
     const u = await api<{
@@ -83,11 +116,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (message) {
-      const timer = setTimeout(() => setMessage(""), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [message]);
+    if (!message || toastPaused) return;
+    const timer = setTimeout(() => setMessage(""), 5000);
+    return () => clearTimeout(timer);
+  }, [message, toastPaused]);
 
   return (
     <ThemeProvider>
@@ -102,58 +134,183 @@ export default function App() {
           toast: setMessage,
         }}
       >
-      <RouteScroll />
-      <Header />
-      <main id="main">
+        <RouteScroll />
         {startupError ? (
-          <div className="container section">
-            <ErrorBox
-              message={
-                "Cannot connect to the API server. Ensure npm run dev is running and reload. " +
-                startupError
-              }
-            />
-            <button
-              className="button"
-              onClick={() => window.location.reload()}
-            >
-              Try again
-            </button>
-          </div>
+          <PublicLayout>
+            <div className="container section">
+              <ErrorBox
+                message={
+                  "Cannot connect to the API server. Ensure npm run dev is running and reload. " +
+                  startupError
+                }
+              />
+              <button
+                className="button"
+                onClick={() => window.location.reload()}
+              >
+                Try again
+              </button>
+            </div>
+          </PublicLayout>
         ) : !ready ? (
-          <div className="container section">
-            <Loading />
-          </div>
+          <PublicLayout>
+            <div className="container section">
+              <Loading />
+            </div>
+          </PublicLayout>
         ) : (
           <Routes>
-            <Route path="/" element={<HomePage />} />
-            <Route path="/about" element={<AboutDevotionalPage />} />
-            <Route path="/about-author" element={<AboutAuthorPage />} />
-            <Route path="/themes" element={<ThemesPage />} />
-            <Route path="/pricing" element={<PricingPage />} />
-            <Route path="/digital-edition" element={<DigitalEditionPage />} />
-            <Route path="/bookstore" element={<BookstorePage />} />
-            <Route path="/bulk-orders" element={<Navigate to="/contact" replace />} />
-            <Route path="/contact" element={<ContactPage />} />
-            <Route path="/install" element={<InstallPage />} />
-            <Route path="/privacy" element={<PrivacyPage />} />
-            <Route path="/terms" element={<TermsPage />} />
-            <Route path="/login" element={<AuthPage />} />
-            <Route path="/register" element={<AuthPage register />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-            <Route path="/sample" element={<SamplePage />} />
+            <Route
+              path="/"
+              element={
+                <PublicLayout>
+                  <HomePage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/about"
+              element={
+                <PublicLayout>
+                  <AboutDevotionalPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/about-author"
+              element={
+                <PublicLayout>
+                  <AboutAuthorPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/themes"
+              element={
+                <PublicLayout>
+                  <ThemesPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/pricing"
+              element={
+                <PublicLayout>
+                  <PricingPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/digital-edition"
+              element={
+                <ContextualAppOrPublicPage>
+                  <DigitalEditionPage />
+                </ContextualAppOrPublicPage>
+              }
+            />
+            <Route
+              path="/bookstore"
+              element={
+                <ContextualAppOrPublicPage>
+                  <BookstorePage />
+                </ContextualAppOrPublicPage>
+              }
+            />
+            <Route
+              path="/bulk-orders"
+              element={<Navigate to="/contact" replace />}
+            />
+            <Route
+              path="/contact"
+              element={
+                <ContextualAppOrPublicPage>
+                  <ContactPage />
+                </ContextualAppOrPublicPage>
+              }
+            />
+            <Route
+              path="/install"
+              element={
+                <ContextualAppOrPublicPage>
+                  <InstallPage />
+                </ContextualAppOrPublicPage>
+              }
+            />
+            <Route
+              path="/privacy"
+              element={
+                <ContextualAppOrPublicPage>
+                  <PrivacyPage />
+                </ContextualAppOrPublicPage>
+              }
+            />
+            <Route
+              path="/terms"
+              element={
+                <ContextualAppOrPublicPage>
+                  <TermsPage />
+                </ContextualAppOrPublicPage>
+              }
+            />
+            <Route
+              path="/login"
+              element={
+                <PublicLayout>
+                  <AuthPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/register"
+              element={
+                <PublicLayout>
+                  <AuthPage register />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/forgot-password"
+              element={
+                <PublicLayout>
+                  <ForgotPasswordPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/reset-password"
+              element={
+                <PublicLayout>
+                  <ResetPasswordPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/sample"
+              element={
+                user ? (
+                  <ReaderLayout>
+                    <SamplePage />
+                  </ReaderLayout>
+                ) : (
+                  <PublicLayout>
+                    <SamplePage />
+                  </PublicLayout>
+                )
+              }
+            />
             <Route
               path="/library"
               element={
                 user ? (
-                  <ReaderShell>
+                  <ReaderLayout>
                     <LibraryPage />
-                  </ReaderShell>
+                  </ReaderLayout>
                 ) : (
-                  <div className="container section">
-                    <LibraryPage />
-                  </div>
+                  <PublicLayout>
+                    <div className="container section">
+                      <LibraryPage />
+                    </div>
+                  </PublicLayout>
                 )
               }
             />
@@ -161,13 +318,15 @@ export default function App() {
               path="/read/:id"
               element={
                 user ? (
-                  <ReaderShell>
+                  <ReaderLayout>
                     <ReadingPage />
-                  </ReaderShell>
+                  </ReaderLayout>
                 ) : (
-                  <div className="container section">
-                    <ReadingPage />
-                  </div>
+                  <PublicLayout>
+                    <div className="container section">
+                      <ReadingPage />
+                    </div>
+                  </PublicLayout>
                 )
               }
             />
@@ -230,32 +389,51 @@ export default function App() {
             <Route
               path="*"
               element={
-                <div className="container section">
-                  <h1>This page has turned.</h1>
-                  <Link className="button" to="/">
-                    Back to home <ChevronRight size={16} />
-                  </Link>
-                </div>
+                <PublicLayout>
+                  <div className="container section">
+                    <h1>This page has turned.</h1>
+                    <Link className="button" to="/">
+                      Back to home <ChevronRight size={16} />
+                    </Link>
+                  </div>
+                </PublicLayout>
               }
             />
           </Routes>
         )}
-      </main>
-      <Footer />
-      {message && (
-        <div className="toast" role="status">
-          <CheckCircle2 size={19} />
-          {message}
-          <button
-            className="icon-button"
-            aria-label="Dismiss notification"
-            onClick={() => setMessage("")}
-          >
-            <X size={16} />
-          </button>
+
+        <div
+          className="toast-region"
+          role="region"
+          aria-label="Status notifications"
+          aria-live="polite"
+        >
+          {message && (
+            <div
+              className="toast"
+              role="status"
+              onMouseEnter={() => setToastPaused(true)}
+              onMouseLeave={() => setToastPaused(false)}
+              onFocus={() => setToastPaused(true)}
+              onBlur={() => setToastPaused(false)}
+            >
+              <CheckCircle2 size={18} aria-hidden="true" />
+              <span className="toast-text">{message}</span>
+              <button
+                type="button"
+                className="icon-button toast-dismiss"
+                aria-label="Dismiss notification"
+                onClick={() => {
+                  setToastPaused(false);
+                  setMessage("");
+                }}
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
+          )}
         </div>
-      )}
-    </AppContext.Provider>
+      </AppContext.Provider>
     </ThemeProvider>
   );
 }

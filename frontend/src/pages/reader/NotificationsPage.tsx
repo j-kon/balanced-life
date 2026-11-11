@@ -165,17 +165,41 @@ export function NotificationsCenterPage() {
       {!data && !error ? (
         <Loading />
       ) : events.length === 0 ? (
-        <Empty
-          title={
-            filter === "unread"
-              ? "You are all caught up"
-              : "Your notification inbox is empty"
-          }
-        >
-          {filter === "unread"
-            ? "Every notification on your account has been read. Switch to All notifications to revisit earlier updates."
-            : "Enable devotional reminders or opt in to community announcements in Account settings whenever you are ready."}
-        </Empty>
+        <div className="empty-stage">
+          <Empty
+            icon={
+              filter === "unread" ? (
+                <CheckCircle2 size={28} />
+              ) : (
+                <Bell size={28} />
+              )
+            }
+            title={
+              filter === "unread"
+                ? "You are all caught up"
+                : "Your notification inbox is empty"
+            }
+            action={
+              filter === "unread" ? (
+                <button
+                  type="button"
+                  className="button outline small"
+                  onClick={() => setFilter("all")}
+                >
+                  View all notifications
+                </button>
+              ) : (
+                <Link className="button small" to="/account#notifications">
+                  <Settings size={15} /> Reminder &amp; consent settings
+                </Link>
+              )
+            }
+          >
+            {filter === "unread"
+              ? "Every notification on your account has been read. Switch to All notifications to revisit earlier updates."
+              : "Enable devotional reminders or opt in to community announcements in Account settings whenever you are ready."}
+          </Empty>
+        </div>
       ) : (
         <div className="notif-list" aria-label="Account notifications">
           {events.map((ev) => {

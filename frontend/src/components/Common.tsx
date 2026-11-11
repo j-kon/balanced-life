@@ -41,25 +41,34 @@ export const ErrorBox = ({ message }: { message: string }) =>
 
 export function Empty({
   title = "A little space for what comes next",
+  icon,
+  action,
+  compact = false,
   children,
 }: {
   title?: string;
+  icon?: ReactNode;
+  action?: ReactNode;
+  compact?: boolean;
   children: ReactNode;
 }) {
   return (
-    <div className="empty">
-      <BookOpen size={32} />
+    <div className={compact ? "empty empty-compact" : "empty"}>
+      <div className="empty-icon" aria-hidden="true">
+        {icon || <BookOpen size={compact ? 24 : 28} />}
+      </div>
       <h3>{title}</h3>
       <p>{children}</p>
+      {action && <div className="empty-action">{action}</div>}
     </div>
   );
 }
 
-export function Brand() {
+export function Brand({ to = "/" }: { to?: string }) {
   const { config } = useApp();
   return (
     <Link
-      to="/"
+      to={to}
       className="brand"
       aria-label="The Balanced Life Devotional home"
     >

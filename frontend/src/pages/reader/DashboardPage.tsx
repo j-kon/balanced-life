@@ -548,9 +548,26 @@ export function DashboardPage() {
                         ))}
                       </div>
                     ) : (
-                      <p className="muted">
-                        Complete a reading to record your reading history.
-                      </p>
+                      <Empty
+                        compact
+                        icon={<BookOpen size={24} />}
+                        title="No reading history yet"
+                        action={
+                          <Link
+                            className="button outline small"
+                            to={
+                              data.featured
+                                ? "/read/" + data.featured.id
+                                : "/library"
+                            }
+                          >
+                            Start today&apos;s reading <ArrowRight size={15} />
+                          </Link>
+                        }
+                      >
+                        Complete a reading to record your daily streak and recent
+                        devotional history.
+                      </Empty>
                     )}
                   </section>
 

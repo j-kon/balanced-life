@@ -48,7 +48,7 @@ export const defaultConfig: AppConfig = {
     contactPhone: "+2349055002143",
     contactSecondaryPhone: "+2349113708399",
     contactWebsite: "cossyteens.com",
-    contactAddress: "Lagos, Nigeria",
+    contactAddress: "Abuja, Nigeria",
     hardcoverPriceKobo: 500000,
     hardcoverAvailability: "available",
     printedBookStockCount: null,

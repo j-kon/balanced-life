@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { createHmac, randomBytes, scryptSync } from "node:crypto";
 import Database from "better-sqlite3";
@@ -56,11 +57,15 @@ let e2eAdminMfaSecret = "";
 
 const stateReaderEmail = "state-e2e@cossyteens.org";
 const stateReaderPassword = "StatePass!2027Secure";
+const pwaReaderEmail = "pwa-e2e@cossyteens.org";
+const pwaReaderPassword = "PwaReader!2027Secure";
 
 function cleanupTestRecords(sqlite: Database.Database) {
   const testUsers = sqlite
-    .prepare(`SELECT id FROM users WHERE email IN (?, ?, ?)`)
-    .all(adminEmail, readerEmail, stateReaderEmail) as { id: number }[];
+    .prepare(`SELECT id FROM users WHERE email IN (?, ?, ?, ?)`)
+    .all(adminEmail, readerEmail, stateReaderEmail, pwaReaderEmail) as {
+    id: number;
+  }[];
   const ids = testUsers.map((u) => u.id);
   for (const id of ids) {
     sqlite.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(id);
@@ -233,6 +238,7 @@ test.describe("End-to-End Production Workflows", () => {
     await expect(
       page.getByText(/cossyteensconsult@gmail\.com/i).first(),
     ).toBeVisible();
+    await expect(page.getByText("Abuja, Nigeria").first()).toBeVisible();
 
     await page.goto("/privacy");
     await expect(
@@ -299,9 +305,9 @@ test.describe("End-to-End Production Workflows", () => {
     ).toBeVisible();
 
     // Mobile PWA & Tablet responsive verification across 768px, 430px, 390px, and 360px
+    await page.goto("/");
     for (const width of [768, 430, 390, 360]) {
       await page.setViewportSize({ width, height: 844 });
-      await page.goto("/");
       await expect(page.locator(".menu-toggle")).toBeVisible();
       const overflow = await page.evaluate(
         () =>
@@ -961,16 +967,24 @@ test.describe("End-to-End Production Workflows", () => {
     await expect(page.locator(".sidebar-badge")).toHaveCount(0);
 
     // 5. Mobile viewports (360px, 390px, 430px, 768px) + Mobile More sheet at 390px
-    for (const width of [768, 430, 390, 360]) {
-      await page.setViewportSize({ width, height: 844 });
-      for (const path of ["/dashboard", "/notifications", "/journal"]) {
-        await page.goto(path);
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const navRoute of [
+      { link: /My journey/i, path: "/dashboard" },
+      { link: /My Growth Journal/i, path: "/journal" },
+    ]) {
+      await page
+        .locator(".mobile-bottom")
+        .getByRole("link", { name: navRoute.link })
+        .click();
+      await expect(page).toHaveURL(new RegExp(`${navRoute.path}$`));
+      for (const width of [768, 430, 390, 360]) {
+        await page.setViewportSize({ width, height: 844 });
         const overflow = await page.evaluate(
           () =>
             document.documentElement.scrollWidth >
             document.documentElement.clientWidth,
         );
-        expect(overflow, `Reader overflow on ${path} at ${width}px`).toBe(false);
+        expect(overflow, `Reader overflow on ${navRoute.path} at ${width}px`).toBe(false);
       }
     }
 
@@ -994,5 +1008,392 @@ test.describe("End-to-End Production Workflows", () => {
       .click();
 
     await context.close();
+  });
+
+  test("6. Mobile PWA & layout separation: no footer in reader app/PWA/mobile public, single bottom nav without hamburger, balanced empty states, non-overlapping toasts, 360/375/390/430/768px + standalone mode", async ({
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    const shotDir = path.resolve(
+      import.meta.dirname,
+      "../../tmp/mobile-screenshots",
+    );
+    mkdirSync(shotDir, { recursive: true });
+
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+
+    // 1. Desktop public homepage retains marketing footer; <=768px public pages hide marketing footer cleanly
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto("/");
+    await expect(page.locator("footer.marketing-footer")).toBeVisible();
+
+    for (const width of [768, 430, 390, 375, 360]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+      await expect(page.locator(".menu-toggle")).toBeVisible();
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth >
+          document.documentElement.clientWidth,
+      );
+      expect(overflow, `Public homepage overflow at ${width}px`).toBe(false);
+    }
+
+    // Legal & contact links stay accessible in mobile public nav when footer is suppressed
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator(".menu-toggle").click();
+    await expect(
+      page.locator(".public-nav.open").getByRole("link", { name: /Privacy policy/i }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".public-nav.open").getByRole("link", { name: /Terms of use/i }),
+    ).toBeVisible();
+
+    // 2. Register fresh reader on mobile and inspect onboarding + all empty/short states
+    await page.goto("/register");
+    await page.getByLabel(/Your name/i).fill("Hannah Mobile Reader");
+    await page.getByLabel(/Email address/i).fill(pwaReaderEmail);
+    await page.getByLabel(/^Password/i).fill(pwaReaderPassword);
+    await page.getByRole("button", { name: /Create account/i }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    // Compact reader header keeps brand, theme toggle, notification bell; NO hamburger menu & NO marketing footer
+    await expect(page.locator("header.reader-app-header")).toBeVisible();
+    await expect(page.locator(".theme-quick-btn")).toBeVisible();
+    await expect(page.locator("a.notif-bell-link")).toBeVisible();
+    await expect(page.locator(".menu-toggle")).toHaveCount(0);
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await expect(page.locator(".mobile-bottom")).toBeVisible();
+
+    // Screen 10: Free-reader onboarding
+    await expect(
+      page.getByRole("heading", {
+        name: /Welcome to your Balanced Life journey, Hannah!/i,
+      }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: path.join(shotDir, "01-onboarding-free-390.png"),
+      fullPage: false,
+    });
+
+    // Dismiss onboarding & verify Screen 1 (Free Home Dashboard without footer)
+    await page.getByRole("button", { name: /Skip onboarding/i }).click();
+    await expect(
+      page.getByRole("heading", { name: /Unlock your 2027 devotional journey\./i }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: path.join(shotDir, "02-home-dashboard-free-390.png"),
+      fullPage: false,
+    });
+
+    // Screen 5: Empty Saved Readings via bottom navigation (no footer, no hamburger, polished empty card)
+    await page
+      .locator(".mobile-bottom")
+      .getByRole("link", { name: /Saved readings/i })
+      .click();
+    await expect(page).toHaveURL(/\/saved$/);
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await expect(page.locator(".menu-toggle")).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: /No saved readings yet/i }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: path.join(shotDir, "03-saved-empty-390.png"),
+      fullPage: false,
+    });
+
+    // Screen 6: Empty Notification Center via header Bell (no footer, balanced card)
+    await page.locator("a.notif-bell-link").click();
+    await expect(page).toHaveURL(/\/notifications$/);
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: /Your notification inbox is empty/i }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: path.join(shotDir, "04-notifications-empty-390.png"),
+      fullPage: false,
+    });
+
+    // Screen 7: Empty / Free My Online Access via More drawer
+    await page
+      .getByRole("button", {
+        name: /More reader tools, notifications, and appearance/i,
+      })
+      .click();
+    await page
+      .locator("dialog.mobile-more-dialog[open]")
+      .getByRole("link", { name: /My Online Access/i })
+      .click();
+    await expect(page).toHaveURL(/\/subscription$/);
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: /No digital access purchases yet/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /No printed book orders yet/i }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: path.join(shotDir, "05-online-access-390.png"),
+      fullPage: false,
+    });
+
+    // Screen 4: Growth Journal empty state via bottom nav -> save entry -> assert toast sits clear above bottom nav
+    await page
+      .locator(".mobile-bottom")
+      .getByRole("link", { name: /My Growth Journal/i })
+      .click();
+    await expect(page).toHaveURL(/\/journal$/);
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: /No journal entries yet/i }),
+    ).toBeVisible();
+
+    await page.getByLabel(/Reflection title/i).fill("Mobile Clarity Reflection");
+    await page
+      .getByLabel(/What's on your heart today\?/i)
+      .fill("Thankful for calm daily reading ergonomics on mobile.");
+    await page.getByRole("button", { name: /Save reflection/i }).click();
+    const toastEl = page.locator(".toast");
+    await expect(toastEl).toBeVisible();
+    const toastBox = await toastEl.boundingBox();
+    const navBox = await page.locator(".mobile-bottom").boundingBox();
+    expect(toastBox && navBox).toBeTruthy();
+    if (toastBox && navBox) {
+      expect(
+        toastBox.y + toastBox.height,
+        "Toast must sit clearly above mobile bottom nav without overlap",
+      ).toBeLessThan(navBox.y);
+    }
+    await page.screenshot({
+      path: path.join(shotDir, "06-journal-toast-390.png"),
+      fullPage: false,
+    });
+    await page.getByRole("button", { name: /Dismiss notification/i }).click();
+    await expect(toastEl).toHaveCount(0);
+
+    // Screen 8: Account Settings via More drawer (Switch to Dark mode and verify contrast/no overflow)
+    await page
+      .getByRole("button", {
+        name: /More reader tools, notifications, and appearance/i,
+      })
+      .click();
+    await page
+      .locator("dialog.mobile-more-dialog[open]")
+      .getByRole("link", { name: /Account & Reminder Settings/i })
+      .click();
+    await expect(page).toHaveURL(/\/account$/);
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await page
+      .locator('section[aria-labelledby="appearance-heading"]')
+      .getByRole("button", { name: /^Dark$/i })
+      .click();
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.theme),
+    ).toBe("dark");
+    await page.screenshot({
+      path: path.join(shotDir, "07-account-dark-390.png"),
+      fullPage: false,
+    });
+
+    // Switch back to Light for remaining daylight captures & test Screen 9: More menu sheet
+    await page
+      .locator('section[aria-labelledby="appearance-heading"]')
+      .getByRole("button", { name: /^Light$/i })
+      .click();
+    await page
+      .getByRole("button", {
+        name: /More reader tools, notifications, and appearance/i,
+      })
+      .click();
+    const moreDialog = page.locator("dialog.mobile-more-dialog[open]");
+    await expect(moreDialog).toBeVisible();
+    for (const labelRe of [
+      /My Online Access/i,
+      /My Orders/i,
+      /Notifications/i,
+      /Account & Reminder Settings/i,
+      /Install App/i,
+      /Contact & Help/i,
+      /Privacy Policy/i,
+      /Terms of Use/i,
+      /Sign out/i,
+    ]) {
+      await expect(moreDialog.getByText(labelRe).first()).toBeVisible();
+    }
+    await page.screenshot({
+      path: path.join(shotDir, "08-more-drawer-390.png"),
+      fullPage: false,
+    });
+    await page.getByRole("button", { name: /Close more options/i }).click();
+
+    // 3. Grant active 2027 digital entitlement via SQLite -> verify Screen 2 (Library) & Screen 3 (Reading page)
+    const sqlite = new Database(dbPath);
+    const pwaUser = sqlite
+      .prepare("SELECT id FROM users WHERE email = ?")
+      .get(pwaReaderEmail) as { id: number };
+    const pastIso = new Date(Date.now() - 86_400_000).toISOString();
+    const futureIso = new Date(Date.now() + 86_400_000 * 180).toISOString();
+    sqlite
+      .prepare(
+        `INSERT INTO digital_entitlements (
+          user_id, edition_year, access_type, access_scope, status,
+          starts_at, expires_at, duration_months, renewal_count,
+          legacy_persistent, legacy_review_required, grant_reason,
+          granted_at, updated_at
+        ) VALUES (?, 2027, 'complimentary', 'edition_2027', 'active', ?, ?, 12, 0, 0, 0, 'E2E PWA Mobile Active', ?, ?)`,
+      )
+      .run(pwaUser.id, pastIso, futureIso, pastIso, pastIso);
+    sqlite.close();
+
+    // Screen 1 (Active): Active Dashboard + balanced empty reading history card
+    await page.goto("/dashboard");
+    await expect(
+      page.getByRole("heading", { name: /Welcome back, Hannah\./i }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /No reading history yet/i }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: path.join(shotDir, "09-dashboard-active-history-390.png"),
+      fullPage: false,
+    });
+
+    // Screen 2: Devotional Library
+    await page.goto("/library");
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await page.screenshot({
+      path: path.join(shotDir, "10-library-390.png"),
+      fullPage: false,
+    });
+
+    // Screen 3: Reading Page + non-overlapping bottom nav
+    await page.locator(".entry-card").first().click();
+    await expect(page).toHaveURL(/\/read\/\d+$/);
+    await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    await expect(page.locator(".reading-one-hand-bar")).toBeVisible();
+    await page.screenshot({
+      path: path.join(shotDir, "11-reading-page-390.png"),
+      fullPage: false,
+    });
+
+    // 4. Verify ZERO overflow & NO footer across all 5 mobile/tablet viewports + reader routes via SPA navigation
+    const spaTabs: Array<{
+      nav: "bottom" | "bell" | "more";
+      label?: RegExp;
+      path: string;
+    }> = [
+      { nav: "bottom", label: /My journey/i, path: "/dashboard" },
+      { nav: "bottom", label: /Devotional library/i, path: "/library" },
+      { nav: "bottom", label: /My Growth Journal/i, path: "/journal" },
+      { nav: "bottom", label: /Saved readings/i, path: "/saved" },
+      { nav: "bell", path: "/notifications" },
+      { nav: "more", label: /My Online Access/i, path: "/subscription" },
+      { nav: "more", label: /Account & Reminder Settings/i, path: "/account" },
+    ];
+    for (const tab of spaTabs) {
+      if (tab.nav === "bottom" && tab.label) {
+        await page
+          .locator(".mobile-bottom")
+          .getByRole("link", { name: tab.label })
+          .click();
+      } else if (tab.nav === "bell") {
+        await page.locator("a.notif-bell-link").click();
+      } else if (tab.nav === "more" && tab.label) {
+        await page
+          .getByRole("button", {
+            name: /More reader tools, notifications, and appearance/i,
+          })
+          .click();
+        await page
+          .locator("dialog.mobile-more-dialog[open]")
+          .getByRole("link", { name: tab.label })
+          .click();
+      }
+      await expect(page).toHaveURL(new RegExp(`${tab.path}$`));
+      await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+      for (const width of [360, 375, 390, 430, 768]) {
+        await page.setViewportSize({ width, height: 844 });
+        await expect(page.locator(".menu-toggle")).toHaveCount(0);
+        const overflow = await page.evaluate(
+          () =>
+            document.documentElement.scrollWidth >
+            document.documentElement.clientWidth,
+        );
+        expect(overflow, `Overflow on ${tab.path} at ${width}px`).toBe(false);
+      }
+    }
+
+    // Desktop reader pages also omit marketing footer
+    await page.setViewportSize({ width: 1440, height: 960 });
+    for (const desktopPath of [
+      { label: /My journey/i, path: "/dashboard" },
+      { label: /My Growth Journal/i, path: "/journal" },
+      { label: /Saved readings/i, path: "/saved" },
+      { label: /Notifications/i, path: "/notifications" },
+    ]) {
+      await page
+        .locator(".sidebar")
+        .getByRole("link", { name: desktopPath.label })
+        .click();
+      await expect(page).toHaveURL(new RegExp(`${desktopPath.path}$`));
+      await expect(page.locator("footer.marketing-footer")).toHaveCount(0);
+    }
+
+    // Mobile landscape check (844x390)
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page
+      .locator(".mobile-bottom")
+      .getByRole("link", { name: /My Growth Journal/i })
+      .click();
+    await expect(page).toHaveURL(/\/journal$/);
+    await expect(page.locator(".mobile-bottom")).toBeVisible();
+    const landscapeOverflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    expect(landscapeOverflow).toBe(false);
+
+    // 5. Standalone PWA display-mode simulation: never shows marketing footer even on desktop/public/more subroutes
+    const standaloneCtx = await browser.newContext();
+    await standaloneCtx.addInitScript(() => {
+      const origMatchMedia = window.matchMedia.bind(window);
+      window.matchMedia = (q: string) => {
+        if (q.includes("display-mode: standalone")) {
+          return {
+            matches: true,
+            media: q,
+            onchange: null,
+            addListener: () => {},
+            removeListener: () => {},
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            dispatchEvent: () => false,
+          } as unknown as MediaQueryList;
+        }
+        return origMatchMedia(q);
+      };
+    });
+    const pwaPage = await standaloneCtx.newPage();
+    await pwaPage.setViewportSize({ width: 390, height: 844 });
+    await pwaPage.goto("/");
+    await expect(pwaPage.locator("footer.marketing-footer")).toHaveCount(0);
+
+    await pwaPage.goto("/login");
+    await pwaPage.getByLabel(/Email address/i).fill(pwaReaderEmail);
+    await pwaPage.getByLabel(/^Password/i).fill(pwaReaderPassword);
+    await pwaPage.getByRole("button", { name: /^Sign in$/i }).click();
+    await expect(pwaPage).toHaveURL(/\/dashboard$/);
+    await pwaPage.goto("/privacy");
+    await expect(pwaPage.locator("footer.marketing-footer")).toHaveCount(0);
+    await expect(pwaPage.locator(".mobile-bottom")).toBeVisible();
+    await pwaPage.screenshot({
+      path: path.join(shotDir, "12-standalone-pwa-390.png"),
+      fullPage: false,
+    });
+
+    await standaloneCtx.close();
+    await ctx.close();
   });
 });

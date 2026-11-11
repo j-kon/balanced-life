@@ -267,10 +267,36 @@ export function JournalPage() {
             </article>
           ),
         )
+      ) : data && data.length > 0 ? (
+        <Empty
+          compact
+          icon={<Search size={24} />}
+          title="No reflections match your search"
+          action={
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => setSearch("")}
+            >
+              Clear search
+            </button>
+          }
+        >
+          Try another keyword or clear your search to view all journal entries.
+        </Empty>
       ) : data ? (
-        <Empty title="Your story starts with a thought">
-          Write your first reflection above. Return whenever you need a quiet
-          moment.
+        <Empty
+          compact
+          icon={<PenLine size={24} />}
+          title="No journal entries yet"
+          action={
+            <Link className="button outline small" to="/library">
+              Read today&apos;s devotional
+            </Link>
+          }
+        >
+          Write your first reflection, lesson, or action step above — entries
+          stay private to your account.
         </Empty>
       ) : (
         !error && <Loading />

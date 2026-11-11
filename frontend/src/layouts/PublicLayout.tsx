@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   ArrowUpRight,
@@ -13,6 +13,10 @@ import {
 import { useApp } from "../context/AppContext";
 import { useTheme } from "../context/ThemeContext";
 import { Brand } from "../components/Common";
+import {
+  useIsCompactViewport,
+  useIsStandalonePwa,
+} from "../hooks/useViewport";
 import { api } from "../api";
 
 export function Header() {
@@ -45,6 +49,10 @@ export function Header() {
           <NavLink to="/bookstore">Printed Book</NavLink>
           <NavLink to="/install">Install App</NavLink>
           <NavLink to="/contact">Contact</NavLink>
+          <div className="mobile-nav-legal">
+            <NavLink to="/privacy">Privacy policy</NavLink>
+            <NavLink to="/terms">Terms of use</NavLink>
+          </div>
           {!user && (
             <>
               <NavLink to="/register">Register</NavLink>
@@ -132,7 +140,7 @@ export function Header() {
 export function Footer() {
   const { config } = useApp();
   return (
-    <footer>
+    <footer className="marketing-footer">
       <div className="container footer-inner">
         <div className="footer-brand-block">
           <Brand />
@@ -164,5 +172,21 @@ export function Footer() {
         </small>
       </div>
     </footer>
+  );
+}
+
+export function PublicLayout({ children }: { children: ReactNode }) {
+  const isStandalone = useIsStandalonePwa();
+  const isCompact = useIsCompactViewport();
+  const showFooter = !isStandalone && !isCompact;
+
+  return (
+    <div className="app-shell public-shell">
+      <Header />
+      <main id="main" className="app-main">
+        {children}
+      </main>
+      {showFooter && <Footer />}
+    </div>
   );
 }

@@ -7,21 +7,29 @@ import {
   useNavigate,
 } from "react-router-dom";
 import {
+  ArrowUpRight,
   Bell,
   BookOpen,
   Bookmark,
   CreditCard,
+  HelpCircle,
   LayoutDashboard,
   LogOut,
+  Monitor,
+  Moon,
   MoreHorizontal,
+  Package,
   PenLine,
   ShoppingBag,
   Smartphone,
+  Sun,
   UserCheck,
   X,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
-import { PwaInstallBanner, ThemeSelector } from "../components/Common";
+import { useTheme } from "../context/ThemeContext";
+import { Brand, PwaInstallBanner, ThemeSelector } from "../components/Common";
+import { useVirtualKeyboardOpen } from "../hooks/useViewport";
 import { api } from "../api";
 
 export const readerLinks = [
@@ -96,10 +104,78 @@ export const mobileBottomLinks = [
   },
 ];
 
-export function ReaderShell({ children }: { children: ReactNode }) {
+function ReaderHeader() {
+  const { unreadNotificationsCount } = useApp();
+  const { preference, resolvedTheme, cyclePreference } = useTheme();
+
+  const ThemeIcon =
+    preference === "system" ? Monitor : preference === "dark" ? Moon : Sun;
+  const themeButtonLabel =
+    preference === "system"
+      ? `Theme: System (${resolvedTheme}). Activate to switch.`
+      : `Theme: ${preference}. Activate to switch.`;
+
+  return (
+    <header className="header reader-app-header">
+      <div className="container header-inner">
+        <Brand to="/dashboard" />
+
+        <nav
+          className="reader-desktop-links"
+          aria-label="Additional reader links"
+        >
+          <NavLink to="/bookstore">Printed Book</NavLink>
+          <NavLink to="/install">Install App</NavLink>
+          <NavLink to="/contact">Contact</NavLink>
+          <Link className="reader-site-link" to="/">
+            Public site <ArrowUpRight size={14} aria-hidden="true" />
+          </Link>
+        </nav>
+
+        <div className="header-quick-actions">
+          <button
+            type="button"
+            className="icon-button theme-quick-btn"
+            aria-label={themeButtonLabel}
+            onClick={cyclePreference}
+          >
+            <ThemeIcon size={18} aria-hidden="true" />
+            <span className="sr-only">
+              {preference === "system"
+                ? `System theme (${resolvedTheme})`
+                : `${preference} theme`}
+            </span>
+          </button>
+
+          <Link
+            to="/notifications"
+            className="icon-button notif-bell-link"
+            aria-label={
+              unreadNotificationsCount > 0
+                ? `Notifications (${unreadNotificationsCount} unread)`
+                : "Notifications"
+            }
+          >
+            <Bell size={18} aria-hidden="true" />
+            {unreadNotificationsCount > 0 && (
+              <span className="notif-badge" aria-hidden="true">
+                {unreadNotificationsCount > 99
+                  ? "99+"
+                  : unreadNotificationsCount}
+              </span>
+            )}
+          </Link>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+export function ReaderLayout({ children }: { children: ReactNode }) {
   const { user, unreadNotificationsCount, refresh, toast } = useApp();
   const navigate = useNavigate();
   const location = useLocation();
+  const keyboardOpen = useVirtualKeyboardOpen();
   const moreDialogRef = useRef<HTMLDialogElement | null>(null);
   const pointerDownOutsideRef = useRef(false);
 
@@ -119,7 +195,7 @@ export function ReaderShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     closeMoreDrawer();
-  }, [location.pathname]);
+  }, [location.pathname, location.hash]);
 
   // Fallback click-outside dismiss for browsers lacking native dialog closedby="any"
   const isOutsideDialog = (e: React.PointerEvent<HTMLDialogElement>) => {
@@ -144,46 +220,68 @@ export function ReaderShell({ children }: { children: ReactNode }) {
   };
 
   return (
-    <div className="reader-layout">
-      <aside className="sidebar">
-        <span className="eyebrow">Your quiet space</span>
-        <nav aria-label="Reader navigation">
-          {readerLinks.map(({ to, label, icon: Icon }) => (
-            <NavLink key={to} to={to}>
-              <Icon size={19} />
-              <span>{label}</span>
-              {to === "/notifications" && unreadNotificationsCount > 0 && (
-                <span className="sidebar-badge">{unreadNotificationsCount}</span>
-              )}
-            </NavLink>
-          ))}
-        </nav>
+    <div
+      className={
+        keyboardOpen
+          ? "app-shell reader-shell keyboard-open"
+          : "app-shell reader-shell"
+      }
+    >
+      <ReaderHeader />
 
-        <div className="sidebar-theme-box">
-          <small>Appearance</small>
-          <ThemeSelector variant="compact" />
-        </div>
+      <div className="reader-layout">
+        <aside className="sidebar">
+          <span className="eyebrow">Your quiet space</span>
+          <nav aria-label="Reader navigation">
+            {readerLinks.map(({ to, label, icon: Icon }) => (
+              <NavLink key={to} to={to}>
+                <Icon size={19} aria-hidden="true" />
+                <span>{label}</span>
+                {to === "/notifications" && unreadNotificationsCount > 0 && (
+                  <span className="sidebar-badge">
+                    {unreadNotificationsCount}
+                  </span>
+                )}
+              </NavLink>
+            ))}
+          </nav>
 
-        <div className="sidebar-bottom">
-          <span className="avatar">{user?.name[0] || "R"}</span>
-          <div>
-            <strong>{user?.name}</strong>
-            <small>Reader account</small>
+          <div className="sidebar-theme-box">
+            <small>Appearance</small>
+            <ThemeSelector variant="compact" />
           </div>
-          <button
-            type="button"
-            aria-label="Sign out"
-            className="icon-button"
-            onClick={handleSignOut}
-          >
-            <LogOut size={18} />
-          </button>
-        </div>
-      </aside>
 
-      <div className="reader-main">
-        <PwaInstallBanner />
-        {children}
+          <div className="sidebar-bottom">
+            <span className="avatar" aria-hidden="true">
+              {user?.name[0] || "R"}
+            </span>
+            <div style={{ minWidth: 0 }}>
+              <strong>{user?.name}</strong>
+              <small>Reader account</small>
+            </div>
+            <button
+              type="button"
+              aria-label="Sign out"
+              className="icon-button"
+              onClick={handleSignOut}
+            >
+              <LogOut size={18} aria-hidden="true" />
+            </button>
+          </div>
+
+          <nav className="sidebar-legal" aria-label="Legal and support">
+            <Link to="/contact">Contact</Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/privacy">Privacy</Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/terms">Terms</Link>
+          </nav>
+        </aside>
+
+        <main id="main" className="reader-main">
+          <PwaInstallBanner />
+          {children}
+        </main>
       </div>
 
       <nav className="mobile-bottom" aria-label="Mobile reader navigation">
@@ -238,42 +336,60 @@ export function ReaderShell({ children }: { children: ReactNode }) {
               aria-label="Close more options"
               onClick={closeMoreDrawer}
             >
-              <X size={18} />
+              <X size={18} aria-hidden="true" />
             </button>
           </div>
 
-          <div className="stack" style={{ gap: "8px", marginBottom: "18px" }}>
+          <div className="stack" style={{ gap: "8px", marginBottom: "14px" }}>
             <small className="muted" style={{ padding: 0 }}>
               Appearance theme
             </small>
-            <ThemeSelector variant="full" />
+            <ThemeSelector variant="compact" />
           </div>
 
           <div className="mobile-more-links">
+            <Link to="/subscription" onClick={closeMoreDrawer}>
+              <CreditCard size={18} aria-hidden="true" />
+              <span>My Online Access</span>
+            </Link>
+            <Link to="/subscription#orders" onClick={closeMoreDrawer}>
+              <Package size={18} aria-hidden="true" />
+              <span>My Orders</span>
+            </Link>
+            <Link to="/bookstore" onClick={closeMoreDrawer}>
+              <ShoppingBag size={18} aria-hidden="true" />
+              <span>Order Printed Book (₦5,000)</span>
+            </Link>
             <Link to="/notifications" onClick={closeMoreDrawer}>
-              <Bell size={18} />
-              <span>Notification Center</span>
+              <Bell size={18} aria-hidden="true" />
+              <span>Notifications</span>
               {unreadNotificationsCount > 0 && (
                 <span className="pill" style={{ marginLeft: "auto" }}>
                   {unreadNotificationsCount} unread
                 </span>
               )}
             </Link>
-            <Link to="/subscription" onClick={closeMoreDrawer}>
-              <CreditCard size={18} />
-              <span>My Online Access &amp; Orders</span>
-            </Link>
-            <Link to="/bookstore" onClick={closeMoreDrawer}>
-              <ShoppingBag size={18} />
-              <span>Order Printed Book (₦5,000)</span>
-            </Link>
             <Link to="/account" onClick={closeMoreDrawer}>
-              <UserCheck size={18} />
-              <span>Account, Password &amp; Reminders</span>
+              <UserCheck size={18} aria-hidden="true" />
+              <span>Account &amp; Reminder Settings</span>
             </Link>
             <Link to="/install" onClick={closeMoreDrawer}>
-              <Smartphone size={18} />
-              <span>Install App on Phone</span>
+              <Smartphone size={18} aria-hidden="true" />
+              <span>Install App</span>
+            </Link>
+            <Link to="/contact" onClick={closeMoreDrawer}>
+              <HelpCircle size={18} aria-hidden="true" />
+              <span>Contact &amp; Help</span>
+            </Link>
+          </div>
+
+          <div className="mobile-more-legal-row">
+            <Link to="/privacy" onClick={closeMoreDrawer}>
+              Privacy Policy
+            </Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/terms" onClick={closeMoreDrawer}>
+              Terms of Use
             </Link>
           </div>
 
@@ -283,7 +399,7 @@ export function ReaderShell({ children }: { children: ReactNode }) {
               className="button outline full"
               onClick={handleSignOut}
             >
-              <LogOut size={16} /> Sign out
+              <LogOut size={16} aria-hidden="true" /> Sign out
             </button>
           </div>
         </div>
@@ -292,11 +408,13 @@ export function ReaderShell({ children }: { children: ReactNode }) {
   );
 }
 
+export const ReaderShell = ReaderLayout;
+
 export function Protected({ children }: { children: ReactNode }) {
   const { user } = useApp();
   const location = useLocation();
   if (!user) {
     return <Navigate to="/login" state={{ from: location.pathname }} replace />;
   }
-  return <ReaderShell>{children}</ReaderShell>;
+  return <ReaderLayout>{children}</ReaderLayout>;
 }

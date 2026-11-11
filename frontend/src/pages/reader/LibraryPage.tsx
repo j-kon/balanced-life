@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useLocation } from "react-router-dom";
-import { Search } from "lucide-react";
+import { Link, useLocation } from "react-router-dom";
+import { ArrowRight, Bookmark, Search } from "lucide-react";
 import { useApp } from "../../context/AppContext";
 import { useData } from "../../hooks/useData";
 import {
@@ -38,6 +38,8 @@ export function LibraryPage({ saved = false }: { saved?: boolean }) {
         .includes(search.toLowerCase()),
   );
 
+  const hasAnySaved = Boolean(data?.some((e) => e.saved));
+
   return (
     <>
       <div className="page-heading">
@@ -54,58 +56,62 @@ export function LibraryPage({ saved = false }: { saved?: boolean }) {
 
       {!saved && <UpcomingYearNotice />}
 
-      <div className="filters">
-        <label className="search-box">
-          <Search size={18} />
-          <input
-            aria-label="Search devotionals"
-            placeholder="Search readings, dates, or themes…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </label>
-        <label className="sr-only" htmlFor="month">
-          Month
-        </label>
-        <select
-          id="month"
-          value={month}
-          onChange={(e) => setMonth(e.target.value)}
-        >
-          <option value="all">Every month</option>
-          {Array.from({ length: 12 }, (_, i) => (
-            <option key={i} value={i + 1}>
-              {monthName(i + 1)}
-            </option>
-          ))}
-        </select>
-        <label className="sr-only" htmlFor="theme">
-          Theme
-        </label>
-        <select
-          id="theme"
-          value={theme}
-          onChange={(e) => setTheme(e.target.value)}
-        >
-          <option value="all">All themes</option>
-          {[...new Set(data?.map((e) => e.theme).filter(Boolean))].map((t) => (
-            <option key={t}>{t}</option>
-          ))}
-        </select>
-        <label className="sr-only" htmlFor="reading-status">
-          Reading status
-        </label>
-        <select
-          id="reading-status"
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
-        >
-          <option value="all">All readings</option>
-          <option value="unread">Not yet completed</option>
-          <option value="completed">Completed</option>
-          <option value="sample">Free sample</option>
-        </select>
-      </div>
+      {(!saved || hasAnySaved) && (
+        <div className="filters">
+          <label className="search-box">
+            <Search size={18} />
+            <input
+              aria-label="Search devotionals"
+              placeholder="Search readings, dates, or themes…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </label>
+          <label className="sr-only" htmlFor="month">
+            Month
+          </label>
+          <select
+            id="month"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+          >
+            <option value="all">Every month</option>
+            {Array.from({ length: 12 }, (_, i) => (
+              <option key={i} value={i + 1}>
+                {monthName(i + 1)}
+              </option>
+            ))}
+          </select>
+          <label className="sr-only" htmlFor="theme">
+            Theme
+          </label>
+          <select
+            id="theme"
+            value={theme}
+            onChange={(e) => setTheme(e.target.value)}
+          >
+            <option value="all">All themes</option>
+            {[...new Set(data?.map((e) => e.theme).filter(Boolean))].map(
+              (t) => (
+                <option key={t}>{t}</option>
+              ),
+            )}
+          </select>
+          <label className="sr-only" htmlFor="reading-status">
+            Reading status
+          </label>
+          <select
+            id="reading-status"
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+          >
+            <option value="all">All readings</option>
+            <option value="unread">Not yet completed</option>
+            <option value="completed">Completed</option>
+            <option value="sample">Free sample</option>
+          </select>
+        </div>
+      )}
 
       <ErrorBox message={error} />
       {!data && !error ? (
@@ -120,18 +126,54 @@ export function LibraryPage({ saved = false }: { saved?: boolean }) {
             />
           ))}
         </div>
+      ) : saved && !hasAnySaved ? (
+        <div className="empty-stage">
+          <Empty
+            icon={<Bookmark size={28} />}
+            title="No saved readings yet"
+            action={
+              <Link className="button small" to="/library">
+                Browse Devotional Library <ArrowRight size={15} />
+              </Link>
+            }
+          >
+            Tap Save reading on any devotional to keep inspiring passages close
+            by for quick reflection later.
+          </Empty>
+        </div>
       ) : (
-        <Empty
-          title={
-            config.publishedCount
-              ? "No readings match your filter"
-              : "The library is awaiting published readings"
-          }
-        >
-          {config.publishedCount
-            ? "Try another search term, month, or filter."
-            : "The author can review and publish imported manuscript entries from the administration dashboard."}
-        </Empty>
+        <div className="empty-stage">
+          <Empty
+            icon={<Search size={28} />}
+            title={
+              config.publishedCount
+                ? saved
+                  ? "No saved readings match your filter"
+                  : "No readings match your filter"
+                : "The library is awaiting published readings"
+            }
+            action={
+              config.publishedCount ? (
+                <button
+                  type="button"
+                  className="button outline small"
+                  onClick={() => {
+                    setSearch("");
+                    setMonth("all");
+                    setTheme("all");
+                    setFilterStatus("all");
+                  }}
+                >
+                  Clear filters
+                </button>
+              ) : undefined
+            }
+          >
+            {config.publishedCount
+              ? "Try another search term, month, or status filter."
+              : "The author can review and publish imported manuscript entries from the administration dashboard."}
+          </Empty>
+        </div>
       )}
     </>
   );
