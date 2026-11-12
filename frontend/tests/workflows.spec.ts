@@ -150,10 +150,112 @@ function cleanupTestRecords(sqlite: Database.Database) {
     .run();
 }
 
+function ensureSeededE2EDevotionals(sqlite: Database.Database, now: string) {
+  const seedEntries = [
+    {
+      date: "2027-01-01",
+      title: "THANK GOD, WE MADE IT.",
+      sample: 1,
+      published: 1,
+      reviewStatus: "approved",
+      reviewedAt: now,
+    },
+    {
+      date: "2027-01-02",
+      title: "Walk with Wisdom",
+      sample: 0,
+      published: 1,
+      reviewStatus: "approved",
+      reviewedAt: now,
+    },
+    {
+      date: "2027-01-03",
+      title: "Created with Purpose",
+      sample: 0,
+      published: 1,
+      reviewStatus: "approved",
+      reviewedAt: now,
+    },
+    {
+      date: "2027-01-04",
+      title: "Intentional Habits",
+      sample: 0,
+      published: 1,
+      reviewStatus: "approved",
+      reviewedAt: now,
+    },
+    {
+      date: "2027-01-05",
+      title: "Guarding Your Heart",
+      sample: 0,
+      published: 1,
+      reviewStatus: "approved",
+      reviewedAt: now,
+    },
+    {
+      date: "2027-01-06",
+      title: "Growing in Truth",
+      sample: 0,
+      published: 1,
+      reviewStatus: "approved",
+      reviewedAt: now,
+    },
+    {
+      date: "2027-01-07",
+      title: "Steady Faithfulness",
+      sample: 0,
+      published: 1,
+      reviewStatus: "approved",
+      reviewedAt: now,
+    },
+    {
+      date: "2027-01-08",
+      title: "Courage to Obey",
+      sample: 0,
+      published: 0,
+      reviewStatus: "pending_review",
+      reviewedAt: null as string | null,
+    },
+  ];
+
+  const insertStmt = sqlite.prepare(
+    `INSERT INTO devotionals (
+      date, title, theme, bible_text, memory_verse, reflection, think_about, prayer, challenge,
+      sample, published, source_pages, created_at, updated_at, review_status, reviewer_notes, reviewed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'e2e-seed', ?, ?, ?, '', ?)`,
+  );
+
+  for (const entry of seedEntries) {
+    const existing = sqlite
+      .prepare(`SELECT id FROM devotionals WHERE date = ?`)
+      .get(entry.date);
+    if (!existing) {
+      insertStmt.run(
+        entry.date,
+        entry.title,
+        "Gratitude, Identity & Intentionality",
+        "Psalm 118:22-23 · Psalm 1:1-6",
+        "This is the day the Lord has made; we will rejoice and be glad in it. — Psalm 118:24",
+        `Synthetic E2E devotional reflection for ${entry.date} verifying reading flow, gating, and journal accountability.`,
+        `How will you practice ${entry.title.toLowerCase()} in your decisions today?`,
+        "Lord Jesus, anchor my heart in Your Word and help me walk with wisdom and grace today. Amen.",
+        "Read the Scripture text carefully, record one takeaway, and apply one action step before bedtime.",
+        entry.sample,
+        entry.published,
+        now,
+        now,
+        entry.reviewStatus,
+        entry.reviewedAt,
+      );
+    }
+  }
+}
+
 test.beforeAll(() => {
   const sqlite = new Database(dbPath);
   cleanupTestRecords(sqlite);
   const now = new Date().toISOString();
+  ensureSeededE2EDevotionals(sqlite, now);
   sqlite
     .prepare(
       `INSERT INTO admin_users (name, email, password_hash, role, status, suspended_reason, mfa_enabled, created_at, updated_at)
@@ -172,6 +274,7 @@ test.beforeAll(() => {
 test.afterAll(() => {
   const sqlite = new Database(dbPath);
   cleanupTestRecords(sqlite);
+  sqlite.prepare(`DELETE FROM devotionals WHERE source_pages = 'e2e-seed'`).run();
   sqlite.close();
 });
 
