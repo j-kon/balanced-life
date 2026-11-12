@@ -466,9 +466,28 @@ export const notificationPreferences = sqliteTable("notification_preferences", {
   announcementsEnabled: integer("announcements_enabled", { mode: "boolean" })
     .notNull()
     .default(false),
+  emailDailyReminderEnabled: integer("email_daily_reminder_enabled", {
+    mode: "boolean",
+  })
+    .notNull()
+    .default(false),
+  emailAnnouncementsEnabled: integer("email_announcements_enabled", {
+    mode: "boolean",
+  })
+    .notNull()
+    .default(false),
+  emailCommunityUpdatesEnabled: integer("email_community_updates_enabled", {
+    mode: "boolean",
+  })
+    .notNull()
+    .default(false),
+  emailSuppressedReason: text("email_suppressed_reason").notNull().default(""),
+  emailSuppressedAt: text("email_suppressed_at"),
   lastDailyReminderDate: text("last_daily_reminder_date"),
   lastUnreadReminderDate: text("last_unread_reminder_date"),
   lastExpiryReminderFor: text("last_expiry_reminder_for"),
+  lastEmailDailyReminderDate: text("last_email_daily_reminder_date"),
+  lastEmailExpiryReminderFor: text("last_email_expiry_reminder_for"),
   updatedAt: text("updated_at").notNull(),
 });
 
@@ -613,4 +632,144 @@ export const auditLogs = sqliteTable("admin_audit_logs", {
 export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
+});
+
+export const passwordResetCodes = sqliteTable("password_reset_codes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  actorType: text("actor_type").notNull(),
+  userId: integer("user_id").references(() => users.id, {
+    onDelete: "cascade",
+  }),
+  adminId: integer("admin_id").references(() => adminUsers.id, {
+    onDelete: "cascade",
+  }),
+  email: text("email").notNull(),
+  codeHmac: text("code_hmac").notNull(),
+  challengeSalt: text("challenge_salt").notNull(),
+  proofTokenHash: text("proof_token_hash"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
+  status: text("status").notNull().default("active"),
+  requestIp: text("request_ip").notNull().default(""),
+  expiresAt: text("expires_at").notNull(),
+  verifiedAt: text("verified_at"),
+  usedAt: text("used_at"),
+  invalidatedAt: text("invalidated_at"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const passwordResetRateEvents = sqliteTable(
+  "password_reset_rate_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    actorType: text("actor_type").notNull(),
+    emailHmac: text("email_hmac").notNull(),
+    ipHash: text("ip_hash").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+);
+
+export const emailCampaigns = sqliteTable("email_campaigns", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  createdByAdminId: integer("created_by_admin_id").references(
+    () => adminUsers.id,
+    { onDelete: "set null" },
+  ),
+  actorName: text("actor_name").notNull().default(""),
+  actorEmail: text("actor_email").notNull().default(""),
+  targetType: text("target_type").notNull(),
+  targetSegment: text("target_segment").notNull().default(""),
+  targetUserId: integer("target_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  emailType: text("email_type").notNull().default("announcement"),
+  subject: text("subject").notNull(),
+  bodyText: text("body_text").notNull(),
+  actionLabel: text("action_label").notNull().default("Open Devotional Portal"),
+  actionUrl: text("action_url").notNull().default("/dashboard"),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  status: text("status").notNull().default("queued"),
+  scheduledFor: text("scheduled_for"),
+  eligibleCount: integer("eligible_count").notNull().default(0),
+  skippedOptOutCount: integer("skipped_opt_out_count").notNull().default(0),
+  queuedCount: integer("queued_count").notNull().default(0),
+  sentCount: integer("sent_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  confirmedByAdmin: integer("confirmed_by_admin", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  startedAt: text("started_at"),
+  completedAt: text("completed_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const emailQueue = sqliteTable("email_queue", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  adminId: integer("admin_id").references(() => adminUsers.id, {
+    onDelete: "set null",
+  }),
+  campaignId: integer("campaign_id").references(() => emailCampaigns.id, {
+    onDelete: "set null",
+  }),
+  createdByAdminId: integer("created_by_admin_id").references(
+    () => adminUsers.id,
+    { onDelete: "set null" },
+  ),
+  recipientEmail: text("recipient_email").notNull(),
+  recipientName: text("recipient_name").notNull().default(""),
+  templateKey: text("template_key").notNull(),
+  channelKind: text("channel_kind").notNull(),
+  subject: text("subject").notNull(),
+  htmlBody: text("html_body").notNull(),
+  textBody: text("text_body").notNull(),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  status: text("status").notNull().default("pending"),
+  providerName: text("provider_name").notNull().default(""),
+  providerMessageId: text("provider_message_id").notNull().default(""),
+  attempts: integer("attempts").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
+  nextAttemptAt: text("next_attempt_at"),
+  lockedUntil: text("locked_until"),
+  lastError: text("last_error").notNull().default(""),
+  sentAt: text("sent_at"),
+  bouncedAt: text("bounced_at"),
+  complainedAt: text("complained_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const adminEmailCampaignRecipients = sqliteTable(
+  "admin_email_campaign_recipients",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    campaignId: integer("campaign_id")
+      .notNull()
+      .references(() => emailCampaigns.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    emailQueueId: integer("email_queue_id").references(() => emailQueue.id, {
+      onDelete: "set null",
+    }),
+    status: text("status").notNull().default("pending"),
+    skipReason: text("skip_reason").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+);
+
+export const emailDeliveryEvents = sqliteTable("email_delivery_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  emailQueueId: integer("email_queue_id")
+    .notNull()
+    .references(() => emailQueue.id, { onDelete: "cascade" }),
+  eventType: text("event_type").notNull(),
+  providerName: text("provider_name").notNull().default(""),
+  providerEventId: text("provider_event_id").notNull().default(""),
+  detail: text("detail").notNull().default(""),
+  createdAt: text("created_at").notNull(),
 });

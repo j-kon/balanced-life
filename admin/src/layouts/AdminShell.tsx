@@ -9,6 +9,7 @@ import {
   CreditCard,
   Layers,
   LogOut,
+  Mail,
   Package,
   Settings,
   Shield,
@@ -85,6 +86,13 @@ export const ADMIN_NAV_ROUTES: AdminNavRoute[] = [
     requiredPermission: "notifications.read",
   },
   {
+    id: "Email Management",
+    path: "/email",
+    label: "Email Management",
+    icon: Mail,
+    requiredPermission: "notifications.read",
+  },
+  {
     id: "Activity & Security",
     path: "/activity",
     label: "Activity & Security",
@@ -108,6 +116,7 @@ export const SECTION_TO_PATH: Record<AdminSectionId, string> = {
   "Bulk Orders": "/bulk-orders",
   Payments: "/payments",
   Notifications: "/notifications",
+  "Email Management": "/email",
   "Activity & Security": "/activity",
   Settings: "/settings",
 };

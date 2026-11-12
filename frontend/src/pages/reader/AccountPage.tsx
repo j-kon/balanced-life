@@ -6,6 +6,7 @@ import {
   Clock,
   Palette,
   Send,
+  Shield,
   Smartphone,
   Sparkles,
   Trash2,
@@ -83,7 +84,7 @@ function isIosRequiresStandalone(): boolean {
 }
 
 export function AccountPage() {
-  const { user, refresh, toast } = useApp();
+  const { user, config, refresh, toast } = useApp();
   const navigate = useNavigate();
   const {
     data: notifData,
@@ -198,6 +199,12 @@ export function AccountPage() {
             f.get("subscriptionAlertsEnabled") === "on",
           purchaseAlertsEnabled: f.get("purchaseAlertsEnabled") === "on",
           announcementsEnabled: f.get("announcementsEnabled") === "on",
+          emailDailyReminderEnabled:
+            f.get("emailDailyReminderEnabled") === "on",
+          emailAnnouncementsEnabled:
+            f.get("emailAnnouncementsEnabled") === "on",
+          emailCommunityUpdatesEnabled:
+            f.get("emailCommunityUpdatesEnabled") === "on",
         },
         "PATCH",
       );
@@ -651,10 +658,68 @@ export function AccountPage() {
                   }
                 />
                 <span>
-                  Receive optional community announcements &amp; updates from
-                  Cossy Teens Consult (off by default)
+                  Receive optional push/in-app announcements from Cossy Teens
+                  Consult (off by default)
                 </span>
               </label>
+
+              <div className="email-prefs-group stack">
+                <strong>Optional Email Preferences &amp; Subscriptions</strong>
+                <p className="muted" style={{ margin: 0, fontSize: "0.9rem" }}>
+                  Choose whether you want optional reminders or updates sent to
+                  your email inbox. Essential password-reset codes, security
+                  alerts, and confirmed order receipts remain active.
+                </p>
+
+                {notifData.preferences.emailSuppressedReason && (
+                  <div className="notice">
+                    <Shield size={18} />
+                    <div>
+                      <strong>Email delivery paused for optional mail</strong>
+                      <p>
+                        Reason: {notifData.preferences.emailSuppressedReason}. Contact{" "}
+                        {config.settings.contactEmail} if your mailbox has been
+                        restored.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <label className="check-label">
+                  <input
+                    type="checkbox"
+                    name="emailDailyReminderEnabled"
+                    defaultChecked={
+                      notifData.preferences.emailDailyReminderEnabled ?? false
+                    }
+                  />
+                  <span>Daily devotional email reminders (off by default)</span>
+                </label>
+
+                <label className="check-label">
+                  <input
+                    type="checkbox"
+                    name="emailAnnouncementsEnabled"
+                    defaultChecked={
+                      notifData.preferences.emailAnnouncementsEnabled ?? false
+                    }
+                  />
+                  <span>
+                    General announcements from Cossy Teens Consult (off by default)
+                  </span>
+                </label>
+
+                <label className="check-label">
+                  <input
+                    type="checkbox"
+                    name="emailCommunityUpdatesEnabled"
+                    defaultChecked={
+                      notifData.preferences.emailCommunityUpdatesEnabled ?? false
+                    }
+                  />
+                  <span>Community &amp; youth updates (off by default)</span>
+                </label>
+              </div>
 
               <div className="notice">
                 <Smartphone size={18} />

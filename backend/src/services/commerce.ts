@@ -13,6 +13,9 @@ import {
 } from "../auth.js";
 import { getAppSettings, updateAppSettings } from "./settings.js";
 import { createNotificationEvent } from "./notifications.js";
+import { getEnvConfig } from "../config.js";
+import { enqueueEmail } from "./emailQueue.js";
+import { formatNairaFromKobo } from "./emailTemplates.js";
 
 export const EDITION_2027_START_ISO = "2027-01-01T00:00:00.000Z";
 
@@ -525,6 +528,54 @@ function activateDigitalEntitlementForPurchase(
     dedupeKey: `dig_purchase_verified_${existingPurchase.id}`,
   });
 
+  const purchaser = db
+    .select({ id: s.users.id, name: s.users.name, email: s.users.email })
+    .from(s.users)
+    .where(eq(s.users.id, existingPurchase.userId))
+    .get();
+  if (purchaser) {
+    const appBaseUrl = getEnvConfig().appOrigin;
+    const amountLabel = formatNairaFromKobo(existingPurchase.amountKobo);
+    if (window.isRenewal) {
+      enqueueEmail(store, {
+        userId: purchaser.id,
+        recipientEmail: purchaser.email,
+        recipientName: purchaser.name,
+        templateId: "online_access_renewed",
+        category: "transactional",
+        dedupeKey: `email_dig_renewed_${existingPurchase.id}`,
+        payload: {
+          recipientName: purchaser.name,
+          startsAt: window.startsAt,
+          expiresAt: window.expiresAt,
+          amountLabel,
+          reference: existingPurchase.reference,
+          appBaseUrl,
+        },
+      });
+    } else {
+      enqueueEmail(store, {
+        userId: purchaser.id,
+        recipientEmail: purchaser.email,
+        recipientName: purchaser.name,
+        templateId: "online_access_confirmed",
+        category: "transactional",
+        dedupeKey: `email_dig_confirmed_${existingPurchase.id}`,
+        payload: {
+          recipientName: purchaser.name,
+          startsAt: window.startsAt,
+          expiresAt: window.expiresAt,
+          accessTypeLabel: isScheduled
+            ? "2027 Paid Online Access (Starts Jan 1, 2027)"
+            : "2027 Paid Online Access",
+          amountLabel,
+          reference: existingPurchase.reference,
+          appBaseUrl,
+        },
+      });
+    }
+  }
+
   return {
     purchase,
     entitlement: getUserDigitalEntitlement(store, existingPurchase.userId, 2027),
@@ -978,6 +1029,23 @@ export function grantComplimentaryOnlineAccessAdmin(
       dedupeKey: `comp_online_access_${targetUserId}_${now.slice(0, 16)}`,
     });
 
+    enqueueEmail(store, {
+      userId: targetUserId,
+      recipientEmail: targetUser.email,
+      recipientName: targetUser.name,
+      templateId: "online_access_confirmed",
+      category: "transactional",
+      dedupeKey: `email_comp_access_${targetUserId}_${now.slice(0, 16)}`,
+      payload: {
+        recipientName: targetUser.name,
+        startsAt: effectiveStartsAt,
+        expiresAt: computedExpiresAt,
+        accessTypeLabel: "Complimentary 2027 Online Access",
+        amountLabel: "Complimentary",
+        appBaseUrl: getEnvConfig().appOrigin,
+      },
+    });
+
     return getUserDigitalEntitlement(store, targetUserId, 2027);
   })();
 }
@@ -1369,6 +1437,25 @@ export function createPrintedOrder(
       });
     }
 
+    const appBaseUrl = getEnvConfig().appOrigin;
+    enqueueEmail(store, {
+      userId: userId ?? null,
+      recipientEmail: order.email,
+      recipientName: order.fullName,
+      templateId: "printed_order_received",
+      category: "transactional",
+      dedupeKey: `email_printed_created_${order.id}`,
+      payload: {
+        recipientName: order.fullName,
+        reference: order.orderNumber,
+        quantity,
+        subtotalKobo,
+        destinationLabel: `${order.city}, ${order.state}`,
+        trackingUrl: `${appBaseUrl}/bookstore?order=${encodeURIComponent(order.orderNumber)}&token=${encodeURIComponent(issuedAccess.token)}`,
+        appBaseUrl,
+      },
+    });
+
     return {
       ...getPrintedOrderById(store, order.id)!,
       orderAccessToken: issuedAccess.token,
@@ -1654,6 +1741,24 @@ export async function verifyPrintedOrderPayment(
       });
     }
 
+    const appBaseUrl = getEnvConfig().appOrigin;
+    enqueueEmail(store, {
+      userId: existing.userId ?? null,
+      recipientEmail: existing.email,
+      recipientName: existing.fullName,
+      templateId: "printed_payment_confirmed",
+      category: "transactional",
+      dedupeKey: `email_printed_paid_${existing.id}`,
+      payload: {
+        recipientName: existing.fullName,
+        reference: existing.orderNumber,
+        quantity: existing.quantity,
+        finalTotalKobo: expectedAmount,
+        trackingUrl: `${appBaseUrl}/bookstore?order=${encodeURIComponent(existing.orderNumber)}`,
+        appBaseUrl,
+      },
+    });
+
     return {
       order: getPrintedOrderById(store, existing.id)!,
       replayed: false,
@@ -1936,13 +2041,17 @@ export function updatePrintedOrderAdmin(
       now,
     );
 
-    // Operational notifications for customer (if linked to a user account)
-    if (existing.userId) {
-      if (
-        nextQuoteStatus === "quoted" &&
-        existing.deliveryQuoteStatus !== "quoted" &&
-        nextFinalTotalKobo !== null
-      ) {
+    // Operational notifications & transactional emails for customer
+    const appBaseUrl = getEnvConfig().appOrigin;
+    const trackingUrl = `${appBaseUrl}/bookstore?order=${encodeURIComponent(existing.orderNumber)}`;
+    const destinationLabel = `${existing.city}, ${existing.state}`;
+
+    if (
+      nextQuoteStatus === "quoted" &&
+      existing.deliveryQuoteStatus !== "quoted" &&
+      nextFinalTotalKobo !== null
+    ) {
+      if (existing.userId) {
         createNotificationEvent(store, {
           userId: existing.userId,
           category: "printed_order",
@@ -1952,8 +2061,28 @@ export function updatePrintedOrderAdmin(
           dedupeKey: `printed_order_quoted_${existing.id}_${nextFinalTotalKobo}`,
         });
       }
+      enqueueEmail(store, {
+        userId: existing.userId ?? null,
+        recipientEmail: existing.email,
+        recipientName: existing.fullName,
+        templateId: "delivery_quotation_ready",
+        category: "transactional",
+        dedupeKey: `email_printed_quoted_${existing.id}_${nextFinalTotalKobo}`,
+        payload: {
+          recipientName: existing.fullName,
+          reference: existing.orderNumber,
+          quantity: existing.quantity,
+          subtotalKobo: existing.subtotalKobo,
+          deliveryFeeKobo: nextDeliveryFeeKobo ?? 0,
+          finalTotalKobo: nextFinalTotalKobo,
+          trackingUrl,
+          appBaseUrl,
+        },
+      });
+    }
 
-      if (nextPaymentStatus === "paid" && existing.paymentStatus !== "paid") {
+    if (nextPaymentStatus === "paid" && existing.paymentStatus !== "paid") {
+      if (existing.userId) {
         createNotificationEvent(store, {
           userId: existing.userId,
           category: "printed_order",
@@ -1963,15 +2092,36 @@ export function updatePrintedOrderAdmin(
           dedupeKey: `printed_order_paid_${existing.id}`,
         });
       }
+      enqueueEmail(store, {
+        userId: existing.userId ?? null,
+        recipientEmail: existing.email,
+        recipientName: existing.fullName,
+        templateId: "printed_payment_confirmed",
+        category: "transactional",
+        dedupeKey: `email_printed_paid_${existing.id}`,
+        payload: {
+          recipientName: existing.fullName,
+          reference: existing.orderNumber,
+          quantity: existing.quantity,
+          finalTotalKobo:
+            nextFinalTotalKobo ??
+            existing.finalTotalKobo ??
+            existing.subtotalKobo,
+          trackingUrl,
+          appBaseUrl,
+        },
+      });
+    }
 
-      if (
-        nextFulfillmentStatus === "shipped" &&
-        existing.fulfillmentStatus !== "shipped"
-      ) {
-        const courierText = (input.courierName ?? existing.courierName).trim();
-        const trackingText = (
-          input.trackingReference ?? existing.trackingReference
-        ).trim();
+    if (
+      nextFulfillmentStatus === "shipped" &&
+      existing.fulfillmentStatus !== "shipped"
+    ) {
+      const courierText = (input.courierName ?? existing.courierName).trim();
+      const trackingText = (
+        input.trackingReference ?? existing.trackingReference
+      ).trim();
+      if (existing.userId) {
         createNotificationEvent(store, {
           userId: existing.userId,
           category: "printed_order",
@@ -1981,11 +2131,30 @@ export function updatePrintedOrderAdmin(
           dedupeKey: `printed_order_shipped_${existing.id}`,
         });
       }
+      enqueueEmail(store, {
+        userId: existing.userId ?? null,
+        recipientEmail: existing.email,
+        recipientName: existing.fullName,
+        templateId: "order_dispatched",
+        category: "transactional",
+        dedupeKey: `email_printed_shipped_${existing.id}`,
+        payload: {
+          recipientName: existing.fullName,
+          reference: existing.orderNumber,
+          courierName: courierText || "Assigned Courier",
+          trackingReference: trackingText || undefined,
+          destinationLabel,
+          trackingUrl,
+          appBaseUrl,
+        },
+      });
+    }
 
-      if (
-        nextFulfillmentStatus === "delivered" &&
-        existing.fulfillmentStatus !== "delivered"
-      ) {
+    if (
+      nextFulfillmentStatus === "delivered" &&
+      existing.fulfillmentStatus !== "delivered"
+    ) {
+      if (existing.userId) {
         createNotificationEvent(store, {
           userId: existing.userId,
           category: "printed_order",
@@ -1995,6 +2164,20 @@ export function updatePrintedOrderAdmin(
           dedupeKey: `printed_order_delivered_${existing.id}`,
         });
       }
+      enqueueEmail(store, {
+        userId: existing.userId ?? null,
+        recipientEmail: existing.email,
+        recipientName: existing.fullName,
+        templateId: "order_delivered",
+        category: "transactional",
+        dedupeKey: `email_printed_delivered_${existing.id}`,
+        payload: {
+          recipientName: existing.fullName,
+          reference: existing.orderNumber,
+          trackingUrl,
+          appBaseUrl,
+        },
+      });
     }
 
     return getPrintedOrderById(store, orderId)!;

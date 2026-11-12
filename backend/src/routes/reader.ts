@@ -53,6 +53,8 @@ import {
   getReaderAccessSummary,
 } from "../services/access.js";
 import type { PaymentProvider } from "../services/payments.js";
+import type { EmailService } from "../services/email.js";
+import { processEmailQueueBatch } from "../services/emailQueue.js";
 import { formatEntryMetadata, getAuthorizedEntry } from "./public.js";
 import { z } from "zod";
 
@@ -63,6 +65,7 @@ export function registerReaderRoutes(
   paymentProvider: PaymentProvider,
   appOrigin: string,
   pushProvider: WebPushProvider,
+  emailService?: EmailService,
 ) {
   const { db } = store;
 
@@ -580,12 +583,19 @@ export function registerReaderRoutes(
     async (req) => {
       const user = requireUser(req);
       const { reference } = checkoutVerifySchema.parse(req.body);
-      return verifyAndActivateDigitalPurchase(
+      const result = await verifyAndActivateDigitalPurchase(
         store,
         reference,
         paymentProvider,
         user.id,
       );
+      if (emailService?.configured) {
+        await processEmailQueueBatch(store, emailService, {
+          batchSize: 5,
+          defaultAppBaseUrl: appOrigin,
+        }).catch(() => undefined);
+      }
+      return result;
     },
   );
 

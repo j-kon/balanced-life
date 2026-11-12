@@ -19,6 +19,8 @@ import {
 import { HttpError } from "../errors.js";
 import {
   adminBulkOrderUpdateSchema,
+  adminEmailCampaignSchema,
+  adminEmailTestSchema,
   adminNotificationCampaignSchema,
   adminPrintedOrderUpdateSchema,
   adminReconcileDigitalPurchaseSchema,
@@ -62,6 +64,24 @@ import {
   type WebPushProvider,
 } from "../services/notifications.js";
 import type { ReaderAudienceSegment } from "../services/access.js";
+import {
+  UnconfiguredEmailAdapter,
+  type EmailService,
+} from "../services/email.js";
+import {
+  EMAIL_TEMPLATE_CATALOG,
+  buildSampleTemplatePreview,
+  type EmailTemplateId,
+} from "../services/emailTemplates.js";
+import {
+  cancelAdminEmailCampaign,
+  createAndQueueAdminEmailCampaign,
+  getAdminEmailOverview,
+  previewAdminEmailCampaign,
+  processEmailQueueBatch,
+  runEmailWorkerCycle,
+  sendImmediateTransactionalEmail,
+} from "../services/emailQueue.js";
 
 export function registerAdminRoutes(
   app: FastifyInstance,
@@ -69,7 +89,14 @@ export function registerAdminRoutes(
   store: Store,
   paymentProvider: PaymentProvider,
   pushProvider: WebPushProvider = new LiveWebPushProvider({}),
+  emailOptions: {
+    emailService?: EmailService;
+    appOrigin?: string;
+  } = {},
 ) {
+  const emailService =
+    emailOptions.emailService || new UnconfiguredEmailAdapter({});
+  const appOrigin = emailOptions.appOrigin || "http://localhost:5173";
   const { db, sqlite } = store;
 
   const actorOf = (admin: PublicAdmin): AdminActor => ({
@@ -1603,7 +1630,19 @@ export function registerAdminRoutes(
     const admin = requireAdminPermission(req, "digital_orders.write");
     const purchaseId = idOf(req);
     const input = adminReconcileDigitalPurchaseSchema.parse(req.body);
-    return reconcileDigitalPurchaseAdmin(store, actorOf(admin), purchaseId, input);
+    const result = reconcileDigitalPurchaseAdmin(
+      store,
+      actorOf(admin),
+      purchaseId,
+      input,
+    );
+    if (emailService.configured) {
+      await processEmailQueueBatch(store, emailService, {
+        batchSize: 5,
+        defaultAppBaseUrl: appOrigin,
+      }).catch(() => undefined);
+    }
+    return result;
   });
 
   app.post(
@@ -1618,6 +1657,12 @@ export function registerAdminRoutes(
         targetUserId,
         input,
       );
+      if (emailService.configured) {
+        await processEmailQueueBatch(store, emailService, {
+          batchSize: 5,
+          defaultAppBaseUrl: appOrigin,
+        }).catch(() => undefined);
+      }
       return { ok: true, entitlement };
     },
   );
@@ -2054,7 +2099,14 @@ export function registerAdminRoutes(
         "Only finance managers or the owner can confirm or modify printed order payment status.",
       );
     }
-    return updatePrintedOrderAdmin(store, actorOf(admin), orderId, input);
+    const updated = updatePrintedOrderAdmin(store, actorOf(admin), orderId, input);
+    if (emailService.configured) {
+      await processEmailQueueBatch(store, emailService, {
+        batchSize: 5,
+        defaultAppBaseUrl: appOrigin,
+      }).catch(() => undefined);
+    }
+    return updated;
   });
 
   app.patch(prefix + "/admin/bulk-orders/:id", async (req) => {
@@ -2191,6 +2243,257 @@ export function registerAdminRoutes(
       return { ok: true, result };
     },
   );
+
+  // ============================================================================
+  // EMAIL MANAGEMENT (DELIVERY STATUS, TEMPLATES, TEST SENDS & CAMPAIGNS)
+  // ============================================================================
+
+  app.get(prefix + "/admin/email/overview", async (req) => {
+    requireAdminPermission(req, "notifications.read");
+    return {
+      ...getAdminEmailOverview(store, emailService),
+      templates: EMAIL_TEMPLATE_CATALOG,
+    };
+  });
+
+  app.get(prefix + "/admin/email/templates/preview", async (req) => {
+    requireAdminPermission(req, "notifications.read");
+    const templateId = String(
+      (req.query as { templateId?: string })?.templateId || "welcome",
+    ) as EmailTemplateId;
+    const valid = EMAIL_TEMPLATE_CATALOG.some((t) => t.id === templateId);
+    if (!valid) {
+      throw new HttpError(400, "Unknown email template identifier.");
+    }
+    return buildSampleTemplatePreview(templateId, appOrigin);
+  });
+
+  app.post(
+    prefix + "/admin/email/test",
+    { config: { rateLimit: { max: 15, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const admin = requireAdminPermission(req, "notifications.write");
+      const input = adminEmailTestSchema.parse(req.body || {});
+      const preview = buildSampleTemplatePreview(input.templateId, appOrigin);
+
+      const samplePayloads: Record<EmailTemplateId, Record<string, unknown>> = {
+        welcome: {
+          recipientName: admin.name,
+          appBaseUrl: appOrigin,
+        },
+        password_reset_code: {
+          recipientName: admin.name,
+          code: "000000",
+          expiresMinutes: 10,
+          audience: "admin",
+          appBaseUrl: appOrigin,
+        },
+        password_changed: {
+          recipientName: admin.name,
+          changedAtIso: new Date().toISOString(),
+          audience: "admin",
+          appBaseUrl: appOrigin,
+        },
+        online_access_confirmed: {
+          recipientName: admin.name,
+          startsAt: "2027-02-01T09:00:00.000Z",
+          expiresAt: "2028-02-01T08:59:59.000Z",
+          accessTypeLabel: "2027 Paid Online Access (Test Sample)",
+          amountLabel: "₦3,500",
+          reference: "BLD-TEST-PREVIEW",
+          appBaseUrl: appOrigin,
+        },
+        online_access_expiry_reminder: {
+          recipientName: admin.name,
+          expiresAt: "2028-02-01T08:59:59.000Z",
+          daysRemaining: 14,
+          appBaseUrl: appOrigin,
+        },
+        online_access_renewed: {
+          recipientName: admin.name,
+          startsAt: "2028-02-01T09:00:00.000Z",
+          expiresAt: "2029-02-01T08:59:59.000Z",
+          amountLabel: "₦3,500",
+          reference: "BLD-TEST-RENEW",
+          appBaseUrl: appOrigin,
+        },
+        printed_order_received: {
+          recipientName: admin.name,
+          reference: "BLD-PRT-TEST",
+          quantity: 1,
+          subtotalKobo: 500000,
+          destinationLabel: "Abuja, FCT",
+          appBaseUrl: appOrigin,
+        },
+        delivery_quotation_ready: {
+          recipientName: admin.name,
+          reference: "BLD-PRT-TEST",
+          quantity: 1,
+          subtotalKobo: 500000,
+          deliveryFeeKobo: 250000,
+          finalTotalKobo: 750000,
+          appBaseUrl: appOrigin,
+        },
+        printed_payment_confirmed: {
+          recipientName: admin.name,
+          reference: "BLD-PRT-TEST",
+          quantity: 1,
+          finalTotalKobo: 750000,
+          appBaseUrl: appOrigin,
+        },
+        order_dispatched: {
+          recipientName: admin.name,
+          reference: "BLD-PRT-TEST",
+          courierName: "GIG Logistics",
+          trackingReference: "TEST-TRACK-01",
+          destinationLabel: "Abuja, FCT",
+          appBaseUrl: appOrigin,
+        },
+        order_delivered: {
+          recipientName: admin.name,
+          reference: "BLD-PRT-TEST",
+          appBaseUrl: appOrigin,
+        },
+        admin_announcement: {
+          recipientName: admin.name,
+          title: "Sample Reader Community Update",
+          body: "This is a test render of the Balanced Life Devotional community email template sent to your staff inbox.",
+          actionPath: "/dashboard",
+          actionLabel: "Open Balanced Life App",
+          appBaseUrl: appOrigin,
+        },
+        daily_devotional_reminder: {
+          recipientName: admin.name,
+          date: "2027-02-01",
+          devotionalTitle: "Standing Firm in Everyday Choices",
+          theme: "Godliness & Purpose",
+          bibleText: "Daniel 1:8–20",
+          appBaseUrl: appOrigin,
+        },
+      };
+
+      const result = await sendImmediateTransactionalEmail(store, emailService, {
+        userId: null,
+        recipientEmail: admin.email,
+        recipientName: admin.name,
+        templateId: input.templateId,
+        payload: samplePayloads[input.templateId] as never,
+        dedupeKey: `admin_test_email_${admin.id}_${input.templateId}_${Date.now()}`,
+        redactCodeInAudit: input.templateId === "password_reset_code",
+      });
+
+      audit(
+        admin,
+        `Sent test email template "${input.templateId}" to staff address ${admin.email} (delivered: ${result.delivered})`,
+        "email",
+        input.templateId,
+      );
+
+      return {
+        ok: result.delivered,
+        sentTo: admin.email,
+        subject: preview.subject,
+        provider: result.provider,
+        messageId: result.messageId || null,
+        error: result.error || null,
+      };
+    },
+  );
+
+  app.post(prefix + "/admin/email/campaigns/preview", async (req) => {
+    const input = adminEmailCampaignSchema.parse(req.body || {});
+    requireAdminPermission(
+      req,
+      input.targetType === "individual"
+        ? "notifications.write"
+        : "notifications.broadcast",
+    );
+    return previewAdminEmailCampaign(store, input, appOrigin);
+  });
+
+  app.post(
+    prefix + "/admin/email/campaigns",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = adminEmailCampaignSchema.parse(req.body || {});
+      const admin = requireAdminPermission(
+        req,
+        input.targetType === "individual"
+          ? "notifications.write"
+          : "notifications.broadcast",
+      );
+      return createAndQueueAdminEmailCampaign(
+        store,
+        actorOf(admin),
+        input,
+        emailService,
+        appOrigin,
+      );
+    },
+  );
+
+  app.post(prefix + "/admin/email/campaigns/:id/cancel", async (req) => {
+    const admin = requireAdminPermission(req, "notifications.write");
+    const campaignId = idOf(req);
+    const campaign = cancelAdminEmailCampaign(store, actorOf(admin), campaignId);
+    return { ok: true, campaign };
+  });
+
+  app.post(
+    prefix + "/admin/email/run-worker",
+    { config: { rateLimit: { max: 15, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const admin = requireAdminPermission(req, "notifications.write");
+      const result = await runEmailWorkerCycle(store, emailService, appOrigin);
+      audit(
+        admin,
+        `Executed email worker cycle (reminders: ${result.reminders.generatedCount}, sent: ${result.delivery.sentCount}, retrying: ${result.delivery.retryingCount}, failed: ${result.delivery.failedCount})`,
+        "email",
+        "worker",
+      );
+      return { ok: true, result };
+    },
+  );
+
+  app.post(prefix + "/admin/email/queue/:id/retry", async (req) => {
+    const admin = requireAdminPermission(req, "notifications.write");
+    const queueId = idOf(req);
+    const existing = db
+      .select()
+      .from(s.emailQueue)
+      .where(eq(s.emailQueue.id, queueId))
+      .get();
+    if (!existing) {
+      throw new HttpError(404, "Email queue entry not found.");
+    }
+    if (existing.status === "sent") {
+      throw new HttpError(400, "Delivered emails do not need retry.");
+    }
+    const nowIso = new Date().toISOString();
+    db.update(s.emailQueue)
+      .set({
+        status: "pending",
+        attempts: 0,
+        nextAttemptAt: nowIso,
+        lockedUntil: null,
+        lastError: "",
+        updatedAt: nowIso,
+      })
+      .where(eq(s.emailQueue.id, queueId))
+      .run();
+
+    const delivery = await processEmailQueueBatch(store, emailService, {
+      batchSize: 10,
+      defaultAppBaseUrl: appOrigin,
+    });
+    audit(
+      admin,
+      `Requeued email #${queueId} (${existing.templateKey}) for retry`,
+      "email_queue",
+      queueId,
+    );
+    return { ok: true, delivery };
+  });
 
   app.get(prefix + "/admin/activity", async (req) => {
     requireAdminPermission(req, "audit.read");

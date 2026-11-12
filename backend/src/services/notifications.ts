@@ -324,9 +324,16 @@ export type NotificationPrefs = {
   subscriptionAlertsEnabled: boolean;
   purchaseAlertsEnabled: boolean;
   announcementsEnabled: boolean;
+  emailDailyReminderEnabled: boolean;
+  emailAnnouncementsEnabled: boolean;
+  emailCommunityUpdatesEnabled: boolean;
+  emailSuppressedReason: string;
+  emailSuppressedAt: string | null;
   lastDailyReminderDate: string | null;
   lastUnreadReminderDate: string | null;
   lastExpiryReminderFor: string | null;
+  lastEmailDailyReminderDate: string | null;
+  lastEmailExpiryReminderFor: string | null;
   updatedAt: string;
 };
 
@@ -379,6 +386,9 @@ export function updateNotificationPreferences(
     subscriptionAlertsEnabled: boolean;
     purchaseAlertsEnabled: boolean;
     announcementsEnabled: boolean;
+    emailDailyReminderEnabled: boolean;
+    emailAnnouncementsEnabled: boolean;
+    emailCommunityUpdatesEnabled: boolean;
   }>,
 ): NotificationPrefs {
   const current = getNotificationPreferences(store, userId);
@@ -440,6 +450,13 @@ export function updateNotificationPreferences(
       purchaseAlertsEnabled:
         updates.purchaseAlertsEnabled ?? current.purchaseAlertsEnabled,
       announcementsEnabled: nextAnnouncementsEnabled,
+      emailDailyReminderEnabled:
+        updates.emailDailyReminderEnabled ?? current.emailDailyReminderEnabled,
+      emailAnnouncementsEnabled:
+        updates.emailAnnouncementsEnabled ?? current.emailAnnouncementsEnabled,
+      emailCommunityUpdatesEnabled:
+        updates.emailCommunityUpdatesEnabled ??
+        current.emailCommunityUpdatesEnabled,
       updatedAt: now,
     })
     .where(eq(s.notificationPreferences.userId, userId))

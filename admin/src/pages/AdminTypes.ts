@@ -23,6 +23,7 @@ export type AdminSectionId =
   | "Bulk Orders"
   | "Payments"
   | "Notifications"
+  | "Email Management"
   | "Activity & Security"
   | "Settings";
 

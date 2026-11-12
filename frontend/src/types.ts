@@ -170,6 +170,7 @@ export type AppConfig = {
   };
   email: {
     configured: boolean;
+    provider?: string;
   };
   webPush?: {
     configured: boolean;
@@ -436,9 +437,16 @@ export type NotificationPreferences = {
   subscriptionAlertsEnabled: boolean;
   purchaseAlertsEnabled: boolean;
   announcementsEnabled?: boolean;
+  emailDailyReminderEnabled?: boolean;
+  emailAnnouncementsEnabled?: boolean;
+  emailCommunityUpdatesEnabled?: boolean;
+  emailSuppressedReason?: string;
+  emailSuppressedAt?: string | null;
   lastDailyReminderDate: string | null;
   lastUnreadReminderDate: string | null;
   lastExpiryReminderFor: string | null;
+  lastEmailDailyReminderDate?: string | null;
+  lastEmailExpiryReminderFor?: string | null;
   updatedAt: string;
 };
 

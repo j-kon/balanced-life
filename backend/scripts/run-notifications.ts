@@ -8,6 +8,8 @@ import {
   type PushSubscriptionTarget,
   type WebPushProvider,
 } from "../src/services/notifications.js";
+import { createEmailService } from "../src/services/email.js";
+import { runEmailWorkerCycle } from "../src/services/emailQueue.js";
 
 const args = process.argv.slice(2);
 
@@ -59,6 +61,13 @@ async function executeOnce() {
   try {
     const now = customNow || new Date();
     const summary = await runNotificationWorkerCycle(store, pushProvider, now);
+    const emailService = createEmailService(env.email);
+    const emailSummary = await runEmailWorkerCycle(
+      store,
+      emailService,
+      env.appOrigin,
+      now,
+    );
     console.log(
       JSON.stringify({
         timestamp: now.toISOString(),
@@ -67,6 +76,10 @@ async function executeOnce() {
           : pushProvider.configured
             ? "live-vapid"
             : "in-app-only",
+        emailMode: emailService.configured
+          ? emailService.providerName
+          : "unconfigured",
+        emailSummary,
         ...summary,
       }),
     );

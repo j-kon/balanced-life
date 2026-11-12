@@ -27,6 +27,7 @@ import { DevotionalsPage } from "./pages/DevotionalsPage";
 import { BulkOrdersPage } from "./pages/BulkOrdersPage";
 import { PaymentsPage } from "./pages/PaymentsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
+import { EmailManagementPage } from "./pages/EmailManagementPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ActivitySecurityPage } from "./pages/ActivitySecurityPage";
 
@@ -167,6 +168,12 @@ function AdminWorkspace({ section }: { section: AdminSectionId }) {
                       reload={reload}
                       onNavigate={onNavigate}
                     />
+                  ) : (
+                    <PermissionDenied />
+                  ))}
+                {section === "Email Management" &&
+                  (hasPermission("notifications.read") ? (
+                    <EmailManagementPage setMessage={(msg) => toast(msg)} />
                   ) : (
                     <PermissionDenied />
                   ))}
@@ -434,6 +441,14 @@ export default function App() {
           element={
             <RequireVerifiedAdmin>
               <AdminWorkspace section="Notifications" />
+            </RequireVerifiedAdmin>
+          }
+        />
+        <Route
+          path="/email"
+          element={
+            <RequireVerifiedAdmin>
+              <AdminWorkspace section="Email Management" />
             </RequireVerifiedAdmin>
           }
         />

@@ -66,6 +66,30 @@ export const forgotPasswordSchema = z.object({
     .transform((v) => v.toLowerCase()),
 });
 
+export const verifyResetCodeSchema = z.object({
+  email: z
+    .email("Enter a valid email address.")
+    .max(254)
+    .transform((v) => v.toLowerCase()),
+  code: z
+    .string()
+    .trim()
+    .transform((v) => v.replace(/\D/g, ""))
+    .refine((v) => /^\d{6}$/.test(v), "Enter the 6-digit verification code."),
+});
+
+export const resetPasswordWithCodeSchema = z.object({
+  email: z
+    .email("Enter a valid email address.")
+    .max(254)
+    .transform((v) => v.toLowerCase()),
+  resetProofToken: z.string().trim().min(32).max(256),
+  password: z
+    .string()
+    .min(10, "Password must be at least 10 characters.")
+    .max(128),
+});
+
 export const resetPasswordSchema = z.object({
   token: z.string().trim().min(32).max(256),
   password: z
@@ -398,6 +422,9 @@ export const notificationPreferencesSchema = z.object({
   subscriptionAlertsEnabled: z.boolean().optional(),
   purchaseAlertsEnabled: z.boolean().optional(),
   announcementsEnabled: z.boolean().optional(),
+  emailDailyReminderEnabled: z.boolean().optional(),
+  emailAnnouncementsEnabled: z.boolean().optional(),
+  emailCommunityUpdatesEnabled: z.boolean().optional(),
 });
 
 export const onboardingUpdateSchema = z.object({
@@ -579,4 +606,69 @@ export const settingsUpdateSchema = z.object({
   allowRegistration: z.boolean().optional(),
   enableAutoRenewal: z.boolean().optional(),
   renewalReminderDays: z.coerce.number().int().min(1).max(60).optional(),
+});
+
+export const adminEmailCampaignSchema = z.object({
+  targetType: z.enum(["individual", "segment", "all"]),
+  targetSegment: z
+    .enum(["free", "pending_payment", "scheduled", "active", "expired", "revoked"])
+    .optional(),
+  targetUserId: z.coerce.number().int().positive().optional(),
+  audienceChannel: z
+    .enum(["announcements", "community_updates"])
+    .default("announcements"),
+  title: z.string().trim().min(2, "Provide an email subject.").max(140),
+  body: z.string().trim().min(4, "Provide an email message.").max(4000),
+  actionPath: z.string().trim().max(240).default("/dashboard"),
+  actionLabel: z.string().trim().min(2).max(60).default("Open Balanced Life App"),
+  scheduledFor: z.string().trim().max(64).nullable().optional(),
+  idempotencyKey: z.string().trim().min(8).max(120).optional(),
+});
+
+export const adminEmailTestSchema = z.object({
+  templateId: z.enum([
+    "welcome",
+    "password_reset_code",
+    "password_changed",
+    "online_access_confirmed",
+    "online_access_expiry_reminder",
+    "online_access_renewed",
+    "printed_order_received",
+    "delivery_quotation_ready",
+    "printed_payment_confirmed",
+    "order_dispatched",
+    "order_delivered",
+    "admin_announcement",
+    "daily_devotional_reminder",
+  ]),
+});
+
+export const emailUnsubscribeSchema = z.object({
+  token: z.string().trim().min(16).max(512),
+  scope: z
+    .enum([
+      "daily_reminder",
+      "announcements",
+      "community_updates",
+      "expiry_reminder",
+      "all_optional",
+    ])
+    .optional(),
+});
+
+export const emailWebhookEventSchema = z.object({
+  eventType: z.enum([
+    "delivered",
+    "bounce",
+    "hard_bounce",
+    "soft_bounce",
+    "complaint",
+  ]),
+  email: z
+    .email("Provide a valid email address.")
+    .max(254)
+    .transform((v) => v.toLowerCase()),
+  provider: z.string().trim().max(60).optional(),
+  providerMessageId: z.string().trim().max(240).optional(),
+  detail: z.string().trim().max(400).optional(),
 });

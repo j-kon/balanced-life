@@ -8,6 +8,8 @@ import type { PublicUser } from "../auth.js";
 import { HttpError } from "../errors.js";
 import {
   bulkOrderCreateSchema,
+  emailUnsubscribeSchema,
+  emailWebhookEventSchema,
   idOf,
   inquiryCreateSchema,
   printedOrderAccessRequestSchema,
@@ -17,6 +19,16 @@ import {
   printedOrderQuoteApproveSchema,
   printedOrderVerifySchema,
 } from "../validation.js";
+import { timingSafeEqual } from "node:crypto";
+import { getEnvConfig } from "../config.js";
+import {
+  applyEmailUnsubscribe,
+  maskEmailAddress,
+  processEmailQueueBatch,
+  processEmailWebhookEvent,
+  verifyEmailUnsubscribeToken,
+} from "../services/emailQueue.js";
+import { getNotificationPreferences } from "../services/notifications.js";
 import { getAppSettings } from "../services/settings.js";
 import {
   hasPremiumAccess,
@@ -161,6 +173,7 @@ export function registerPublicRoutes(
       },
       email: {
         configured: emailService.configured,
+        provider: emailService.providerName || "none",
       },
       webPush: {
         configured: Boolean(pushProvider?.configured),
@@ -313,7 +326,14 @@ export function registerPublicRoutes(
     { config: { rateLimit: { max: 15, timeWindow: "15 minutes" } } },
     async (req) => {
       const input = printedOrderCreateSchema.parse(req.body);
-      return createPrintedOrder(store, input, req.user?.id ?? null);
+      const result = createPrintedOrder(store, input, req.user?.id ?? null);
+      if (emailService.configured) {
+        await processEmailQueueBatch(store, emailService, {
+          batchSize: 5,
+          defaultAppBaseUrl: appOrigin,
+        }).catch(() => undefined);
+      }
+      return result;
     },
   );
 
@@ -437,11 +457,95 @@ export function registerPublicRoutes(
         (req.headers["x-order-token"] as string | undefined) ||
         (req.headers["x-order-access-token"] as string | undefined) ||
         null;
-      return verifyPrintedOrderPayment(store, reference, paymentProvider, {
-        user: req.user,
-        token: orderAccessToken || token || headerToken,
-        isWebhook: false,
+      const result = await verifyPrintedOrderPayment(
+        store,
+        reference,
+        paymentProvider,
+        {
+          user: req.user,
+          token: orderAccessToken || token || headerToken,
+          isWebhook: false,
+        },
+      );
+      if (emailService.configured) {
+        await processEmailQueueBatch(store, emailService, {
+          batchSize: 5,
+          defaultAppBaseUrl: appOrigin,
+        }).catch(() => undefined);
+      }
+      return result;
+    },
+  );
+
+  app.get(prefix + "/email/unsubscribe", async (req) => {
+    const token = String((req.query as { token?: string })?.token || "").trim();
+    const verified = verifyEmailUnsubscribeToken(token);
+    if (!verified) {
+      throw new HttpError(400, "This unsubscribe link is invalid or has expired.");
+    }
+    const user = db
+      .select({
+        id: s.users.id,
+        name: s.users.name,
+        email: s.users.email,
+        role: s.users.role,
+      })
+      .from(s.users)
+      .where(eq(s.users.id, verified.userId))
+      .get();
+    if (!user || user.role !== "reader") {
+      throw new HttpError(404, "Reader account not found.");
+    }
+    const prefs = getNotificationPreferences(store, user.id);
+    return {
+      valid: true,
+      scope: verified.scope,
+      readerName: user.name,
+      maskedEmail: maskEmailAddress(user.email),
+      preferences: {
+        emailDailyReminderEnabled: Boolean(prefs.emailDailyReminderEnabled),
+        emailAnnouncementsEnabled: Boolean(prefs.emailAnnouncementsEnabled),
+        emailCommunityUpdatesEnabled: Boolean(prefs.emailCommunityUpdatesEnabled),
+        subscriptionAlertsEnabled: Boolean(prefs.subscriptionAlertsEnabled),
+      },
+    };
+  });
+
+  app.post(
+    prefix + "/email/unsubscribe",
+    { config: { rateLimit: { max: 30, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = emailUnsubscribeSchema.parse(req.body || {});
+      return applyEmailUnsubscribe(store, {
+        token: input.token,
+        scopeOverride: input.scope,
       });
+    },
+  );
+
+  app.post(
+    prefix + "/webhooks/email",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (req) => {
+      const env = getEnvConfig();
+      const expectedSecret = env.email.webhookSecret;
+      if (expectedSecret) {
+        const provided = String(
+          req.headers["x-email-webhook-secret"] || "",
+        ).trim();
+        const a = Buffer.from(provided, "utf8");
+        const b = Buffer.from(expectedSecret, "utf8");
+        if (a.length !== b.length || !timingSafeEqual(a, b)) {
+          throw new HttpError(401, "Invalid email webhook secret.");
+        }
+      } else if (env.isProduction) {
+        throw new HttpError(
+          503,
+          "Email webhook secret is not configured in this environment.",
+        );
+      }
+      const parsed = emailWebhookEventSchema.parse(req.body || {});
+      return processEmailWebhookEvent(store, parsed);
     },
   );
 
@@ -477,6 +581,12 @@ export function registerPublicRoutes(
           reference,
           paymentProvider,
         );
+        if (emailService.configured) {
+          await processEmailQueueBatch(store, emailService, {
+            batchSize: 5,
+            defaultAppBaseUrl: appOrigin,
+          }).catch(() => undefined);
+        }
         return { received: true, processed: true, kind: "digital_edition" };
       }
 
@@ -489,6 +599,12 @@ export function registerPublicRoutes(
         await verifyPrintedOrderPayment(store, reference, paymentProvider, {
           isWebhook: true,
         });
+        if (emailService.configured) {
+          await processEmailQueueBatch(store, emailService, {
+            batchSize: 5,
+            defaultAppBaseUrl: appOrigin,
+          }).catch(() => undefined);
+        }
         return { received: true, processed: true, kind: "printed_order" };
       }
 

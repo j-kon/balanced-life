@@ -10,7 +10,6 @@ import {
   establishAdminSession,
   hashPassword,
   logAdminAudit,
-  newToken,
   publicAdmin,
   requireAdmin,
   requireAdminSessionPendingOk,
@@ -21,9 +20,19 @@ import { HttpError } from "../errors.js";
 import {
   forgotPasswordSchema,
   loginSchema,
-  resetPasswordSchema,
+  resetPasswordWithCodeSchema,
+  verifyResetCodeSchema,
 } from "../validation.js";
 import type { EmailService } from "../services/email.js";
+import {
+  enqueueEmail,
+  processEmailQueueBatch,
+} from "../services/emailQueue.js";
+import {
+  completePasswordResetWithProof,
+  requestPasswordResetCode,
+  verifyPasswordResetCode,
+} from "../services/passwordReset.js";
 import {
   buildOtpAuthUri,
   decryptMfaSecret,
@@ -761,138 +770,50 @@ export function registerAdminAuthRoutes(
 
   app.post(
     prefix + "/admin/auth/forgot-password",
-    { config: { rateLimit: { max: 6, timeWindow: "15 minutes" } } },
+    { config: { rateLimit: { max: 12, timeWindow: "15 minutes" } } },
     async (req) => {
       const input = forgotPasswordSchema.parse(req.body);
       if (!emailService.configured) {
         throw new HttpError(
           503,
-          "Automated password recovery emails are not configured in this environment. Set EMAIL_WEBHOOK_URL or use the server CLI administrator recovery tool.",
+          "Automated password recovery emails are not configured in this environment. Configure EMAIL_PROVIDER or use the server CLI administrator recovery tool.",
         );
       }
 
-      const admin = db
-        .select()
-        .from(s.adminUsers)
-        .where(eq(s.adminUsers.email, input.email))
-        .get();
+      return requestPasswordResetCode(store, emailService, {
+        scope: "admin",
+        email: input.email,
+        ipAddress: req.ip,
+        appBaseUrl: options.adminOrigin,
+      });
+    },
+  );
 
-      if (admin && admin.status === "active") {
-        const rawToken = newToken();
-        const now = Date.now();
-        const expiresInMinutes = 30;
-        db.insert(s.adminPasswordResetTokens)
-          .values({
-            tokenHash: tokenHash(rawToken),
-            adminId: admin.id,
-            expiresAt: new Date(now + expiresInMinutes * 60_000).toISOString(),
-            usedAt: null,
-            createdAt: new Date(now).toISOString(),
-          })
-          .run();
-
-        const resetUrl = `${options.adminOrigin}/reset-password?token=${encodeURIComponent(rawToken)}`;
-        const sender =
-          emailService.sendAdminPasswordReset?.bind(emailService) ||
-          emailService.sendPasswordReset.bind(emailService);
-        await sender({
-          to: admin.email,
-          name: admin.name,
-          resetUrl,
-          expiresInMinutes,
-        });
-
-        logAdminAudit(
-          store,
-          {
-            id: admin.id,
-            name: admin.name,
-            email: admin.email,
-            role: admin.role,
-          },
-          "Requested administrator password reset link",
-          "admin_auth",
-          admin.id,
-          new Date(now).toISOString(),
-        );
-      }
-
-      return {
-        ok: true,
-        message:
-          "If an active administrator account matches that email address, a recovery link has been sent.",
-      };
+  app.post(
+    prefix + "/admin/auth/verify-reset-code",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = verifyResetCodeSchema.parse(req.body);
+      return verifyPasswordResetCode(store, {
+        scope: "admin",
+        email: input.email,
+        code: input.code,
+      });
     },
   );
 
   app.post(
     prefix + "/admin/auth/reset-password",
-    { config: { rateLimit: { max: 8, timeWindow: "15 minutes" } } },
+    { config: { rateLimit: { max: 12, timeWindow: "15 minutes" } } },
     async (req) => {
-      const input = resetPasswordSchema.parse(req.body);
-      assertStrongAdminPassword(input.password);
-      const now = new Date().toISOString();
-      const hashed = tokenHash(input.token);
-
-      const tokenRow = db
-        .select()
-        .from(s.adminPasswordResetTokens)
-        .where(
-          and(
-            eq(s.adminPasswordResetTokens.tokenHash, hashed),
-            isNull(s.adminPasswordResetTokens.usedAt),
-            gt(s.adminPasswordResetTokens.expiresAt, now),
-          ),
-        )
-        .get();
-
-      if (!tokenRow) {
-        throw new HttpError(
-          400,
-          "This administrator reset link is invalid or has expired.",
-        );
-      }
-
-      const passwordHash = await hashPassword(input.password);
-      const adminRow = db
-        .select()
-        .from(s.adminUsers)
-        .where(eq(s.adminUsers.id, tokenRow.adminId))
-        .get();
-
-      store.sqlite.transaction(() => {
-        db.update(s.adminUsers)
-          .set({
-            passwordHash,
-            failedLoginAttempts: 0,
-            lockedUntil: null,
-            updatedAt: now,
-          })
-          .where(eq(s.adminUsers.id, tokenRow.adminId))
-          .run();
-        db.update(s.adminPasswordResetTokens)
-          .set({ usedAt: now })
-          .where(eq(s.adminPasswordResetTokens.tokenHash, hashed))
-          .run();
-        db.delete(s.adminSessions)
-          .where(eq(s.adminSessions.adminId, tokenRow.adminId))
-          .run();
-        if (adminRow) {
-          logAdminAudit(
-            store,
-            {
-              id: adminRow.id,
-              name: adminRow.name,
-              email: adminRow.email,
-              role: adminRow.role,
-            },
-            "Reset administrator password and revoked all existing sessions",
-            "admin_auth",
-            adminRow.id,
-            now,
-          );
-        }
-      })();
+      const input = resetPasswordWithCodeSchema.parse(req.body);
+      await completePasswordResetWithProof(store, emailService, {
+        scope: "admin",
+        email: input.email,
+        resetProofToken: input.resetProofToken,
+        newPassword: input.password,
+        appBaseUrl: options.adminOrigin,
+      });
 
       return {
         ok: true,
@@ -953,6 +874,27 @@ export function registerAdminAuthRoutes(
         now,
       );
     })();
+
+    if (emailService.configured) {
+      enqueueEmail(store, {
+        userId: null,
+        recipientEmail: row.email,
+        recipientName: row.name,
+        templateId: "password_changed",
+        category: "transactional",
+        dedupeKey: `admin_pwd_change_${row.id}_${now}`,
+        payload: {
+          recipientName: row.name,
+          changedAtIso: now,
+          audience: "admin",
+          appBaseUrl: options.adminOrigin,
+        },
+      });
+      await processEmailQueueBatch(store, emailService, {
+        batchSize: 5,
+        defaultAppBaseUrl: options.adminOrigin,
+      }).catch(() => undefined);
+    }
 
     return { ok: true };
   });

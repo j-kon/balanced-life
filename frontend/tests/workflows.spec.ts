@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createHmac, randomBytes, scryptSync } from "node:crypto";
 import Database from "better-sqlite3";
@@ -94,6 +94,13 @@ function cleanupTestRecords(sqlite: Database.Database) {
     sqlite.prepare(`DELETE FROM subscriptions WHERE user_id = ?`).run(id);
     sqlite.prepare(`DELETE FROM admin_audit_logs WHERE legacy_user_admin_id = ?`).run(id);
     sqlite
+      .prepare(`DELETE FROM password_reset_codes WHERE user_id = ?`)
+      .run(id);
+    sqlite
+      .prepare(`DELETE FROM admin_email_campaign_recipients WHERE user_id = ?`)
+      .run(id);
+    sqlite.prepare(`DELETE FROM email_queue WHERE user_id = ?`).run(id);
+    sqlite
       .prepare(`DELETE FROM password_reset_tokens WHERE user_id = ?`)
       .run(id);
     sqlite.prepare(`DELETE FROM users WHERE id = ?`).run(id);
@@ -116,6 +123,17 @@ function cleanupTestRecords(sqlite: Database.Database) {
       .run(adm.id, adm.email);
     sqlite.prepare(`DELETE FROM admin_sessions WHERE admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM admin_mfa_recovery_codes WHERE admin_id = ?`).run(adm.id);
+    sqlite.prepare(`DELETE FROM password_reset_codes WHERE admin_id = ?`).run(adm.id);
+    sqlite
+      .prepare(
+        `DELETE FROM admin_email_campaign_recipients WHERE campaign_id IN (SELECT id FROM email_campaigns WHERE created_by_admin_id = ? OR actor_email = ?)`,
+      )
+      .run(adm.id, adm.email);
+    sqlite
+      .prepare(
+        `DELETE FROM email_campaigns WHERE created_by_admin_id = ? OR actor_email = ?`,
+      )
+      .run(adm.id, adm.email);
     sqlite.prepare(`DELETE FROM admin_password_reset_tokens WHERE admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM admin_audit_logs WHERE admin_id = ? OR actor_email = ?`).run(adm.id, adm.email);
     sqlite.prepare(`DELETE FROM subscriptions WHERE granted_by_admin_id = ?`).run(adm.id);
@@ -370,7 +388,7 @@ test.describe("End-to-End Production Workflows", () => {
 
     await page.goto("/forgot-password");
     await expect(
-      page.getByRole("heading", { name: /Forgot password/i }),
+      page.getByRole("heading", { name: /Forgot your password\?/i }),
     ).toBeVisible();
 
     // Submit printed book order on /bookstore
@@ -518,8 +536,8 @@ test.describe("End-to-End Production Workflows", () => {
     await notifForm
       .getByLabel(/Send an evening reminder/i)
       .check();
-    const announcementsToggle = notifForm.getByLabel(
-      /Receive optional community announcements/i,
+    const announcementsToggle = notifForm.locator(
+      'input[name="announcementsEnabled"]',
     );
     await expect(announcementsToggle).not.toBeChecked();
     await announcementsToggle.check();
@@ -908,7 +926,7 @@ test.describe("End-to-End Production Workflows", () => {
     await page.goto("/account");
     const accNotifForm = page.locator("form").nth(2);
     await accNotifForm
-      .getByLabel(/Receive optional community announcements/i)
+      .locator('input[name="announcementsEnabled"]')
       .check();
     await accNotifForm
       .getByRole("button", { name: /Save reminder preferences/i })
@@ -1943,6 +1961,451 @@ test.describe("End-to-End Production Workflows", () => {
     }
 
     await edCtx.close();
+    await adminCtx.close();
+  });
+
+  test("9. 6-digit password reset UI (reader & admin mobile), Account email prefs & /unsubscribe, Admin Email Management & rendered HTML email screenshots", async ({
+    browser,
+  }) => {
+    // A. Reader 3-step 6-digit Password Reset UI at mobile 390px (Light & Dark themes)
+    const readerResetCtx = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+    });
+    const resetPage = await readerResetCtx.newPage();
+
+    await resetPage.route("**/api/v1/config", async (route) => {
+      const response = await route.fetch();
+      const json = (await response.json()) as Record<string, unknown>;
+      json.email = {
+        configured: true,
+        fromName: "The Balanced Life Devotional",
+        replyTo: "cossyteensconsult@gmail.com",
+      };
+      await route.fulfill({ response, json });
+    });
+    await resetPage.route("**/api/v1/auth/forgot-password", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          cooldownSeconds: 60,
+          expiresInSeconds: 600,
+          message:
+            "If an account exists for that email, a 6-digit verification code has been sent.",
+        }),
+      });
+    });
+    await resetPage.route("**/api/v1/auth/verify-reset-code", async (route) => {
+      const payload = route.request().postDataJSON() as { code?: string };
+      if (payload.code !== "482913") {
+        await route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "Incorrect verification code. 4 attempts remaining.",
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          verified: true,
+          resetProofToken: "e2e-proof-token-reader-0123456789abcdef0123456789",
+        }),
+      });
+    });
+    await resetPage.route("**/api/v1/auth/reset-password", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          message:
+            "Your password has been updated. Please sign in.",
+        }),
+      });
+    });
+
+    await resetPage.goto("/forgot-password");
+    await expect(
+      resetPage.getByRole("heading", { name: /Forgot your password\?/i }),
+    ).toBeVisible();
+    await expect(
+      resetPage.getByText(/Enter your registered email and we'll send you a verification code/i),
+    ).toBeVisible();
+    await resetPage.getByLabel(/Email/i).fill(readerEmail);
+    await resetPage
+      .getByRole("button", { name: /Send Verification Code/i })
+      .click();
+
+    // Step 2: 6 digit inputs, paste support, countdown, disabled Resend
+    await expect(
+      resetPage.getByRole("heading", { name: /Check your email\./i }),
+    ).toBeVisible();
+    const firstDigit = resetPage.getByLabel("Verification digit 1 of 6");
+    await expect(firstDigit).toHaveAttribute("inputmode", "numeric");
+    await resetPage.evaluate(() => {
+      const input = document.querySelector<HTMLInputElement>(
+        'input[aria-label="Verification digit 1 of 6"]',
+      );
+      if (!input) return;
+      const dt = new DataTransfer();
+      dt.setData("text/plain", "482913");
+      const evt = new ClipboardEvent("paste", {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+      });
+      input.dispatchEvent(evt);
+    });
+    for (let i = 1; i <= 6; i++) {
+      await expect(
+        resetPage.getByLabel(`Verification digit ${i} of 6`),
+      ).toHaveValue("482913"[i - 1]!);
+    }
+    await expect(
+      resetPage.getByRole("button", { name: /Resend in \d+s/i }),
+    ).toBeDisabled();
+    await expect(
+      resetPage.getByRole("button", { name: /Change email/i }),
+    ).toBeVisible();
+
+    const overflowStep2 = await resetPage.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    expect(overflowStep2).toBe(false);
+
+    await resetPage.getByRole("button", { name: /Verify Code/i }).click();
+
+    // Step 3: Create your new password, checklist & Show/Hide toggle
+    await expect(
+      resetPage.getByRole("heading", { name: /Create your new password\./i }),
+    ).toBeVisible();
+    const newPwInput = resetPage.locator('input[name="password"]');
+    const confirmPwInput = resetPage.locator('input[name="confirmPassword"]');
+    await newPwInput.fill("StrongReader-2027!");
+    await confirmPwInput.fill("StrongReader-2027!");
+    await resetPage
+      .getByRole("button", { name: /^Show password$/i })
+      .click();
+    await expect(newPwInput).toHaveAttribute("type", "text");
+
+    // Verify Dark theme cleanly applies on recovery screen without horizontal overflow
+    await resetPage.evaluate(() => {
+      document.documentElement.dataset.theme = "dark";
+    });
+    const overflowStep3 = await resetPage.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    expect(overflowStep3).toBe(false);
+
+    await resetPage.getByRole("button", { name: /Reset Password/i }).click();
+    await expect(
+      resetPage.getByText(/Your password has been reset/i),
+    ).toBeVisible();
+    await resetPage.getByRole("link", { name: /^Sign In$/i }).click();
+    await expect(resetPage).toHaveURL(/\/login$/);
+    await readerResetCtx.close();
+
+    // B. Admin 3-step 6-digit Password Reset UI at 390px preserving MFA reminder
+    const adminResetCtx = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+    });
+    const adminResetPage = await adminResetCtx.newPage();
+    await adminResetPage.route("**/api/v1/admin/auth/forgot-password", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          cooldownSeconds: 60,
+          expiresInSeconds: 600,
+          message:
+            "If an active administrator account matches, a 6-digit verification code has been sent.",
+        }),
+      });
+    });
+    await adminResetPage.route("**/api/v1/admin/auth/verify-reset-code", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          resetProofToken: "e2e-proof-token-admin-0123456789abcdef0123456789",
+        }),
+      });
+    });
+    await adminResetPage.route("**/api/v1/admin/auth/reset-password", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          message:
+            "Administrator password updated. Previous sessions have been revoked.",
+        }),
+      });
+    });
+
+    await adminResetPage.goto(`${ADMIN_URL}/forgot-password`);
+    await expect(
+      adminResetPage.getByRole("heading", { name: /Forgot your password\?/i }),
+    ).toBeVisible();
+    await expect(
+      adminResetPage.getByText(/Authenticator MFA cannot be bypassed/i),
+    ).toBeVisible();
+    await adminResetPage.getByLabel(/Administrator email/i).fill(adminEmail);
+    await adminResetPage
+      .getByRole("button", { name: /Send Verification Code/i })
+      .click();
+    await expect(
+      adminResetPage.getByRole("heading", { name: /Check your email\./i }),
+    ).toBeVisible();
+    await adminResetPage.evaluate(() => {
+      const input = document.querySelector<HTMLInputElement>(
+        'input[aria-label="Verification code digit 1"]',
+      );
+      if (!input) return;
+      const dt = new DataTransfer();
+      dt.setData("text/plain", "937104");
+      input.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await adminResetPage.getByRole("button", { name: /Verify Code/i }).click();
+    await expect(
+      adminResetPage.getByRole("heading", { name: /Create your new password\./i }),
+    ).toBeVisible();
+    await adminResetPage
+      .locator('input[name="password"]')
+      .fill("StrongAdmin-Pass-2027!");
+    await adminResetPage
+      .locator('input[name="confirm"]')
+      .fill("StrongAdmin-Pass-2027!");
+    const adminResetOverflow = await adminResetPage.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    expect(adminResetOverflow).toBe(false);
+    await adminResetPage.getByRole("button", { name: /Reset Password/i }).click();
+    await expect(
+      adminResetPage.getByText(/verify your authenticator MFA code on sign-in/i),
+    ).toBeVisible();
+    await adminResetCtx.close();
+
+    // C. Reader Account Email Preferences + Functional /unsubscribe Page
+    const readerCtx = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+    });
+    const readerPage = await readerCtx.newPage();
+    await readerPage.goto("/login");
+    await readerPage.getByLabel(/Email/i).fill(readerEmail);
+    await readerPage.getByLabel(/Password/i).fill(readerUpdatedPassword);
+    await readerPage.getByRole("button", { name: /Sign In/i }).click();
+    await expect(readerPage).toHaveURL(/\/(dashboard|onboarding)/);
+    await readerPage.goto("/account");
+
+    const dailyEmailBox = readerPage.locator(
+      'input[name="emailDailyReminderEnabled"]',
+    );
+    const annEmailBox = readerPage.locator(
+      'input[name="emailAnnouncementsEnabled"]',
+    );
+    const commEmailBox = readerPage.locator(
+      'input[name="emailCommunityUpdatesEnabled"]',
+    );
+    await expect(dailyEmailBox).not.toBeChecked();
+    await expect(annEmailBox).not.toBeChecked();
+    await expect(commEmailBox).not.toBeChecked();
+
+    await dailyEmailBox.check();
+    await annEmailBox.check();
+    await readerPage
+      .getByRole("button", { name: /Save reminder preferences/i })
+      .click();
+    await expect(
+      readerPage.getByText(/Reminder & notification preferences saved/i),
+    ).toBeVisible();
+    await readerPage.reload();
+    await expect(dailyEmailBox).toBeChecked();
+    await expect(annEmailBox).toBeChecked();
+
+    // Generate genuine signed unsubscribe HMAC token for readerEmail -> test functional /unsubscribe
+    const sqlite = new Database(dbPath);
+    const rRow = sqlite
+      .prepare(`SELECT id FROM users WHERE email = ?`)
+      .get(readerEmail) as { id: number };
+    sqlite.close();
+
+    const baseKey =
+      process.env.UNSUBSCRIBE_HMAC_KEY?.trim() ||
+      process.env.ADMIN_MFA_ENCRYPTION_KEY?.trim() ||
+      "balanced-life-dev-hmac-fallback-do-not-use-in-prod";
+    const derivedKey = createHmac("sha256", baseKey)
+      .update("balanced-life:unsubscribe")
+      .digest();
+    const unsubBody = Buffer.from(
+      JSON.stringify({
+        uid: rRow.id,
+        scope: "announcements",
+        exp: Date.now() + 86_400_000,
+      }),
+      "utf8",
+    ).toString("base64url");
+    const unsubSig = createHmac("sha256", derivedKey)
+      .update(unsubBody)
+      .digest("base64url");
+    const unsubToken = `${unsubBody}.${unsubSig}`;
+
+    await readerPage.goto(`/unsubscribe?token=${encodeURIComponent(unsubToken)}`);
+    await expect(
+      readerPage.getByRole("button", { name: /Unsubscribe from this email type/i }),
+    ).toBeVisible();
+    await readerPage
+      .getByRole("button", { name: /Unsubscribe from this email type/i })
+      .click();
+    await expect(
+      readerPage.getByText(/Preferences Updated/i),
+    ).toBeVisible();
+
+    // Verify daily email stayed checked while announcements turned OFF
+    await readerPage.goto("/account");
+    await expect(
+      readerPage.locator('input[name="emailDailyReminderEnabled"]'),
+    ).toBeChecked();
+    await expect(
+      readerPage.locator('input[name="emailAnnouncementsEnabled"]'),
+    ).not.toBeChecked();
+    await readerCtx.close();
+
+    // D. Admin Email Management Page (/email) + Template Previews + Visual PNG Captures
+    const adminCtx = await browser.newContext({
+      viewport: { width: 1440, height: 960 },
+    });
+    const adminPage = await adminCtx.newPage();
+    await adminPage.goto(`${ADMIN_URL}/login`);
+    await adminPage.getByLabel(/Administrator email/i).fill(adminEmail);
+    await adminPage
+      .getByLabel(/Administrator password/i)
+      .fill(adminPassword);
+    await adminPage
+      .getByRole("button", { name: /Continue to verification/i })
+      .click();
+    await adminPage
+      .getByLabel(/6-digit authenticator code/i)
+      .fill(generateTestTotp(e2eAdminMfaSecret));
+    await adminPage
+      .getByRole("button", { name: /Verify & enter dashboard/i })
+      .click();
+    await expect(adminPage).toHaveURL(/5174\/dashboard$/);
+
+    await adminPage.getByRole("link", { name: /^Email Management$/i }).click();
+    await expect(adminPage).toHaveURL(/5174\/email$/);
+    await expect(
+      adminPage.getByText(/Sender Domain DNS Unverified/i),
+    ).toBeVisible();
+
+    // Capture desktop & mobile PNG screenshots of key rendered HTML email templates
+    const shotDir = path.resolve(import.meta.dirname, "../../test-results/email-previews");
+    mkdirSync(shotDir, { recursive: true });
+    const artifactDir =
+      "/Users/jaykon/.gemini/antigravity/brain/cf2f24f0-35bc-4d0b-adef-ed721055e055";
+    const templatesToCapture = [
+      "welcome",
+      "password_reset_code",
+      "online_access_confirmed",
+      "order_dispatched",
+      "daily_devotional_reminder",
+    ] as const;
+
+    const previewPage = await adminCtx.newPage();
+    for (const tpl of templatesToCapture) {
+      await adminPage.getByLabel(/Select email template/i).selectOption(tpl);
+      await expect(adminPage.locator("iframe.email-preview-frame")).toBeVisible();
+      const srcDoc = await adminPage
+        .locator("iframe.email-preview-frame")
+        .getAttribute("srcdoc");
+      expect(srcDoc).toContain("The Balanced Life Devotional");
+
+      await previewPage.setViewportSize({ width: 680, height: 1100 });
+      await previewPage.setContent(srcDoc || "", { waitUntil: "load" });
+      const desktopHeight = await previewPage.evaluate(
+        () => document.documentElement.scrollHeight,
+      );
+      if (desktopHeight > 1100) {
+        await previewPage.setViewportSize({
+          width: 680,
+          height: desktopHeight + 24,
+        });
+      }
+      const desktopShot = path.join(shotDir, `email-${tpl}-desktop.png`);
+      await previewPage.screenshot({ path: desktopShot, fullPage: true });
+      if (existsSync(artifactDir)) {
+        copyFileSync(
+          desktopShot,
+          path.join(artifactDir, `email-${tpl}-desktop.png`),
+        );
+      }
+
+      if (tpl === "password_reset_code" || tpl === "welcome") {
+        const mobilePreview = await adminCtx.newPage();
+        await mobilePreview.setViewportSize({ width: 390, height: 844 });
+        await mobilePreview.setContent(srcDoc || "", { waitUntil: "load" });
+        const mobileHeight = await mobilePreview.evaluate(
+          () => document.documentElement.scrollHeight,
+        );
+        await mobilePreview.setViewportSize({
+          width: 390,
+          height: Math.max(844, mobileHeight + 24),
+        });
+        const mobileShot = path.join(shotDir, `email-${tpl}-mobile.png`);
+        await mobilePreview.screenshot({ path: mobileShot, fullPage: true });
+        await mobilePreview.close();
+        if (existsSync(artifactDir)) {
+          copyFileSync(
+            mobileShot,
+            path.join(artifactDir, `email-${tpl}-mobile.png`),
+          );
+        }
+      }
+    }
+    await previewPage.close();
+
+    // Check Plain Text toggle + Campaign Composer Preview
+    await adminPage.getByRole("button", { name: /Plain Text/i }).click();
+    await expect(adminPage.locator("pre.email-text-preview")).toBeVisible();
+    await adminPage
+      .getByLabel(/Email subject/i)
+      .fill("E2E Devotional Email Broadcast");
+    await adminPage
+      .getByLabel(/Plain-text message body/i)
+      .fill("Encouraging all opted-in readers to reflect daily on 2027 readings.");
+    await adminPage
+      .getByRole("button", { name: /Preview Audience & Render/i })
+      .click();
+    await expect(
+      adminPage.getByText(/Campaign Preview Summary/i),
+    ).toBeVisible();
+
+    // Verify 390px mobile responsiveness on Admin Email Management page
+    await adminPage.setViewportSize({ width: 390, height: 844 });
+    const adminEmailOverflow = await adminPage.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    expect(adminEmailOverflow).toBe(false);
+
     await adminCtx.close();
   });
 });

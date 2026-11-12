@@ -1,7 +1,16 @@
-import { Link } from "react-router-dom";
-import { Bell, BookOpen, Shield, Smartphone } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import {
+  Bell,
+  BookOpen,
+  CheckCircle2,
+  MailX,
+  Shield,
+  Smartphone,
+} from "lucide-react";
 import { useApp } from "../../context/AppContext";
-import { money } from "../../api";
+import { api, money } from "../../api";
+import { ErrorBox } from "../../components/Common";
 
 export function PrivacyPage() {
   const { config } = useApp();
@@ -211,6 +220,179 @@ export function InstallPage() {
             Open devotional library
           </Link>
         </div>
+      </div>
+    </div>
+  );
+}
+
+type UnsubscribeInfo = {
+  valid: boolean;
+  scope:
+    | "daily_reminder"
+    | "announcements"
+    | "community_updates"
+    | "expiry_reminder"
+    | "all_optional";
+  readerName: string;
+  maskedEmail: string;
+  preferences: {
+    emailDailyReminderEnabled: boolean;
+    emailAnnouncementsEnabled: boolean;
+    emailCommunityUpdatesEnabled: boolean;
+    subscriptionAlertsEnabled: boolean;
+  };
+};
+
+export function EmailUnsubscribePage() {
+  const [searchParams] = useSearchParams();
+  const token = searchParams.get("token") || "";
+  const isSample =
+    searchParams.get("sample") === "1" || searchParams.get("preview") === "1";
+
+  const [loading, setLoading] = useState(!isSample && Boolean(token));
+  const [info, setInfo] = useState<UnsubscribeInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [doneMessage, setDoneMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!token || isSample) return;
+    let active = true;
+    setLoading(true);
+    api<UnsubscribeInfo>(
+      `/email/unsubscribe?token=${encodeURIComponent(token)}`,
+    )
+      .then((res) => {
+        if (active) {
+          setInfo(res);
+        }
+      })
+      .catch((e) => {
+        if (active) {
+          setError((e as Error).message);
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [token, isSample]);
+
+  async function confirmUnsubscribe(scopeOverride?: UnsubscribeInfo["scope"]) {
+    if (!token) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await api<{
+        unsubscribedScope: string;
+        maskedEmail: string;
+        preferences: UnsubscribeInfo["preferences"];
+      }>("/email/unsubscribe", {
+        token,
+        scope: scopeOverride || info?.scope,
+      });
+      setDoneMessage(
+        scopeOverride === "all_optional"
+          ? `Optional reading, announcement, and community emails are now turned off for ${res.maskedEmail}.`
+          : `Your optional email preference has been updated for ${res.maskedEmail}.`,
+      );
+      setInfo((prev) =>
+        prev ? { ...prev, preferences: res.preferences } : prev,
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="container section narrow">
+      <div className="panel stack">
+        <span className="eyebrow">Email Preferences</span>
+        <h1 style={{ marginBottom: "4px" }}>
+          <MailX size={24} style={{ verticalAlign: "middle", marginRight: "8px" }} />
+          Manage optional emails
+        </h1>
+        {isSample ? (
+          <p className="muted">
+            This is a preview of the functional unsubscribe page linked from
+            optional Balanced Life Devotional emails. Readers can manage email
+            preferences anytime in <Link to="/account">Account Settings</Link>.
+          </p>
+        ) : !token ? (
+          <div className="stack">
+            <p className="muted">
+              Sign in to adjust your daily devotional reminders, announcements,
+              and community email preferences anytime.
+            </p>
+            <div className="actions">
+              <Link className="button" to="/account">
+                Go to Account Settings
+              </Link>
+            </div>
+          </div>
+        ) : loading ? (
+          <p className="muted">Verifying your unsubscribe link…</p>
+        ) : error && !info ? (
+          <div className="stack">
+            <ErrorBox message={error} />
+            <div className="actions">
+              <Link className="button" to="/account">
+                Manage Email Preferences
+              </Link>
+            </div>
+          </div>
+        ) : (
+          <div className="stack">
+            {info && (
+              <p>
+                Updating email preferences for{" "}
+                <strong>{info.readerName}</strong> ({info.maskedEmail}).
+              </p>
+            )}
+            <ErrorBox message={error} />
+            {doneMessage ? (
+              <div className="notice success">
+                <CheckCircle2 size={18} />
+                <div>
+                  <strong>Preferences Updated</strong>
+                  <p>{doneMessage}</p>
+                </div>
+              </div>
+            ) : (
+              <div className="actions">
+                <button
+                  type="button"
+                  className="button"
+                  disabled={busy}
+                  onClick={() => confirmUnsubscribe()}
+                >
+                  {busy ? "Updating…" : "Unsubscribe from this email type"}
+                </button>
+                <button
+                  type="button"
+                  className="button outline"
+                  disabled={busy}
+                  onClick={() => confirmUnsubscribe("all_optional")}
+                >
+                  Unsubscribe from all optional emails
+                </button>
+              </div>
+            )}
+            <p className="muted" style={{ fontSize: "0.9rem" }}>
+              Essential transactional security notices (such as password reset
+              codes and confirmed order receipts) remain active for your safety.
+            </p>
+            <div className="actions">
+              <Link className="button outline" to="/account">
+                Open Account Email Settings
+              </Link>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

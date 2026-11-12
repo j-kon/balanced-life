@@ -18,7 +18,8 @@ import {
   PaystackPaymentProvider,
   type PaymentProvider,
 } from "./services/payments.js";
-import { WebhookEmailService, type EmailService } from "./services/email.js";
+import { createEmailService, type EmailService } from "./services/email.js";
+import { runEmailWorkerCycle } from "./services/emailQueue.js";
 import {
   LiveWebPushProvider,
   runNotificationWorkerCycle,
@@ -64,12 +65,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       webhookSecret: env.paystack.webhookSecret,
     });
 
-  const emailService =
-    options.emailService ||
-    new WebhookEmailService({
-      webhookUrl: env.email.webhookUrl,
-      from: env.email.from,
-    });
+  const emailService = options.emailService || createEmailService(env.email);
 
   const pushProvider =
     options.pushProvider ||
@@ -142,11 +138,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
   app.addHook("onRequest", async (req, reply) => {
     reply.header("Cache-Control", "no-store");
     const pathname = req.url.split("?")[0] || "";
-    const isPaystackWebhook = pathname.startsWith("/api/v1/webhooks/paystack");
+    const isExternalWebhook =
+      pathname.startsWith("/api/v1/webhooks/paystack") ||
+      pathname.startsWith("/api/v1/webhooks/email");
     const isAdminRoute =
       pathname === "/api/v1/admin" || pathname.startsWith("/api/v1/admin/");
 
-    if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !isPaystackWebhook) {
+    if (
+      !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
+      !isExternalWebhook
+    ) {
       const expectedRequestedWith = isAdminRoute
         ? "BalancedLifeAdmin"
         : "BalancedLife";
@@ -204,6 +205,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
       runNotificationWorkerCycle(store, pushProvider).catch(() => {
         // Logged via notification_events.last_error
       });
+      runEmailWorkerCycle(store, emailService, env.appOrigin).catch(() => {
+        // Logged via email_queue.last_error
+      });
     }, env.scheduler.intervalMs);
     schedulerTimer.unref?.();
   }
@@ -237,6 +241,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     paymentProvider,
     env.appOrigin,
     pushProvider,
+    emailService,
   );
   registerAdminAuthRoutes(app, prefix, store, emailService, {
     isProduction,
@@ -245,7 +250,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
     adminSessionIdleMinutes: env.adminSessionIdleMinutes,
     adminSessionMaxHours: env.adminSessionMaxHours,
   });
-  registerAdminRoutes(app, prefix, store, paymentProvider, pushProvider);
+  registerAdminRoutes(app, prefix, store, paymentProvider, pushProvider, {
+    emailService,
+    appOrigin: env.appOrigin,
+  });
 
   return app;
 }

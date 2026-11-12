@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import {
@@ -7,7 +7,6 @@ import {
   clearReaderCookie,
   establishSession,
   hashPassword,
-  newToken,
   publicUser,
   requireUser,
   tokenHash,
@@ -17,10 +16,12 @@ import { HttpError } from "../errors.js";
 import {
   forgotPasswordSchema,
   loginSchema,
+  onboardingUpdateSchema,
   passwordChangeSchema,
   profileUpdateSchema,
   registerSchema,
-  resetPasswordSchema,
+  resetPasswordWithCodeSchema,
+  verifyResetCodeSchema,
 } from "../validation.js";
 import { getAppSettings } from "../services/settings.js";
 import {
@@ -29,7 +30,15 @@ import {
 } from "../services/notifications.js";
 import { getReaderAccessSummary } from "../services/access.js";
 import type { EmailService } from "../services/email.js";
-import { onboardingUpdateSchema } from "../validation.js";
+import {
+  enqueueEmail,
+  processEmailQueueBatch,
+} from "../services/emailQueue.js";
+import {
+  completePasswordResetWithProof,
+  requestPasswordResetCode,
+  verifyPasswordResetCode,
+} from "../services/passwordReset.js";
 
 export function registerAuthRoutes(
   app: FastifyInstance,
@@ -111,6 +120,26 @@ export function registerAuthRoutes(
         .returning()
         .get();
 
+      enqueueEmail(store, {
+        userId: user.id,
+        recipientEmail: user.email,
+        recipientName: user.name,
+        templateId: "welcome",
+        category: "transactional",
+        dedupeKey: `welcome_user_${user.id}`,
+        payload: {
+          recipientName: user.name,
+          appBaseUrl: options.appOrigin,
+          preferencesUrl: `${options.appOrigin}/account`,
+        },
+      });
+      if (emailService.configured) {
+        await processEmailQueueBatch(store, emailService, {
+          batchSize: 5,
+          defaultAppBaseUrl: options.appOrigin,
+        }).catch(() => undefined);
+      }
+
       return establishSession(store, user, req, reply, options.isProduction);
     },
   );
@@ -158,96 +187,50 @@ export function registerAuthRoutes(
 
   app.post(
     prefix + "/auth/forgot-password",
-    { config: { rateLimit: { max: 8, timeWindow: "15 minutes" } } },
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
     async (req) => {
       const input = forgotPasswordSchema.parse(req.body);
       if (!emailService.configured) {
         throw new HttpError(
           503,
-          "Automated password recovery emails are not configured in this environment. Set EMAIL_WEBHOOK_URL to enable email delivery, or contact the administrator.",
+          "Automated password recovery emails are not configured in this environment. Configure EMAIL_PROVIDER and credentials to enable email delivery.",
         );
       }
 
-      const user = db
-        .select()
-        .from(s.users)
-        .where(eq(s.users.email, input.email))
-        .get();
+      return requestPasswordResetCode(store, emailService, {
+        scope: "reader",
+        email: input.email,
+        ipAddress: req.ip,
+        appBaseUrl: options.appOrigin,
+      });
+    },
+  );
 
-      if (user && user.status === "active") {
-        const rawToken = newToken();
-        const now = Date.now();
-        const expiresInMinutes = 60;
-        db.insert(s.passwordResetTokens)
-          .values({
-            tokenHash: tokenHash(rawToken),
-            userId: user.id,
-            expiresAt: new Date(now + expiresInMinutes * 60000).toISOString(),
-            usedAt: null,
-            createdAt: new Date(now).toISOString(),
-          })
-          .run();
-
-        const resetUrl = `${options.appOrigin}/reset-password?token=${encodeURIComponent(rawToken)}`;
-        await emailService.sendPasswordReset({
-          to: user.email,
-          name: user.name,
-          resetUrl,
-          expiresInMinutes,
-        });
-      }
-
-      return {
-        ok: true,
-        message:
-          "If an active account matches that email address, a password reset link has been sent.",
-      };
+  app.post(
+    prefix + "/auth/verify-reset-code",
+    { config: { rateLimit: { max: 30, timeWindow: "15 minutes" } } },
+    async (req) => {
+      const input = verifyResetCodeSchema.parse(req.body);
+      return verifyPasswordResetCode(store, {
+        scope: "reader",
+        email: input.email,
+        code: input.code,
+      });
     },
   );
 
   app.post(
     prefix + "/auth/reset-password",
-    { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
+    { config: { rateLimit: { max: 15, timeWindow: "15 minutes" } } },
     async (req) => {
-      const input = resetPasswordSchema.parse(req.body);
-      const now = new Date().toISOString();
-      const hashed = tokenHash(input.token);
-
-      const tokenRow = db
-        .select()
-        .from(s.passwordResetTokens)
-        .where(
-          and(
-            eq(s.passwordResetTokens.tokenHash, hashed),
-            isNull(s.passwordResetTokens.usedAt),
-            gt(s.passwordResetTokens.expiresAt, now),
-          ),
-        )
-        .get();
-
-      if (!tokenRow) {
-        throw new HttpError(
-          400,
-          "This password reset link is invalid or has expired.",
-        );
-      }
-
-      const passwordHash = await hashPassword(input.password);
-
-      store.sqlite.transaction(() => {
-        db.update(s.users)
-          .set({ passwordHash, updatedAt: now })
-          .where(eq(s.users.id, tokenRow.userId))
-          .run();
-        db.update(s.passwordResetTokens)
-          .set({ usedAt: now })
-          .where(eq(s.passwordResetTokens.tokenHash, hashed))
-          .run();
-        // Revoke all existing sessions for security
-        db.delete(s.sessions)
-          .where(eq(s.sessions.userId, tokenRow.userId))
-          .run();
-      })();
+      const input = resetPasswordWithCodeSchema.parse(req.body);
+      await completePasswordResetWithProof(store, emailService, {
+        scope: "reader",
+        email: input.email,
+        resetProofToken: input.resetProofToken,
+        newPassword: input.password,
+        appBaseUrl: options.appOrigin,
+      });
 
       return {
         ok: true,
@@ -324,6 +307,28 @@ export function registerAuthRoutes(
       actionUrl: "/account",
       dedupeKey: `pwd_change_${currentUser.id}_${now.slice(0, 16)}`,
     });
+
+    if (emailService.configured) {
+      enqueueEmail(store, {
+        userId: row.id,
+        recipientEmail: row.email,
+        recipientName: row.name,
+        templateId: "password_changed",
+        category: "transactional",
+        dedupeKey: `pwd_change_email_${row.id}_${now}`,
+        payload: {
+          recipientName: row.name,
+          changedAtIso: now,
+          audience: "reader",
+          appBaseUrl: options.appOrigin,
+          preferencesUrl: `${options.appOrigin}/account`,
+        },
+      });
+      await processEmailQueueBatch(store, emailService, {
+        batchSize: 5,
+        defaultAppBaseUrl: options.appOrigin,
+      }).catch(() => undefined);
+    }
 
     return { ok: true };
   });

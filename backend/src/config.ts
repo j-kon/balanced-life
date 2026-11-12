@@ -29,8 +29,61 @@ export const getEnvConfig = () => {
     (
       process.env.EMAIL_WEBHOOK_URL || process.env.PASSWORD_RESET_WEBHOOK_URL
     )?.trim() || "";
+  const emailApiKey =
+    (
+      process.env.EMAIL_API_KEY ||
+      process.env.RESEND_API_KEY ||
+      process.env.POSTMARK_SERVER_TOKEN
+    )?.trim() || "";
+  const emailSesRegion =
+    process.env.EMAIL_SES_REGION?.trim() ||
+    process.env.AWS_REGION?.trim() ||
+    "us-east-1";
+  const emailSesAccessKeyId =
+    process.env.EMAIL_SES_ACCESS_KEY_ID?.trim() || "";
+  const emailSesSecretAccessKey =
+    process.env.EMAIL_SES_SECRET_ACCESS_KEY?.trim() || "";
+  const rawEmailProvider = (process.env.EMAIL_PROVIDER?.trim() || "").toLowerCase();
+  const emailProvider = (() => {
+    if (
+      rawEmailProvider === "resend" ||
+      rawEmailProvider === "postmark" ||
+      rawEmailProvider === "ses" ||
+      rawEmailProvider === "webhook" ||
+      rawEmailProvider === "capture" ||
+      rawEmailProvider === "none"
+    ) {
+      return rawEmailProvider;
+    }
+    if (process.env.POSTMARK_SERVER_TOKEN?.trim()) return "postmark" as const;
+    if (process.env.RESEND_API_KEY?.trim() || emailApiKey) return "resend" as const;
+    if (emailSesAccessKeyId && emailSesSecretAccessKey) return "ses" as const;
+    if (emailWebhookUrl) return "webhook" as const;
+    return "none" as const;
+  })();
+
   const emailFrom =
-    process.env.EMAIL_FROM?.trim() || "noreply@cossyteensconsult.org";
+    process.env.EMAIL_FROM?.trim() || "noreply@cossyteens.com";
+  const emailFromName =
+    process.env.EMAIL_FROM_NAME?.trim() || "The Balanced Life Devotional";
+  const emailReplyTo =
+    process.env.EMAIL_REPLY_TO?.trim() || "cossyteensconsult@gmail.com";
+  const emailWebhookSecret =
+    process.env.EMAIL_WEBHOOK_SECRET?.trim() || "";
+  const emailDomainVerified = process.env.EMAIL_DOMAIN_VERIFIED === "true";
+
+  const emailConfigured =
+    (emailProvider === "resend" && Boolean(emailApiKey)) ||
+    (emailProvider === "postmark" && Boolean(emailApiKey)) ||
+    (emailProvider === "ses" &&
+      Boolean(emailSesAccessKeyId && emailSesSecretAccessKey)) ||
+    (emailProvider === "webhook" && Boolean(emailWebhookUrl)) ||
+    emailProvider === "capture";
+
+  const passwordResetHmacKey =
+    process.env.PASSWORD_RESET_HMAC_KEY?.trim() || "";
+  const unsubscribeHmacKey =
+    process.env.UNSUBSCRIBE_HMAC_KEY?.trim() || "";
 
   const vapidPublicKey = process.env.VAPID_PUBLIC_KEY?.trim() || "";
   const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY?.trim() || "";
@@ -54,9 +107,22 @@ export const getEnvConfig = () => {
       webhookSecret: paystackWebhookSecret || null,
     },
     email: {
-      configured: Boolean(emailWebhookUrl),
+      configured: emailConfigured,
+      provider: emailProvider,
+      apiKey: emailApiKey,
       webhookUrl: emailWebhookUrl,
+      webhookSecret: emailWebhookSecret,
       from: emailFrom,
+      fromName: emailFromName,
+      replyTo: emailReplyTo,
+      domainVerified: emailDomainVerified,
+      sesRegion: emailSesRegion,
+      sesAccessKeyId: emailSesAccessKeyId,
+      sesSecretAccessKey: emailSesSecretAccessKey,
+    },
+    security: {
+      passwordResetHmacKey,
+      unsubscribeHmacKey,
     },
     webPush: {
       configured: Boolean(vapidPublicKey && vapidPrivateKey),

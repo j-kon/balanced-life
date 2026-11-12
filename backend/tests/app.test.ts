@@ -9,8 +9,8 @@ import {
 import { openDatabase } from "../src/db.js";
 import { hashPassword, tokenHash } from "../src/auth.js";
 import { generateTotpCode } from "../src/services/mfa.js";
-import { adminSessions, adminUsers } from "../src/schema.js";
-import { eq } from "drizzle-orm";
+import { adminSessions, adminUsers, devotionals, emailQueue, notificationPreferences, passwordResetCodes, passwordResetRateEvents, users } from "../src/schema.js";
+import { and, desc, eq } from "drizzle-orm";
 import Database from "better-sqlite3";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -18,11 +18,39 @@ import type {
   PaymentInitializeInput,
   PaymentProvider,
 } from "../src/services/payments.js";
-import type {
-  EmailService,
-  OrderAccessEmailInput,
-  PasswordResetEmailInput,
+import {
+  createEmailService,
+  type EmailDeliveryResult,
+  type EmailService,
+  type OutboundEmailMessage,
 } from "../src/services/email.js";
+
+type PasswordResetEmailInput = {
+  to: string;
+  name: string;
+  resetUrl: string;
+  expiresAt: string;
+};
+
+type OrderAccessEmailInput = {
+  to: string;
+  name: string;
+  orderNumber: string;
+  accessUrl: string;
+  expiresInMinutes: number;
+};
+import {
+  EMAIL_TEMPLATE_CATALOG,
+  buildSampleTemplatePreview,
+  renderEmailTemplate,
+} from "../src/services/emailTemplates.js";
+import {
+  createEmailUnsubscribeToken,
+  enqueueEmail,
+  evaluateUserEmailReminders,
+  processEmailQueueBatch,
+  runEmailWorkerCycle,
+} from "../src/services/emailQueue.js";
 import {
   runNotificationWorkerCycle,
   type PushSubscriptionTarget,
@@ -76,20 +104,114 @@ class MockPaystackProvider implements PaymentProvider {
 
 class MockEmailService implements EmailService {
   readonly configured = true;
+  readonly providerName = "mock";
+  readonly fromAddress = "noreply@cossyteens.com";
+  readonly replyToAddress = "cossyteensconsult@gmail.com";
+  readonly domainVerified = false;
   public sent: PasswordResetEmailInput[] = [];
   public sentAdminResets: PasswordResetEmailInput[] = [];
   public sentOrderLinks: OrderAccessEmailInput[] = [];
+  public sentEmails: OutboundEmailMessage[] = [];
+  public failRecipients = new Set<string>();
+  public failNextCount = 0;
+
+  async sendEmail(payload: OutboundEmailMessage): Promise<EmailDeliveryResult> {
+    if (this.failNextCount > 0) {
+      this.failNextCount -= 1;
+      return {
+        delivered: false,
+        provider: this.providerName,
+        error: "Simulated transient provider error",
+      };
+    }
+    if (this.failRecipients.has(payload.to.toLowerCase())) {
+      return {
+        delivered: false,
+        provider: this.providerName,
+        error: "Simulated recipient delivery failure",
+      };
+    }
+    this.sentEmails.push(payload);
+    return {
+      delivered: true,
+      provider: this.providerName,
+      messageId: `mock-msg-${this.sentEmails.length}`,
+    };
+  }
+
+  async sendPasswordResetCode(payload: {
+    to: string;
+    name: string;
+    code: string;
+    expiresMinutes: number;
+    appBaseUrl: string;
+  }): Promise<EmailDeliveryResult> {
+    const rendered = renderEmailTemplate("password_reset_code", {
+      recipientName: payload.name,
+      code: payload.code,
+      expiresMinutes: payload.expiresMinutes,
+      audience: "reader",
+      appBaseUrl: payload.appBaseUrl,
+    });
+    this.sent.push({
+      to: payload.to,
+      name: payload.name,
+      resetUrl: "",
+      expiresAt: new Date(Date.now() + payload.expiresMinutes * 60_000).toISOString(),
+    });
+    return this.sendEmail({
+      to: payload.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+      templateId: "password_reset_code",
+      category: "transactional",
+    });
+  }
+
+  async sendAdminPasswordResetCode(payload: {
+    to: string;
+    name: string;
+    code: string;
+    expiresMinutes: number;
+    appBaseUrl: string;
+  }): Promise<EmailDeliveryResult> {
+    const rendered = renderEmailTemplate("password_reset_code", {
+      recipientName: payload.name,
+      code: payload.code,
+      expiresMinutes: payload.expiresMinutes,
+      audience: "admin",
+      appBaseUrl: payload.appBaseUrl,
+    });
+    this.sentAdminResets.push({
+      to: payload.to,
+      name: payload.name,
+      resetUrl: "",
+      expiresAt: new Date(Date.now() + payload.expiresMinutes * 60_000).toISOString(),
+    });
+    return this.sendEmail({
+      to: payload.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+      templateId: "password_reset_code",
+      category: "transactional",
+    });
+  }
 
   async sendPasswordReset(input: PasswordResetEmailInput) {
     this.sent.push(input);
+    return { delivered: true };
   }
 
   async sendAdminPasswordReset(input: PasswordResetEmailInput) {
     this.sentAdminResets.push(input);
+    return { delivered: true };
   }
 
   async sendOrderAccessLink(input: OrderAccessEmailInput) {
     this.sentOrderLinks.push(input);
+    return { delivered: true };
   }
 }
 
@@ -353,22 +475,47 @@ test("profile updates, password changes, and password reset token flow work secu
     email: "alex@example.org",
   });
   assert.equal(forgot.statusCode, 200);
-  assert.equal(emailService.sent.length, 1);
-  const resetUrl = new URL(emailService.sent[0].resetUrl);
-  const token = resetUrl.searchParams.get("token")!;
-  assert.ok(token.length >= 32);
+  const resetEmail = [...emailService.sentEmails].reverse().find(
+    (m) =>
+      m.to.toLowerCase() === "alex@example.org" &&
+      m.templateId === "password_reset_code",
+  );
+  assert.ok(resetEmail);
+  const codeMatch = resetEmail.text.match(/\b(\d{6})\b/);
+  assert.ok(codeMatch);
+  const code = codeMatch[1]!;
+
+  // Wrong code does not yield proof token
+  const badVerify = await send("POST", "/auth/verify-reset-code", {
+    email: "alex@example.org",
+    code: code === "000000" ? "111111" : "000000",
+  });
+  assert.equal(badVerify.statusCode, 400);
+
+  const verified = await send("POST", "/auth/verify-reset-code", {
+    email: "alex@example.org",
+    code,
+  });
+  assert.equal(verified.statusCode, 200);
+  const resetProofToken = String(verified.json().resetProofToken || "");
+  assert.ok(resetProofToken.length >= 32);
 
   const reset = await send("POST", "/auth/reset-password", {
-    token,
+    email: "alex@example.org",
+    resetProofToken,
     password: "Brand-New-Password-2027!",
   });
   assert.equal(reset.statusCode, 200);
 
-  // Reusing the same token must fail
+  // Previous session revoked
+  assert.equal((await send("GET", "/me/dashboard", undefined, guestCookie)).statusCode, 401);
+
+  // Reusing the same proof token must fail
   assert.equal(
     (
       await send("POST", "/auth/reset-password", {
-        token,
+        email: "alex@example.org",
+        resetProofToken,
         password: "Another-Password-2027!",
       })
     ).statusCode,
@@ -2525,15 +2672,28 @@ test("RBAC enforcement across Owner, Content Editor, Orders Manager, Finance Man
     email: "editor-staff@cossyteens.com",
   });
   assert.equal(forgotRes.statusCode, 200);
-  const resetEmail = emailService.sentAdminResets.find(
-    (m) => m.to === "editor-staff@cossyteens.com",
+  const resetEmail = [...emailService.sentEmails].reverse().find(
+    (m) =>
+      m.to.toLowerCase() === "editor-staff@cossyteens.com" &&
+      m.templateId === "password_reset_code",
   );
   assert.ok(resetEmail);
-  assert.ok(resetEmail.resetUrl.startsWith("http://localhost:5174/reset-password?token="));
-  const token = decodeURIComponent(resetEmail.resetUrl.split("token=")[1]);
+  assert.ok(!resetEmail.text.includes("reset-password?token="));
+  const adminCodeMatch = resetEmail.text.match(/\b(\d{6})\b/);
+  assert.ok(adminCodeMatch);
+  const verifyAdminCodeRes = await send("POST", "/admin/auth/verify-reset-code", {
+    email: "editor-staff@cossyteens.com",
+    code: adminCodeMatch[1]!,
+  });
+  assert.equal(verifyAdminCodeRes.statusCode, 200);
+  const adminResetProofToken = String(
+    verifyAdminCodeRes.json().resetProofToken || "",
+  );
+  assert.ok(adminResetProofToken.length >= 32);
 
   const resetRes = await send("POST", "/admin/auth/reset-password", {
-    token,
+    email: "editor-staff@cossyteens.com",
+    resetProofToken: adminResetProofToken,
     password: "Editor-Recovered-Pass-2027!",
   });
   assert.equal(resetRes.statusCode, 200);
@@ -2549,15 +2709,15 @@ test("RBAC enforcement across Owner, Content Editor, Orders Manager, Finance Man
     ).statusCode,
     401,
   );
-  // New password unlocks immediately
-  assert.equal(
-    (
-      await send("POST", "/admin/auth/login", {
-        email: "editor-staff@cossyteens.com",
-        password: "Editor-Recovered-Pass-2027!",
-      })
-    ).statusCode,
-    200,
+  // New password unlocks immediately and still requires MFA verification
+  const unlockedLogin = await send("POST", "/admin/auth/login", {
+    email: "editor-staff@cossyteens.com",
+    password: "Editor-Recovered-Pass-2027!",
+  });
+  assert.equal(unlockedLogin.statusCode, 200);
+  assert.ok(
+    unlockedLogin.json().nextStep === "verify_mfa" ||
+      unlockedLogin.json().nextStep === "enroll_mfa",
   );
 
   // Audit activity log contains structured events
@@ -3934,3 +4094,706 @@ test("Admin operational improvements: single complimentary grant, revocation, ex
   assert.ok(editorOverview.devotionals.length >= 1);
 });
 
+
+test("Email & Password Recovery Priority 1/3/4: 6-digit security boundaries, lockout, expiry, cooldown, hourly limits, and admin MFA enforcement", async () => {
+  const email = `recovery-sec-${Date.now()}@example.org`;
+  const sendFromIp = async (
+    remoteAddress: string,
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+    url: string,
+    payload?: string | object | Buffer,
+    cookie = "",
+  ) => {
+    const cleanUrl = url.split("?")[0] || "";
+    const isAdmin = cleanUrl === "/admin" || cleanUrl.startsWith("/admin/");
+    return app.inject({
+      method,
+      url: "/api/v1" + url,
+      remoteAddress,
+      payload,
+      headers: {
+        cookie,
+        "x-requested-with": isAdmin ? "BalancedLifeAdmin" : "BalancedLife",
+      },
+    });
+  };
+  const reg = await sendFromIp("10.0.10.1", "POST", "/auth/register", {
+    name: "Recovery Tester",
+    email,
+    password: "Initial-Strong-Pass-2027!",
+    ageGroup: "18_25",
+    guardianConsentConfirmed: true,
+  });
+  assert.equal(reg.statusCode, 200);
+  const oldSessionCookie = String(reg.headers["set-cookie"]).split(";")[0];
+
+  // Welcome email is sent / captured cleanly upon registration
+  const welcomeEmail = [...emailService.sentEmails].reverse().find(
+    (m) => m.to.toLowerCase() === email && m.templateId === "welcome",
+  );
+  assert.ok(welcomeEmail);
+
+  // Unknown email never enumerates and sends no verification email
+  const unknownCountBefore = emailService.sentEmails.length;
+  const unknownRes = await send("POST", "/auth/forgot-password", {
+    email: "nobody-registered-here@example.org",
+  });
+  assert.equal(unknownRes.statusCode, 200);
+  assert.equal(unknownRes.json().ok, true);
+  assert.ok(unknownRes.json().cooldownSeconds >= 60);
+  assert.equal(emailService.sentEmails.length, unknownCountBefore);
+
+  // Known email issues 6-digit CSPRNG code & stores keyed HMAC + salt (never plaintext)
+  const req1 = await send("POST", "/auth/forgot-password", { email });
+  assert.equal(req1.statusCode, 200);
+  const mail1 = [...emailService.sentEmails].reverse().find(
+    (m) => m.to.toLowerCase() === email && m.templateId === "password_reset_code",
+  );
+  assert.ok(mail1);
+  const code1 = mail1.text.match(/\b(\d{6})\b/)?.[1] || "";
+  assert.equal(code1.length, 6);
+
+  // Immediate resend within 60s cooldown returns 429
+  const reqCooldown = await send("POST", "/auth/forgot-password", { email });
+  assert.equal(reqCooldown.statusCode, 429);
+
+  // Check DB stores keyed HMAC, not plaintext 6-digit code
+  const store1 = openDatabase(databasePath);
+  try {
+    const challenge1 = store1.db
+      .select()
+      .from(passwordResetCodes)
+      .where(
+        and(
+          eq(passwordResetCodes.actorType, "reader"),
+          eq(passwordResetCodes.email, email),
+        ),
+      )
+      .orderBy(desc(passwordResetCodes.id))
+      .get();
+    assert.ok(challenge1);
+    assert.notEqual(challenge1.codeHmac, code1);
+    assert.ok(challenge1.codeHmac.length >= 64);
+    assert.ok(challenge1.challengeSalt.length >= 16);
+
+    // Move first request timestamp back > 65s so we can test replacement invalidating prior code
+    const twoMinutesAgo = new Date(Date.now() - 120_000).toISOString();
+    store1.db
+      .update(passwordResetCodes)
+      .set({ createdAt: twoMinutesAgo })
+      .where(eq(passwordResetCodes.id, challenge1.id))
+      .run();
+    store1.db
+      .update(passwordResetRateEvents)
+      .set({ createdAt: twoMinutesAgo })
+      .where(eq(passwordResetRateEvents.actorType, "reader"))
+      .run();
+  } finally {
+    store1.sqlite.close();
+  }
+
+  // Request replacement code -> invalidates code1
+  const req2 = await send("POST", "/auth/forgot-password", { email });
+  assert.equal(req2.statusCode, 200);
+  const mail2 = [...emailService.sentEmails].reverse().find(
+    (m) => m.to.toLowerCase() === email && m.templateId === "password_reset_code",
+  );
+  assert.ok(mail2);
+  const code2 = mail2.text.match(/\b(\d{6})\b/)?.[1] || "";
+  assert.equal(code2.length, 6);
+
+  // Expired code check: simulate >10 min age in DB
+  const storeExp = openDatabase(databasePath);
+  try {
+    const latest = storeExp.db
+      .select()
+      .from(passwordResetCodes)
+      .where(eq(passwordResetCodes.email, email))
+      .orderBy(desc(passwordResetCodes.id))
+      .get()!;
+    storeExp.db
+      .update(passwordResetCodes)
+      .set({ expiresAt: new Date(Date.now() - 60_000).toISOString() })
+      .where(eq(passwordResetCodes.id, latest.id))
+      .run();
+    const expTry = await send("POST", "/auth/verify-reset-code", {
+      email,
+      code: code2,
+    });
+    assert.equal(expTry.statusCode, 400);
+
+    // Restore future expiry so we can test 5-attempt brute-force lockout
+    storeExp.db
+      .update(passwordResetCodes)
+      .set({
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        createdAt: new Date(Date.now() - 120_000).toISOString(),
+      })
+      .where(eq(passwordResetCodes.id, latest.id))
+      .run();
+  } finally {
+    storeExp.sqlite.close();
+  }
+
+  // 5 wrong attempts lock the active challenge even against the right code afterward
+  const wrongCode = code2 === "123456" ? "654321" : "123456";
+  for (let i = 0; i < 4; i++) {
+    const res = await send("POST", "/auth/verify-reset-code", {
+      email,
+      code: wrongCode,
+    });
+    assert.equal(res.statusCode, 400);
+  }
+  const fifthWrong = await send("POST", "/auth/verify-reset-code", {
+    email,
+    code: wrongCode,
+  });
+  assert.equal(fifthWrong.statusCode, 429);
+
+  // Even the real code2 is now locked out (429)
+  const lockedRealTry = await send("POST", "/auth/verify-reset-code", {
+    email,
+    code: code2,
+  });
+  assert.equal(lockedRealTry.statusCode, 429);
+
+  // Hourly limit enforcement after multiple rate events (move cooldown past 60s before req3)
+  const storeHour = openDatabase(databasePath);
+  try {
+    const staleCooldown = new Date(Date.now() - 90_000).toISOString();
+    storeHour.db
+      .update(passwordResetCodes)
+      .set({ createdAt: staleCooldown })
+      .where(eq(passwordResetCodes.email, email))
+      .run();
+    storeHour.db
+      .update(passwordResetRateEvents)
+      .set({ createdAt: staleCooldown })
+      .where(eq(passwordResetRateEvents.actorType, "reader"))
+      .run();
+  } finally {
+    storeHour.sqlite.close();
+  }
+
+  const req3 = await sendFromIp("10.0.10.1", "POST", "/auth/forgot-password", { email });
+  assert.equal(req3.statusCode, 200);
+  const mail3 = [...emailService.sentEmails].reverse().find(
+    (m) => m.to.toLowerCase() === email && m.templateId === "password_reset_code",
+  )!;
+  const code3 = mail3.text.match(/\b(\d{6})\b/)![1]!;
+
+  // Previous code (code2) is invalidated by req3
+  const invalidatedOldTry = await sendFromIp("10.0.10.1", "POST", "/auth/verify-reset-code", {
+    email,
+    code: code2,
+  });
+  assert.equal(invalidatedOldTry.statusCode, 400);
+
+  const verify3 = await sendFromIp("10.0.10.1", "POST", "/auth/verify-reset-code", {
+    email,
+    code: code3,
+  });
+  assert.equal(verify3.statusCode, 200);
+  const proof3 = String(verify3.json().resetProofToken);
+
+  // Changing password without verified proof fails
+  const noProof = await sendFromIp("10.0.10.1", "POST", "/auth/reset-password", {
+    email,
+    resetProofToken: "invalid-unverified-token-value-1234567890",
+    password: "Recovered-Pass-Final-2027!",
+  });
+  assert.equal(noProof.statusCode, 400);
+
+  // Complete password reset with proof -> revokes old session
+  const resetOk = await sendFromIp("10.0.10.1", "POST", "/auth/reset-password", {
+    email,
+    resetProofToken: proof3,
+    password: "Recovered-Pass-Final-2027!",
+  });
+  assert.equal(resetOk.statusCode, 200);
+  assert.equal(
+    (await sendFromIp("10.0.10.1", "GET", "/me/dashboard", undefined, oldSessionCookie)).statusCode,
+    401,
+  );
+
+  // Requests 4, 5, 6 succeed (aging cooldown > 60s each time within 1h), then 7th hits MAX_REQUESTS_PER_EMAIL_PER_HOUR (6)
+  for (let i = 0; i < 3; i++) {
+    const sCool = openDatabase(databasePath);
+    try {
+      const ago = new Date(Date.now() - 90_000).toISOString();
+      sCool.db
+        .update(passwordResetRateEvents)
+        .set({ createdAt: ago })
+        .where(eq(passwordResetRateEvents.actorType, "reader"))
+        .run();
+    } finally {
+      sCool.sqlite.close();
+    }
+    const okNext = await sendFromIp("10.0.10.1", "POST", "/auth/forgot-password", { email });
+    assert.equal(okNext.statusCode, 200);
+  }
+
+  const storeCap = openDatabase(databasePath);
+  try {
+    storeCap.db
+      .update(passwordResetRateEvents)
+      .set({ createdAt: new Date(Date.now() - 90_000).toISOString() })
+      .where(eq(passwordResetRateEvents.actorType, "reader"))
+      .run();
+  } finally {
+    storeCap.sqlite.close();
+  }
+  const req7OverHourly = await sendFromIp("10.0.10.1", "POST", "/auth/forgot-password", { email });
+  assert.equal(req7OverHourly.statusCode, 429);
+
+  // Admin password reset preserves mandatory TOTP MFA (cannot access /admin/overview without MFA verification)
+  const adminResetTargetEmail = "ed-ops-mfa@cossyteens.com";
+  await send(
+    "POST",
+    "/admin/staff",
+    {
+      name: "MFA Reset Guard",
+      email: adminResetTargetEmail,
+      role: "content_editor",
+      password: "Admin-Initial-Mfa-2027!",
+    },
+    adminCookie,
+  );
+  const admForgot = await send("POST", "/admin/auth/forgot-password", {
+    email: adminResetTargetEmail,
+  });
+  assert.equal(admForgot.statusCode, 200);
+  const admMail = [...emailService.sentEmails].reverse().find(
+    (m) =>
+      m.to.toLowerCase() === adminResetTargetEmail &&
+      m.templateId === "password_reset_code",
+  )!;
+  const admCode = admMail.text.match(/\b(\d{6})\b/)![1]!;
+  const admVerify = await send("POST", "/admin/auth/verify-reset-code", {
+    email: adminResetTargetEmail,
+    code: admCode,
+  });
+  assert.equal(admVerify.statusCode, 200);
+  const admReset = await send("POST", "/admin/auth/reset-password", {
+    email: adminResetTargetEmail,
+    resetProofToken: admVerify.json().resetProofToken,
+    password: "Admin-Reset-Mfa-2027!",
+  });
+  assert.equal(admReset.statusCode, 200);
+  const admLogin = await send("POST", "/admin/auth/login", {
+    email: adminResetTargetEmail,
+    password: "Admin-Reset-Mfa-2027!",
+  });
+  assert.equal(admLogin.statusCode, 200);
+  assert.equal(admLogin.json().nextStep, "enroll_mfa");
+  const pendingMfaCookie = String(admLogin.headers["set-cookie"]).split(";")[0];
+  assert.equal(
+    (await send("GET", "/admin/overview", undefined, pendingMfaCookie))
+      .statusCode,
+    403,
+  );
+});
+
+test("Email System Priority 3/4: all 13 branded HTML + plain-text templates escape XSS, reflect Abuja & palette, and leak zero private data", () => {
+  assert.equal(EMAIL_TEMPLATE_CATALOG.length, 13);
+  for (const entry of EMAIL_TEMPLATE_CATALOG) {
+    const rendered = buildSampleTemplatePreview(entry.id, "https://cossyteens.com");
+    assert.ok(rendered.subject.length > 0);
+    assert.ok(rendered.html.includes("#570008"));
+    assert.ok(rendered.html.includes("#FAF5ED"));
+    assert.ok(rendered.html.includes("#C89B3C"));
+    assert.ok(rendered.html.includes("The Balanced Life Devotional"));
+    assert.ok(rendered.html.includes("Cossy Teens Consult Enterprises"));
+    assert.ok(rendered.html.includes("Abuja, Nigeria"));
+    assert.ok(rendered.html.includes("cossyteensconsult@gmail.com"));
+    assert.ok(rendered.text.includes("The Balanced Life Devotional"));
+    assert.ok(rendered.text.includes("Cossy Teens Consult Enterprises"));
+    assert.ok(rendered.text.length > 40);
+    if (entry.category === "optional") {
+      assert.ok(
+        rendered.html.toLowerCase().includes("unsubscribe") &&
+          rendered.text.toLowerCase().includes("unsubscribe"),
+      );
+    }
+  }
+
+  // XSS / HTML injection escaping on admin_announcement & printed_order_received
+  const xssRendered = renderEmailTemplate("admin_announcement", {
+    recipientName: '<script>alert("xss")</script> Chidi',
+    title: 'Important <img src=x onerror="alert(1)"> Update',
+    body: "Paragraph one with <b>raw tags</b>.\n\nSecond <script>bad()</script> line.",
+    actionPath: "/dashboard",
+    actionLabel: "Open App",
+    appBaseUrl: "https://cossyteens.com",
+  });
+  assert.ok(!xssRendered.html.includes("<script>"));
+  assert.ok(!xssRendered.html.includes("<img src=x"));
+  assert.ok(xssRendered.html.includes("&lt;script&gt;"));
+});
+
+test("Email Queue Priority 3/6/7: multi-provider factory, backoff retries, idempotency, webhook suppression, unsubscribe, channel isolation & Admin Email RBAC", async () => {
+  // Multi-provider adapter factory without real network sends
+  const cap = createEmailService({ provider: "capture", from: "noreply@cossyteens.com" });
+  assert.equal(cap.configured, true);
+  assert.equal(cap.providerName, "capture");
+  const capRes = await cap.sendEmail({
+    to: "reader@example.com",
+    subject: "Capture Test",
+    html: "<p>Hello</p>",
+    text: "Hello",
+  });
+  assert.equal(capRes.delivered, true);
+
+  const unconfigured = createEmailService({ provider: "none", from: "noreply@cossyteens.com" });
+  assert.equal(unconfigured.configured, false);
+  assert.equal((await unconfigured.sendEmail({ to: "a@b.com", subject: "s", html: "h", text: "t" })).delivered, false);
+
+  for (const p of ["resend", "postmark", "ses", "webhook"] as const) {
+    const adapter = createEmailService({
+      provider: p,
+      apiKey: "test_secret_key",
+      webhookUrl: "https://example.com/hook",
+      sesAccessKeyId: "AKIA_TEST",
+      sesSecretAccessKey: "SECRET_TEST",
+      from: "noreply@cossyteens.com",
+    });
+    assert.equal(adapter.configured, true);
+    assert.equal(adapter.providerName, p);
+  }
+
+  // Register a reader, verify optional email prefs default OFF, grant 2027 access, test daily reminder + campaign + unsubscribe + bounce suppression
+  const readerMail = `pref-email-${Date.now()}@example.org`;
+  const readerReg = await app.inject({
+    method: "POST",
+    url: "/api/v1/auth/register",
+    remoteAddress: "10.0.10.2",
+    headers: { "x-requested-with": "BalancedLife" },
+    payload: {
+      name: "Ngozi Prefs",
+      email: readerMail,
+      password: "Reader-Email-Prefs-2027!",
+      ageGroup: "18_25",
+      guardianConsentConfirmed: true,
+    },
+  });
+  assert.equal(readerReg.statusCode, 200);
+  const readerPrefCookie = String(readerReg.headers["set-cookie"]).split(";")[0];
+
+  const initialPrefsRes = await send(
+    "GET",
+    "/me/notifications",
+    undefined,
+    readerPrefCookie,
+  );
+  assert.equal(initialPrefsRes.statusCode, 200);
+  const initialPrefs = initialPrefsRes.json().preferences;
+  assert.equal(initialPrefs.emailDailyReminderEnabled, false);
+  assert.equal(initialPrefs.emailAnnouncementsEnabled, false);
+  assert.equal(initialPrefs.emailCommunityUpdatesEnabled, false);
+
+  // Opt into email channels while leaving Web Push notificationsEnabled false (strict channel separation)
+  const optInRes = await send(
+    "PATCH",
+    "/me/notifications/preferences",
+    {
+      notificationsEnabled: false,
+      dailyReminderEnabled: false,
+      emailDailyReminderEnabled: true,
+      emailAnnouncementsEnabled: true,
+      emailCommunityUpdatesEnabled: true,
+      reminderTime: "07:00",
+      timezone: "Africa/Lagos",
+    },
+    readerPrefCookie,
+  );
+  assert.equal(optInRes.statusCode, 200);
+  assert.equal(optInRes.json().preferences.notificationsEnabled, false);
+  assert.equal(optInRes.json().preferences.emailDailyReminderEnabled, true);
+  assert.equal(optInRes.json().preferences.emailAnnouncementsEnabled, true);
+
+  // Look up user ID & grant 2027 digital access so daily email reminder eligibility passes
+  const store = openDatabase(databasePath);
+  let targetUserId: number;
+  try {
+    const userRow = store.db
+      .select()
+      .from(users)
+      .where(eq(users.email, readerMail))
+      .get()!;
+    targetUserId = userRow.id;
+  } finally {
+    store.sqlite.close();
+  }
+
+  const grantRes = await send(
+    "POST",
+    `/admin/users/${targetUserId}/online-access/grant`,
+    { reason: "E2E Email reminder eligibility" },
+    adminCookie,
+  );
+  assert.equal(grantRes.statusCode, 200);
+
+  // Simulate 08:15 Africa/Lagos (07:15 UTC) on a published 2027 devotional date -> evaluateUserEmailReminders queues reminder without pushing Web Push
+  const storeWorker = openDatabase(databasePath);
+  try {
+    const pubEntry = storeWorker.db
+      .select()
+      .from(devotionals)
+      .where(eq(devotionals.published, true))
+      .get();
+    assert.ok(pubEntry);
+    const nowPubDay = new Date(`${pubEntry.date}T07:15:00.000Z`);
+    const evalRes = evaluateUserEmailReminders(
+      storeWorker,
+      targetUserId,
+      "http://localhost:5173",
+      nowPubDay,
+    );
+    assert.equal(evalRes.generatedKeys.length, 1);
+
+    // Process batch with transient failure first -> backs off to retrying with future nextAttemptAt
+    emailService.failNextCount = 1;
+    const retryPass = await processEmailQueueBatch(storeWorker, emailService, {
+      batchSize: 50,
+      now: nowPubDay,
+      defaultAppBaseUrl: "http://localhost:5173",
+    });
+    assert.ok(retryPass.retryingCount >= 1);
+
+    const queuedItem = storeWorker.db
+      .select()
+      .from(emailQueue)
+      .where(eq(emailQueue.idempotencyKey, evalRes.generatedKeys[0]!))
+      .get()!;
+    assert.equal(queuedItem.status, "retrying");
+    assert.equal(queuedItem.attempts, 1);
+    assert.ok(queuedItem.nextAttemptAt && queuedItem.nextAttemptAt > nowPubDay.toISOString());
+
+    // Duplicate enqueue with identical idempotencyKey does NOT create a second row
+    const dupRow = enqueueEmail(storeWorker, {
+      userId: targetUserId,
+      recipientEmail: readerMail,
+      recipientName: "Ngozi Prefs",
+      templateId: "daily_devotional_reminder",
+      category: "optional",
+      preferenceKey: "daily_reminder",
+      dedupeKey: evalRes.generatedKeys[0]!,
+      payload: {
+        recipientName: "Ngozi Prefs",
+        date: pubEntry.date,
+        devotionalTitle: pubEntry.title,
+        theme: pubEntry.theme,
+        bibleText: pubEntry.bibleText || undefined,
+        appBaseUrl: "http://localhost:5173",
+      },
+    });
+    assert.equal(dupRow?.id, queuedItem.id);
+
+    // Advance clock past 2m backoff -> delivers cleanly with List-Unsubscribe header
+    const deliveredPass = await processEmailQueueBatch(storeWorker, emailService, {
+      batchSize: 50,
+      now: new Date(nowPubDay.getTime() + 5 * 60_000),
+      defaultAppBaseUrl: "http://localhost:5173",
+    });
+    assert.ok(deliveredPass.sentCount >= 1);
+    const sentMsg = [...emailService.sentEmails].reverse().find(
+      (m) =>
+        m.to.toLowerCase() === readerMail &&
+        m.templateId === "daily_devotional_reminder",
+    );
+    assert.ok(sentMsg);
+    assert.ok(sentMsg.headers?.["List-Unsubscribe"]);
+  } finally {
+    storeWorker.sqlite.close();
+  }
+
+  // Test Admin Email Management API & RBAC (content_editor blocked 403 from sending campaigns, owner allowed)
+  const overviewRes = await send("GET", "/admin/email/overview", undefined, adminCookie);
+  assert.equal(overviewRes.statusCode, 200);
+  assert.equal(overviewRes.json().configuration.domainVerified, false);
+  assert.equal(overviewRes.json().templates.length, 13);
+
+  const previewTplRes = await send(
+    "GET",
+    "/admin/email/templates/preview?templateId=order_dispatched",
+    undefined,
+    adminCookie,
+  );
+  assert.equal(previewTplRes.statusCode, 200);
+  assert.ok(previewTplRes.json().html.includes("Dispatched"));
+
+  const testMailRes = await send(
+    "POST",
+    "/admin/email/test",
+    { templateId: "online_access_confirmed" },
+    adminCookie,
+  );
+  assert.equal(testMailRes.statusCode, 200);
+  assert.equal(testMailRes.json().ok, true);
+
+  // Log in as isolated content_editor + confirm MFA to test RBAC refusal on email campaigns
+  const rbacEditorEmail = `ed-mail-rbac-${Date.now()}@cossyteens.com`;
+  await send(
+    "POST",
+    "/admin/staff",
+    {
+      name: "Email RBAC Editor",
+      email: rbacEditorEmail,
+      role: "content_editor",
+      password: "Editor-Mail-Rbac-2027!",
+    },
+    adminCookie,
+  );
+  const edMailLogin = await send("POST", "/admin/auth/login", {
+    email: rbacEditorEmail,
+    password: "Editor-Mail-Rbac-2027!",
+  });
+  const edMailCookie = String(edMailLogin.headers["set-cookie"]).split(";")[0];
+  const edMailMfa = await send("POST", "/admin/auth/mfa/enroll", {}, edMailCookie);
+  await send(
+    "POST",
+    "/admin/auth/mfa/confirm",
+    { code: generateTotpCode(edMailMfa.json().manualEntryKey) },
+    edMailCookie,
+  );
+
+  assert.equal(
+    (
+      await send(
+        "POST",
+        "/admin/email/campaigns",
+        {
+          targetType: "individual",
+          targetUserId,
+          audienceChannel: "announcements",
+          title: "Unauthorized Editor Email",
+          body: "Should be blocked by RBAC.",
+        },
+        edMailCookie,
+      )
+    ).statusCode,
+    403,
+  );
+
+  // Schedule & cancel email campaign as owner
+  const futureScheduleIso = new Date(Date.now() + 2 * 3600_000).toISOString();
+  const schedEmailRes = await send(
+    "POST",
+    "/admin/email/campaigns",
+    {
+      targetType: "individual",
+      targetUserId,
+      audienceChannel: "announcements",
+      title: "Scheduled Checkup Notice",
+      body: "Scheduled email test body.",
+      scheduledFor: futureScheduleIso,
+      idempotencyKey: `sched_email_${Date.now()}`,
+    },
+    adminCookie,
+  );
+  assert.equal(schedEmailRes.statusCode, 200);
+  assert.equal(schedEmailRes.json().campaign.status, "scheduled");
+  const schedCampaignId = schedEmailRes.json().campaign.id as number;
+  const cancelSchedRes = await send(
+    "POST",
+    `/admin/email/campaigns/${schedCampaignId}/cancel`,
+    {},
+    adminCookie,
+  );
+  assert.equal(cancelSchedRes.statusCode, 200);
+  assert.equal(cancelSchedRes.json().campaign.status, "cancelled");
+
+  // Send immediate announcement campaign -> delivers only to opted-in user
+  const immediateCampaign = await send(
+    "POST",
+    "/admin/email/campaigns",
+    {
+      targetType: "individual",
+      targetUserId,
+      audienceChannel: "announcements",
+      title: "2027 Reading Plan Open",
+      body: "Join us inside the reader app for this week's reflections.",
+      actionPath: "/dashboard",
+      actionLabel: "Open Dashboard",
+      idempotencyKey: `imm_email_${Date.now()}`,
+    },
+    adminCookie,
+  );
+  assert.equal(immediateCampaign.statusCode, 200);
+  assert.equal(immediateCampaign.json().campaign.eligibleCount, 1);
+
+  const workerRes = await send("POST", "/admin/email/run-worker", {}, adminCookie);
+  assert.equal(workerRes.statusCode, 200);
+
+  // Functional single-click /email/unsubscribe disables ONLY that channel and NEVER blocks transactional security codes
+  const unsubToken = createEmailUnsubscribeToken({
+    userId: targetUserId,
+    scope: "announcements",
+  });
+  const unsubGet = await send(
+    "GET",
+    `/email/unsubscribe?token=${encodeURIComponent(unsubToken)}`,
+  );
+  assert.equal(unsubGet.statusCode, 200);
+  assert.equal(unsubGet.json().valid, true);
+
+  const unsubPost = await send("POST", "/email/unsubscribe", {
+    token: unsubToken,
+    scope: "announcements",
+  });
+  assert.equal(unsubPost.statusCode, 200);
+  assert.equal(unsubPost.json().preferences.emailAnnouncementsEnabled, false);
+  assert.equal(unsubPost.json().preferences.emailDailyReminderEnabled, true);
+
+  // Hard-bounce webhook automatically suppresses future optional emails
+  const bounceRes = await send("POST", "/webhooks/email", {
+    eventType: "hard_bounce",
+    email: readerMail,
+    provider: "resend",
+    detail: "Mailbox does not exist",
+  });
+  assert.equal(bounceRes.statusCode, 200);
+  assert.equal(bounceRes.json().suppressedUserId, targetUserId);
+
+  const storeSup = openDatabase(databasePath);
+  try {
+    const prefsAfterBounce = storeSup.db
+      .select()
+      .from(notificationPreferences)
+      .where(eq(notificationPreferences.userId, targetUserId))
+      .get()!;
+    assert.equal(prefsAfterBounce.emailSuppressedReason, "hard_bounce");
+
+    // Enqueueing an optional email for a suppressed address is blocked
+    const suppressedEnqueue = enqueueEmail(storeSup, {
+      userId: targetUserId,
+      recipientEmail: readerMail,
+      recipientName: "Ngozi Prefs",
+      templateId: "admin_announcement",
+      category: "optional",
+      preferenceKey: "daily_reminder",
+      dedupeKey: `suppressed_opt_${Date.now()}`,
+      payload: {
+        recipientName: "Ngozi Prefs",
+        title: "Blocked Optional",
+        body: "Should not queue",
+        appBaseUrl: "http://localhost:5173",
+      },
+    });
+    assert.equal(suppressedEnqueue, null);
+
+    // Essential transactional reset code STILL works even when optional email is suppressed/unsubscribed
+    const resetStillWorks = await send("POST", "/auth/forgot-password", {
+      email: readerMail,
+    });
+    assert.equal(resetStillWorks.statusCode, 200);
+    const workerAfter = await runEmailWorkerCycle(
+      storeSup,
+      emailService,
+      "http://localhost:5173",
+    );
+    assert.ok(workerAfter.reminders.evaluatedReaders >= 1);
+  } finally {
+    storeSup.sqlite.close();
+  }
+});

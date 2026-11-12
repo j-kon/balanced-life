@@ -35,6 +35,7 @@ import {
   ResetPasswordPage,
 } from "./pages/public/AuthPages";
 import {
+  EmailUnsubscribePage,
   InstallPage,
   PrivacyPage,
   TermsPage,
@@ -281,6 +282,14 @@ export default function App() {
               element={
                 <PublicLayout>
                   <ResetPasswordPage />
+                </PublicLayout>
+              }
+            />
+            <Route
+              path="/unsubscribe"
+              element={
+                <PublicLayout>
+                  <EmailUnsubscribePage />
                 </PublicLayout>
               }
             />
