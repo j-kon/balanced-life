@@ -1,23 +1,32 @@
 import { useState } from "react";
 import {
   AlertCircle,
+  Bell,
   BookOpen,
   Building2,
   CheckCircle2,
-  Clock,
   CreditCard,
   Gift,
   Package,
   PenLine,
   Settings,
   Shield,
-  ShoppingBag,
   Truck,
   Users,
 } from "lucide-react";
 import { money } from "../api";
 import { useAdminAuth } from "../context/AdminAuthContext";
 import type { AdminOverviewData, AdminSectionId } from "./AdminTypes";
+
+const TAB_MAP: Record<string, AdminSectionId> = {
+  "printed-orders": "Printed Orders",
+  payments: "Payments",
+  "online-access": "Online Access",
+  "bulk-orders": "Bulk Orders",
+  devotionals: "Devotionals",
+  notifications: "Notifications",
+  readers: "Readers",
+};
 
 export function DashboardOverview({
   data,
@@ -31,6 +40,16 @@ export function DashboardOverview({
     "daily",
   );
 
+  const canReaders = hasPermission("readers.read");
+  const canDigital = hasPermission("digital_orders.read");
+  const canPrinted = hasPermission("printed_orders.read");
+  const canPayments = hasPermission("payments.read");
+  const canDevotionals = hasPermission("devotionals.read");
+  const canBulk = hasPermission("bulk_orders.read");
+  const canNotifications = hasPermission("notifications.read");
+  const canAudit = hasPermission("audit.read");
+  const canFinance = canPayments || canDigital || canPrinted;
+
   const m = data.metrics;
   const totalSales = m.totalSalesKobo ?? m.verifiedRevenueKobo;
   const digitalRev =
@@ -38,12 +57,8 @@ export function DashboardOverview({
     m.digitalRevenueKobo + m.subscriptionRevenueKobo;
   const printedRev = m.printedBookRevenueKobo ?? 0;
 
-  const salesSeries =
-    data.charts?.salesByPeriod?.[salesPeriod] || [];
-  const maxSalesPoint = Math.max(
-    1,
-    ...salesSeries.map((pt) => pt.totalKobo),
-  );
+  const salesSeries = data.charts?.salesByPeriod?.[salesPeriod] || [];
+  const maxSalesPoint = Math.max(1, ...salesSeries.map((pt) => pt.totalKobo));
 
   const regSeries = data.charts?.registrationsByMonth || [];
   const maxRegPoint = Math.max(1, ...regSeries.map((r) => r.count));
@@ -54,88 +69,206 @@ export function DashboardOverview({
     ...fulfillmentSeries.map((f) => f.count),
   );
 
+  const editorialAwaiting =
+    (m.pendingReviewReadings ?? 0) + (m.needsRevisionReadings ?? 0);
+  const notificationsAttention =
+    (m.failedNotificationCampaignsCount ?? 0) +
+    (m.scheduledNotificationsCount ?? 0) +
+    (m.openInquiries ?? 0);
+
+  const primaryCards: Array<{
+    Icon: typeof Users;
+    label: string;
+    value: string | number;
+    hint?: string;
+    target?: AdminSectionId;
+  }> = [];
+
+  if (canReaders) {
+    primaryCards.push({
+      Icon: Users,
+      label: "Total Readers",
+      value: m.totalRegisteredReaders ?? m.readers,
+      hint: "Registered reader accounts",
+      target: "Readers",
+    });
+  }
+
+  if (canReaders || canDigital) {
+    const paidCount = m.paidOnlineReaders ?? 0;
+    const compCount = m.complimentaryOnlineReaders ?? 0;
+    primaryCards.push({
+      Icon: CheckCircle2,
+      label: "Active Online Readers",
+      value: m.activeOnlineReaders ?? m.activeMemberships + m.digitalEditionsSold,
+      hint: `${paidCount} paid · ${compCount} complimentary`,
+      target: canDigital ? "Online Access" : "Readers",
+    });
+  }
+
+  if (canFinance) {
+    primaryCards.push({
+      Icon: CreditCard,
+      label: "Verified Revenue",
+      value: money(totalSales),
+      hint: `Online Access ${money(digitalRev)} · Printed ${money(printedRev)}`,
+      target: canPayments ? "Payments" : canDigital ? "Online Access" : "Printed Orders",
+    });
+  }
+
+  if (canPrinted) {
+    primaryCards.push({
+      Icon: Package,
+      label: "Pending Printed Orders",
+      value: m.pendingPrintedOrders ?? 0,
+      hint: `${m.printedBooksCopiesOrdered ?? 0} total copies ordered`,
+      target: "Printed Orders",
+    });
+    primaryCards.push({
+      Icon: Truck,
+      label: "Orders Awaiting Dispatch",
+      value: m.ordersAwaitingDelivery ?? 0,
+      hint: `${m.deliveredOrders ?? 0} delivered`,
+      target: "Printed Orders",
+    });
+  }
+
+  if (canDevotionals) {
+    primaryCards.push({
+      Icon: BookOpen,
+      label: "Devotionals Awaiting Approval",
+      value: editorialAwaiting,
+      hint: `${m.published} published · ${m.needsRevisionReadings} needs revision`,
+      target: "Devotionals",
+    });
+  }
+
+  if (canNotifications) {
+    primaryCards.push({
+      Icon: Bell,
+      label: "Notifications & Inquiries",
+      value: notificationsAttention,
+      hint: `${m.scheduledNotificationsCount ?? 0} scheduled · ${m.openInquiries} open inquiries`,
+      target: "Notifications",
+    });
+  }
+
+  if (canDigital || canPayments) {
+    primaryCards.push({
+      Icon: CreditCard,
+      label: "Pending Payment Verifications",
+      value: m.pendingDigitalPurchases,
+      hint: "Bank transfers or checkout confirmations waiting",
+      target: canDigital ? "Online Access" : "Payments",
+    });
+  }
+
+  const alerts = data.operationalAlerts || [];
+
   return (
     <div className="stack">
-      {/* 12 Top-Level KPI Cards */}
-      <div className="metric-grid">
-        {[
-          [
-            CreditCard,
-            `Verified revenue (Digital ${money(digitalRev)} · Printed ${money(printedRev)})`,
-            money(totalSales),
-          ],
-          [
-            BookOpen,
-            `2027 Digital Access revenue (${m.digitalEditionsSold} Digital editions sold)`,
-            money(digitalRev),
-          ],
-          [
-            ShoppingBag,
-            `Printed Book revenue (${m.printedBooksCopiesOrdered ?? 0} copies ordered)`,
-            money(printedRev),
-          ],
-          [
-            CheckCircle2,
-            `Active online readers (${m.paidMemberships} paid, ${m.complimentaryMemberships} comp)`,
-            m.activeOnlineReaders ?? m.activeMemberships + m.digitalEditionsSold,
-          ],
-          [
-            Clock,
-            "Online access expiring soon (within reminder window)",
-            m.expiringOnlineAccessSoon ?? 0,
-          ],
-          [
-            AlertCircle,
-            "Expired / revoked online access",
-            (m.expiredOnlineAccess ?? 0) + m.expiredMemberships,
-          ],
-          [
-            Users,
-            "Total registered readers",
-            m.totalRegisteredReaders ?? m.readers,
-          ],
-          [
-            CreditCard,
-            "Pending digital payment verifications",
-            m.pendingDigitalPurchases,
-          ],
-          [
-            Package,
-            "Pending printed book orders (quote / payment / processing)",
-            m.pendingPrintedOrders ?? 0,
-          ],
-          [
-            Truck,
-            "Orders awaiting delivery (ready for dispatch / shipped)",
-            m.ordersAwaitingDelivery ?? 0,
-          ],
-          [
-            CheckCircle2,
-            "Delivered printed book orders",
-            m.deliveredOrders ?? 0,
-          ],
-          [
-            BookOpen,
-            `Published devotionals (of ${data.devotionals.length} · ${m.drafts} drafts)`,
-            m.published,
-          ],
-        ].map(([Icon, label, value]: any) => (
-          <div className="metric" key={label}>
-            <Icon size={22} />
-            <strong>{value}</strong>
-            <span>{label}</span>
+      {/* Primary KPI Hierarchy (Scoped to Role Permissions) */}
+      {primaryCards.length > 0 && (
+        <div className="metric-grid">
+          {primaryCards.map((card) => (
+            <div className="metric" key={card.label}>
+              <card.Icon size={22} />
+              <strong>{card.value}</strong>
+              <span style={{ fontWeight: 600, color: "var(--wine)" }}>
+                {card.label}
+              </span>
+              {card.hint && <span>{card.hint}</span>}
+              {card.target && (
+                <button
+                  type="button"
+                  className="text-link"
+                  style={{ alignSelf: "flex-start" }}
+                  onClick={() => onNavigate(card.target!)}
+                >
+                  Open {card.target}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Prominent Needs Your Attention Queue */}
+      <section className="panel stack">
+        <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <h2 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+              <AlertCircle size={20} /> Needs Your Attention
+            </h2>
+            <p className="muted" style={{ margin: 0 }}>
+              {alerts.length
+                ? `${alerts.length} operational item${alerts.length === 1 ? "" : "s"} requiring review or fulfillment action.`
+                : "No urgent operational items pending across your permitted queues."}
+            </p>
           </div>
-        ))}
-      </div>
+          {canBulk && m.openBulkOrders > 0 && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Bulk Orders")}
+            >
+              <Building2 size={14} /> {m.openBulkOrders} Open Bulk Orders
+            </button>
+          )}
+        </div>
+
+        {alerts.length > 0 ? (
+          <div className="admin-attention-grid">
+            {alerts.slice(0, 8).map((alert) => {
+              const target = TAB_MAP[alert.actionTab] || "Overview";
+              return (
+                <div
+                  key={alert.id}
+                  className={`admin-attention-card ${alert.severity}`}
+                >
+                  <div className="stack" style={{ gap: 6 }}>
+                    <div className="row">
+                      <span className="pill">{alert.severity.toUpperCase()}</span>
+                      <small className="muted">
+                        {new Date(alert.createdAt).toLocaleDateString("en-GB")}
+                      </small>
+                    </div>
+                    <strong>{alert.title}</strong>
+                    <p className="muted" style={{ margin: 0, fontSize: "0.84rem" }}>
+                      {alert.description}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="button outline small"
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() => onNavigate(target)}
+                  >
+                    Open {target}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="notice success">
+            <CheckCircle2 size={18} />
+            <div>
+              <strong>All caught up</strong>
+              <p style={{ margin: 0 }}>
+                No pending bank transfers, delivery quotations, revision flags, or failed notifications need immediate action.
+              </p>
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* Quick Actions */}
       <div className="panel stack">
         <div>
-          <h2>Executive Quick Actions</h2>
+          <h2>Quick Navigation</h2>
           <p className="muted" style={{ margin: 0 }}>
-            {m.published} readings are published and live in the library.{" "}
-            {m.drafts} entries remain in draft status ({m.needsRevisionReadings}{" "}
-            flagged for revision before approval).
+            Jump directly to your permitted daily operational workflows.
           </p>
         </div>
         <div className="actions">
@@ -145,8 +278,7 @@ export function DashboardOverview({
               className="button small"
               onClick={() => onNavigate("Payments")}
             >
-              <CreditCard size={15} /> Review Pending Payments (
-              {m.pendingDigitalPurchases})
+              <CreditCard size={15} /> Review Payments ({m.pendingDigitalPurchases})
             </button>
           )}
           {hasPermission("printed_orders.read") && (
@@ -155,8 +287,7 @@ export function DashboardOverview({
               className="button outline small"
               onClick={() => onNavigate("Printed Orders")}
             >
-              <Package size={15} /> View Printed Orders (
-              {m.printedOrdersTotal ?? 0})
+              <Package size={15} /> View Printed Orders ({m.printedOrdersTotal ?? 0})
             </button>
           )}
           {hasPermission("readers.read") && (
@@ -165,7 +296,7 @@ export function DashboardOverview({
               className="button outline small"
               onClick={() => onNavigate("Readers")}
             >
-              <Gift size={15} /> Grant Complimentary Access
+              <Gift size={15} /> Manage Readers &amp; Access
             </button>
           )}
           {hasPermission("devotionals.read") && (
@@ -174,7 +305,16 @@ export function DashboardOverview({
               className="button outline small"
               onClick={() => onNavigate("Devotionals")}
             >
-              <PenLine size={15} /> Edit Devotional Entries ({m.drafts} drafts)
+              <PenLine size={15} /> 2027 Editorial Calendar ({editorialAwaiting} awaiting approval)
+            </button>
+          )}
+          {hasPermission("notifications.read") && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Notifications")}
+            >
+              <Bell size={15} /> Reader Notifications
             </button>
           )}
           {hasPermission("bulk_orders.read") && (
@@ -183,7 +323,7 @@ export function DashboardOverview({
               className="button outline small"
               onClick={() => onNavigate("Bulk Orders")}
             >
-              <Building2 size={15} /> Manage Bulk Orders ({m.bulkOrderInquiries})
+              <Building2 size={15} /> Bulk Orders ({m.bulkOrderInquiries})
             </button>
           )}
           {hasPermission("settings.read") && (
@@ -192,7 +332,7 @@ export function DashboardOverview({
               className="button outline small"
               onClick={() => onNavigate("Settings")}
             >
-              <Settings size={15} /> Update Pricing &amp; Delivery Settings
+              <Settings size={15} /> Pricing &amp; Delivery Settings
             </button>
           )}
           <button
@@ -205,222 +345,231 @@ export function DashboardOverview({
         </div>
       </div>
 
-      {/* Charts Grid */}
-      <div className="admin-charts-grid">
-        {/* Chart 1: Verified Sales by Period */}
-        <div className="panel stack">
-          <div className="section-title" style={{ margin: 0 }}>
-            <div>
-              <h3>Verified Sales Trend</h3>
-              <small className="muted">
-                Settled Digital Access &amp; Printed Book payments
-              </small>
-            </div>
-            <div className="actions">
-              {(["daily", "weekly", "monthly"] as const).map((period) => (
-                <button
-                  key={period}
-                  type="button"
-                  className={
-                    "button small " + (salesPeriod === period ? "" : "outline")
-                  }
-                  onClick={() => setSalesPeriod(period)}
-                >
-                  {period.charAt(0).toUpperCase() + period.slice(1)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="admin-bar-chart">
-            {salesSeries.map((pt, idx) => {
-              const pct = Math.max(
-                4,
-                Math.round((pt.totalKobo / maxSalesPoint) * 100),
-              );
-              return (
-                <div
-                  className="admin-bar-col"
-                  key={`${pt.label}-${idx}`}
-                  title={`${pt.label}: ${money(pt.totalKobo)} (Digital: ${money(pt.digitalKobo)}, Printed: ${money(pt.printedKobo)})`}
-                >
-                  <div className="admin-bar-track">
-                    <div
-                      className="admin-bar-fill"
-                      style={{ height: `${pt.totalKobo > 0 ? pct : 3}%` }}
-                    />
+      {/* Permission-Scoped Charts Grid */}
+      {(canFinance || canPrinted || canReaders) && (
+        <div className="admin-charts-grid">
+          {canFinance && (
+            <>
+              <div className="panel stack">
+                <div className="section-title" style={{ margin: 0 }}>
+                  <div>
+                    <h3>Verified Sales Trend</h3>
+                    <small className="muted">
+                      Settled Online Access &amp; Printed Book payments
+                    </small>
                   </div>
-                  <span className="admin-bar-label">{pt.label}</span>
+                  <div className="actions">
+                    {(["daily", "weekly", "monthly"] as const).map((period) => (
+                      <button
+                        key={period}
+                        type="button"
+                        className={
+                          "button small " + (salesPeriod === period ? "" : "outline")
+                        }
+                        onClick={() => setSalesPeriod(period)}
+                      >
+                        {period.charAt(0).toUpperCase() + period.slice(1)}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              );
-            })}
-          </div>
-        </div>
+                <div className="admin-bar-chart">
+                  {salesSeries.map((pt, idx) => {
+                    const pct = Math.max(
+                      4,
+                      Math.round((pt.totalKobo / maxSalesPoint) * 100),
+                    );
+                    return (
+                      <div
+                        className="admin-bar-col"
+                        key={`${pt.label}-${idx}`}
+                        title={`${pt.label}: ${money(pt.totalKobo)} (Online Access: ${money(pt.digitalKobo)}, Printed: ${money(pt.printedKobo)})`}
+                      >
+                        <div className="admin-bar-track">
+                          <div
+                            className="admin-bar-fill"
+                            style={{ height: `${pt.totalKobo > 0 ? pct : 3}%` }}
+                          />
+                        </div>
+                        <span className="admin-bar-label">{pt.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
 
-        {/* Chart 2: Digital Access vs Printed Book Sales */}
-        <div className="panel stack">
-          <div>
-            <h3>Two-Product Revenue Split</h3>
-            <small className="muted">
-              Product A (2027 Digital Access) vs Product B (Printed Book)
-            </small>
-          </div>
-          <div className="stack" style={{ gap: "12px" }}>
-            <div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: "6px",
-                }}
-              >
-                <strong>2027 Digital Devotional Access (₦3,500)</strong>
-                <span>{money(digitalRev)}</span>
+              <div className="panel stack">
+                <div>
+                  <h3>Two-Product Revenue Split</h3>
+                  <small className="muted">
+                    2027 Online Access (₦3,500) vs Printed Book (₦5,000)
+                  </small>
+                </div>
+                <div className="stack" style={{ gap: "12px" }}>
+                  <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      <strong>2027 Online Access (₦3,500)</strong>
+                      <span>{money(digitalRev)}</span>
+                    </div>
+                    <div className="progress-bar-track">
+                      <div
+                        className="progress-bar-fill"
+                        style={{
+                          width: `${totalSales > 0 ? Math.round((digitalRev / totalSales) * 100) : 0}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      <strong>Printed Devotional Book (₦5,000)</strong>
+                      <span>{money(printedRev)}</span>
+                    </div>
+                    <div className="progress-bar-track">
+                      <div
+                        className="progress-bar-fill gold"
+                        style={{
+                          width: `${totalSales > 0 ? Math.round((printedRev / totalSales) * 100) : 0}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div className="progress-bar-track">
-                <div
-                  className="progress-bar-fill"
-                  style={{
-                    width: `${totalSales > 0 ? Math.round((digitalRev / totalSales) * 100) : 50}%`,
-                  }}
-                />
-              </div>
-            </div>
-            <div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: "6px",
-                }}
-              >
-                <strong>Printed Devotional Book (₦5,000)</strong>
-                <span>{money(printedRev)}</span>
-              </div>
-              <div className="progress-bar-track">
-                <div
-                  className="progress-bar-fill gold"
-                  style={{
-                    width: `${totalSales > 0 ? Math.round((printedRev / totalSales) * 100) : 0}%`,
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
+            </>
+          )}
 
-        {/* Chart 3: Printed Orders by Fulfillment Status */}
-        <div className="panel stack">
-          <div>
-            <h3>Printed Orders by Fulfillment Status</h3>
-            <small className="muted">
-              Pipeline from quotation to doorstep delivery
-            </small>
-          </div>
-          <div className="stack" style={{ gap: "8px" }}>
-            {fulfillmentSeries.map((f) => (
-              <div
-                key={f.status}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "150px 1fr 40px",
-                  alignItems: "center",
-                  gap: "10px",
-                  fontSize: "0.88rem",
-                }}
-              >
-                <span>{f.label}</span>
-                <div className="progress-bar-track">
+          {canPrinted && (
+            <div className="panel stack">
+              <div>
+                <h3>Printed Orders by Fulfillment Status</h3>
+                <small className="muted">
+                  Pipeline from quotation to doorstep delivery
+                </small>
+              </div>
+              <div className="stack" style={{ gap: "8px" }}>
+                {fulfillmentSeries.map((f) => (
                   <div
-                    className="progress-bar-fill"
+                    key={f.status}
                     style={{
-                      width: `${f.count > 0 ? Math.max(8, Math.round((f.count / maxFulfillmentCount) * 100)) : 0}%`,
+                      display: "grid",
+                      gridTemplateColumns: "150px 1fr 40px",
+                      alignItems: "center",
+                      gap: "10px",
+                      fontSize: "0.88rem",
                     }}
-                  />
-                </div>
-                <strong style={{ textAlign: "right" }}>{f.count}</strong>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Chart 4: New Reader Registrations */}
-        <div className="panel stack">
-          <div>
-            <h3>New Reader Registrations (Last 6 Months)</h3>
-            <small className="muted">
-              Teenagers, young adults &amp; mentors joining the platform
-            </small>
-          </div>
-          <div className="admin-bar-chart">
-            {regSeries.map((r) => {
-              const pct = Math.max(
-                6,
-                Math.round((r.count / maxRegPoint) * 100),
-              );
-              return (
-                <div
-                  className="admin-bar-col"
-                  key={r.month}
-                  title={`${r.label}: ${r.count} registrations`}
-                >
-                  <div className="admin-bar-track">
-                    <div
-                      className="admin-bar-fill"
-                      style={{ height: `${r.count > 0 ? pct : 4}%` }}
-                    />
+                  >
+                    <span>{f.label}</span>
+                    <div className="progress-bar-track">
+                      <div
+                        className="progress-bar-fill"
+                        style={{
+                          width: `${f.count > 0 ? Math.max(8, Math.round((f.count / maxFulfillmentCount) * 100)) : 0}%`,
+                        }}
+                      />
+                    </div>
+                    <strong style={{ textAlign: "right" }}>{f.count}</strong>
                   </div>
-                  <span className="admin-bar-label">
-                    {r.label} ({r.count})
-                  </span>
-                </div>
-              );
-            })}
+                ))}
+              </div>
+            </div>
+          )}
+
+          {canReaders && (
+            <div className="panel stack">
+              <div>
+                <h3>New Reader Registrations (Last 6 Months)</h3>
+                <small className="muted">
+                  Teenagers, young adults &amp; mentors joining the platform
+                </small>
+              </div>
+              <div className="admin-bar-chart">
+                {regSeries.map((r) => {
+                  const pct = Math.max(
+                    6,
+                    Math.round((r.count / maxRegPoint) * 100),
+                  );
+                  return (
+                    <div
+                      className="admin-bar-col"
+                      key={r.month}
+                      title={`${r.label}: ${r.count} registrations`}
+                    >
+                      <div className="admin-bar-track">
+                        <div
+                          className="admin-bar-fill"
+                          style={{ height: `${r.count > 0 ? pct : 4}%` }}
+                        />
+                      </div>
+                      <span className="admin-bar-label">
+                        {r.label} ({r.count})
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Reading Engagement (only for editorial-permitted roles) */}
+      {canDevotionals && (
+        <div className="panel stack">
+          <h3>Reading Engagement (Published Entries)</h3>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Reading</th>
+                  <th>Completed by</th>
+                  <th>Saved by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.engagement.slice(0, 12).map((e) => (
+                  <tr key={e.id}>
+                    <td>{e.date}</td>
+                    <td>{e.title}</td>
+                    <td>{e.completions}</td>
+                    <td>{e.bookmarks}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Reading Engagement */}
-      <div className="panel stack">
-        <h3>Reading Engagement (Published Entries)</h3>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Reading</th>
-                <th>Completed by</th>
-                <th>Saved by</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.engagement.slice(0, 12).map((e) => (
-                <tr key={e.id}>
-                  <td>{e.date}</td>
-                  <td>{e.title}</td>
-                  <td>{e.completions}</td>
-                  <td>{e.bookmarks}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {/* Recent Administrative Activity (only for audit.read) */}
+      {canAudit && (
+        <div className="panel stack">
+          <h3>Recent Administrative Activity</h3>
+          {data.audit.length ? (
+            data.audit.slice(0, 15).map((a) => (
+              <p className="audit-line" key={a.id}>
+                {new Date(a.createdAt).toLocaleString("en-GB")}
+                {a.adminName ? ` · ${a.adminName}` : ""} — {a.action}
+              </p>
+            ))
+          ) : (
+            <p className="muted">No administrative actions logged yet.</p>
+          )}
         </div>
-      </div>
-
-      {/* Recent Administrative Activity */}
-      <div className="panel stack">
-        <h3>Recent Administrative Activity</h3>
-        {data.audit.length ? (
-          data.audit.slice(0, 15).map((a) => (
-            <p className="audit-line" key={a.id}>
-              {new Date(a.createdAt).toLocaleString("en-GB")}
-              {a.adminName ? ` · ${a.adminName}` : ""} — {a.action}
-            </p>
-          ))
-        ) : (
-          <p className="muted">No administrative actions logged yet.</p>
-        )}
-      </div>
+      )}
     </div>
   );
 }
-

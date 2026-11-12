@@ -1,22 +1,36 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Printer, Search, Truck, X } from "lucide-react";
-import { Empty } from "../components/Common";
+import { useAdminAuth } from "../context/AdminAuthContext";
+import { Empty, ErrorBox, PaginationBar } from "../components/Common";
 import { money } from "../api";
 import type { PrintedOrderRecord } from "../types";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 
+const ORDERS_PAGE_SIZE = 15;
+
 export function PrintedOrdersPage({
   data,
   busy,
+  formError = "",
+  setFormError,
   save,
 }: {
   data: AdminOverviewData;
   busy: boolean;
+  formError?: string;
+  setFormError?: (msg: string) => void;
   save: AdminSaveFn;
 }) {
+  const { hasPermission } = useAdminAuth();
+  const canWriteOrders = hasPermission("printed_orders.write");
+  const canWritePayments = hasPermission("payments.write");
+  const canWriteSettings = hasPermission("settings.write");
+  const canWriteInquiries = hasPermission("notifications.write");
+
   const [search, setSearch] = useState("");
   const [fulfillmentFilter, setFulfillmentFilter] = useState("all");
   const [paymentFilter, setPaymentFilter] = useState("all");
+  const [ordersPage, setOrdersPage] = useState(1);
   const [editingOrder, setEditingOrder] = useState<PrintedOrderRecord | null>(
     null,
   );
@@ -49,6 +63,19 @@ export function PrintedOrdersPage({
     return true;
   });
 
+  useEffect(() => {
+    setOrdersPage(1);
+  }, [search, fulfillmentFilter, paymentFilter]);
+
+  const totalOrderPages = Math.max(
+    1,
+    Math.ceil(filteredOrders.length / ORDERS_PAGE_SIZE),
+  );
+  const pagedOrders = filteredOrders.slice(
+    (ordersPage - 1) * ORDERS_PAGE_SIZE,
+    ordersPage * ORDERS_PAGE_SIZE,
+  );
+
   const filteredInquiries = data.inquiries.filter(
     (i) => inquiryFilter === "all" || i.status === inquiryFilter,
   );
@@ -60,6 +87,7 @@ export function PrintedOrdersPage({
         className="panel stack"
         onSubmit={(e) => {
           e.preventDefault();
+          if (!canWriteSettings) return;
           const f = new FormData(e.currentTarget);
           const defaultFeeRaw = String(
             f.get("defaultDeliveryFeeNgn") || "",
@@ -81,6 +109,7 @@ export function PrintedOrdersPage({
               hardcoverNote: f.get("note"),
             },
             "PUT",
+            "Updated Printed Book & delivery settings.",
           );
         }}
       >
@@ -176,9 +205,11 @@ export function PrintedOrdersPage({
             required
           />
         </label>
-        <button className="button outline small" disabled={busy}>
-          Save Printed Book &amp; Delivery Settings
-        </button>
+        {canWriteSettings && (
+          <button className="button outline small" disabled={busy}>
+            Save Printed Book &amp; Delivery Settings
+          </button>
+        )}
       </form>
 
       {/* Printable Packing Slip Modal */}
@@ -303,17 +334,20 @@ export function PrintedOrdersPage({
           className="panel stack"
           onSubmit={async (e) => {
             e.preventDefault();
+            if (!canWriteOrders) return;
             const f = new FormData(e.currentTarget);
             const feeRaw = String(f.get("deliveryFeeNgn") || "").trim();
             const finalRaw = String(f.get("finalTotalNgn") || "").trim();
-            await save(
+            const ok = await save(
               `/admin/printed-orders/${editingOrder.id}`,
               {
                 deliveryFeeKobo:
                   feeRaw === "" ? null : Math.round(Number(feeRaw) * 100),
                 finalTotalKobo:
                   finalRaw === "" ? null : Math.round(Number(finalRaw) * 100),
-                paymentStatus: f.get("paymentStatus"),
+                paymentStatus: canWritePayments
+                  ? f.get("paymentStatus")
+                  : undefined,
                 fulfillmentStatus: f.get("fulfillmentStatus"),
                 dispatchExceptionNote:
                   String(f.get("dispatchExceptionNote") || "").trim() ||
@@ -325,8 +359,11 @@ export function PrintedOrdersPage({
                 adminNotes: String(f.get("adminNotes") || "").trim(),
               },
               "PATCH",
+              `Updated order ${editingOrder.orderNumber}.`,
             );
-            setEditingOrder(null);
+            if (ok) {
+              setEditingOrder(null);
+            }
           }}
         >
           <div className="section-title" style={{ margin: 0 }}>
@@ -345,11 +382,16 @@ export function PrintedOrdersPage({
               type="button"
               className="icon-button"
               aria-label="Close printed order editor"
-              onClick={() => setEditingOrder(null)}
+              disabled={busy}
+              onClick={() => {
+                setFormError?.("");
+                setEditingOrder(null);
+              }}
             >
               <X />
             </button>
           </div>
+          <ErrorBox message={formError} />
 
           <div className="panel" style={{ background: "var(--cream)" }}>
             <strong>Delivery Address:</strong> {editingOrder.streetAddress},{" "}
@@ -406,10 +448,11 @@ export function PrintedOrdersPage({
 
           <div className="form-row-2">
             <label>
-              Payment status
+              Payment status {canWritePayments ? "" : "(Finance / Owner only)"}
               <select
                 name="paymentStatus"
                 defaultValue={editingOrder.paymentStatus}
+                disabled={!canWritePayments}
               >
                 <option value="pending">Pending</option>
                 <option value="awaiting_verification">
@@ -480,9 +523,11 @@ export function PrintedOrdersPage({
           </label>
 
           <div className="actions">
-            <button className="button small" disabled={busy}>
-              <Truck size={15} /> Save Order &amp; Fulfillment Update
-            </button>
+            {canWriteOrders && (
+              <button className="button small" disabled={busy}>
+                <Truck size={15} /> Save Order &amp; Fulfillment Update
+              </button>
+            )}
             <button
               type="button"
               className="button outline small"
@@ -493,9 +538,13 @@ export function PrintedOrdersPage({
             <button
               type="button"
               className="button outline small"
-              onClick={() => setEditingOrder(null)}
+              disabled={busy}
+              onClick={() => {
+                setFormError?.("");
+                setEditingOrder(null);
+              }}
             >
-              Cancel
+              {canWriteOrders ? "Cancel" : "Close"}
             </button>
           </div>
         </form>
@@ -547,14 +596,14 @@ export function PrintedOrdersPage({
       </div>
 
       {/* Printed Orders Table */}
-      {filteredOrders.length ? (
+      {pagedOrders.length ? (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Order #</th>
-                <th>Customer &amp; Contact</th>
-                <th>Delivery Location</th>
+                <th>Customer</th>
+                <th>Destination (City / State)</th>
                 <th>Qty</th>
                 <th>Subtotal</th>
                 <th>Delivery Fee</th>
@@ -565,7 +614,7 @@ export function PrintedOrdersPage({
               </tr>
             </thead>
             <tbody>
-              {filteredOrders.map((po) => (
+              {pagedOrders.map((po) => (
                 <tr key={po.id}>
                   <td>
                     <strong>{po.orderNumber}</strong>
@@ -577,14 +626,14 @@ export function PrintedOrdersPage({
                   <td>
                     <strong>{po.fullName}</strong>
                     <br />
-                    <small className="muted">
-                      {po.email} · {po.phone}
-                    </small>
+                    <small className="muted">{po.email}</small>
                   </td>
                   <td>
                     {po.city}, {po.state}
                     <br />
-                    <small className="muted">{po.streetAddress}</small>
+                    <small className="muted">
+                      Street &amp; phone in Manage / Slip
+                    </small>
                   </td>
                   <td>{po.quantity}</td>
                   <td>{money(po.subtotalKobo)}</td>
@@ -625,9 +674,12 @@ export function PrintedOrdersPage({
                       <button
                         type="button"
                         className="button small"
-                        onClick={() => setEditingOrder(po)}
+                        onClick={() => {
+                          setFormError?.("");
+                          setEditingOrder(po);
+                        }}
                       >
-                        Manage
+                        {canWriteOrders ? "Manage" : "View"}
                       </button>
                       <button
                         type="button"
@@ -649,6 +701,14 @@ export function PrintedOrdersPage({
           quotation, payment confirmation, and dispatch.
         </Empty>
       )}
+
+      <PaginationBar
+        page={ordersPage}
+        totalPages={totalOrderPages}
+        total={filteredOrders.length}
+        label="printed orders"
+        onPage={setOrdersPage}
+      />
 
       {/* Bookstore & General Contact Inquiries */}
       <div className="section-title" style={{ marginTop: "12px" }}>
@@ -693,31 +753,33 @@ export function PrintedOrdersPage({
             <p className="preserve-lines">
               {i.message || "Interested in the printed edition."}
             </p>
-            <div className="actions">
-              {(
-                [
-                  "new",
-                  "reviewed",
-                  "contacted",
-                  "fulfilled",
-                  "archived",
-                ] as const
-              ).map((st) => (
-                <button
-                  key={st}
-                  type="button"
-                  className={
-                    "button small " + (i.status === st ? "" : "outline")
-                  }
-                  disabled={busy || i.status === st}
-                  onClick={() =>
-                    save("/admin/inquiries/" + i.id, { status: st })
-                  }
-                >
-                  Mark {st}
-                </button>
-              ))}
-            </div>
+            {canWriteInquiries && (
+              <div className="actions">
+                {(
+                  [
+                    "new",
+                    "reviewed",
+                    "contacted",
+                    "fulfilled",
+                    "archived",
+                  ] as const
+                ).map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    className={
+                      "button small " + (i.status === st ? "" : "outline")
+                    }
+                    disabled={busy || i.status === st}
+                    onClick={() =>
+                      save("/admin/inquiries/" + i.id, { status: st })
+                    }
+                  >
+                    Mark {st}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ))
       ) : (

@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircle2, CreditCard, Landmark, Search } from "lucide-react";
-import { Empty } from "../components/Common";
+import { useAdminAuth } from "../context/AdminAuthContext";
+import { ConfirmDialog, Empty, ErrorBox, PaginationBar } from "../components/Common";
 import { money } from "../api";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
+
+const PAGE_SIZE = 15;
 
 type LedgerRow = {
   key: string;
@@ -25,17 +28,31 @@ type LedgerRow = {
 export function PaymentsPage({
   data,
   busy,
+  formError = "",
+  setFormError,
   save,
 }: {
   data: AdminOverviewData;
   busy: boolean;
+  formError?: string;
+  setFormError?: (msg: string) => void;
   save: AdminSaveFn;
 }) {
+  const { hasPermission } = useAdminAuth();
+  const canWriteDigital = hasPermission("digital_orders.write");
+  const canWritePayments = hasPermission("payments.write");
+
   const [search, setSearch] = useState("");
   const [kindFilter, setKindFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [page, setPage] = useState(1);
+  const [rejectItem, setRejectItem] = useState<LedgerRow | null>(null);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, kindFilter, statusFilter, startDate, endDate]);
 
   const digitalRows: LedgerRow[] = data.digitalPurchases.map((dp) => ({
     key: `dig_${dp.id}`,
@@ -251,7 +268,7 @@ export function PaymentsPage({
                     <td>{money(item.amountKobo)}</td>
                     <td>
                       <div className="actions">
-                        {item.kind === "digital" && (
+                        {item.kind === "digital" && canWriteDigital && (
                           <>
                             <button
                               type="button"
@@ -266,6 +283,7 @@ export function PaymentsPage({
                                       "Verified via Payments administration",
                                   },
                                   "POST",
+                                  `Verified transfer ${item.reference} and activated access.`,
                                 )
                               }
                             >
@@ -275,22 +293,16 @@ export function PaymentsPage({
                               type="button"
                               className="button outline small"
                               disabled={busy}
-                              onClick={() =>
-                                save(
-                                  `/admin/digital-purchases/${item.entityId}/reconcile`,
-                                  {
-                                    action: "reject",
-                                    adminNotes: "Unverified transfer",
-                                  },
-                                  "POST",
-                                )
-                              }
+                              onClick={() => {
+                                setFormError?.("");
+                                setRejectItem(item);
+                              }}
                             >
                               Reject
                             </button>
                           </>
                         )}
-                        {item.kind === "printed" && (
+                        {item.kind === "printed" && canWritePayments && (
                           <button
                             type="button"
                             className="button small"
@@ -303,6 +315,7 @@ export function PaymentsPage({
                                   fulfillmentStatus: "processing",
                                 },
                                 "PATCH",
+                                `Confirmed payment for order ${item.reference}.`,
                               )
                             }
                           >
@@ -366,6 +379,7 @@ export function PaymentsPage({
       </div>
 
       {/* Unified Financial Ledger Table */}
+      <ErrorBox message={formError} />
       {filtered.length ? (
         <div className="table-wrap">
           <table>
@@ -381,7 +395,9 @@ export function PaymentsPage({
               </tr>
             </thead>
             <tbody>
-              {filtered.map((row) => (
+              {filtered
+                .slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+                .map((row) => (
                 <tr key={row.key}>
                   <td>
                     {new Date(
@@ -423,6 +439,40 @@ export function PaymentsPage({
           appear here.
         </Empty>
       )}
+
+      <PaginationBar
+        page={page}
+        totalPages={Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))}
+        total={filtered.length}
+        label="transactions"
+        onPage={setPage}
+      />
+
+      <ConfirmDialog
+        open={Boolean(rejectItem)}
+        title={`Reject bank transfer ${rejectItem?.reference || ""}?`}
+        description="This marks the online access purchase failed without activating reader access."
+        confirmLabel="Confirm Reject"
+        busy={busy}
+        error={formError}
+        onCancel={() => {
+          setFormError?.("");
+          setRejectItem(null);
+        }}
+        onConfirm={async () => {
+          if (!rejectItem) return;
+          const ok = await save(
+            `/admin/digital-purchases/${rejectItem.entityId}/reconcile`,
+            {
+              action: "reject",
+              adminNotes: "Unverified transfer",
+            },
+            "POST",
+            `Marked transfer ${rejectItem.reference} unverified.`,
+          );
+          if (ok) setRejectItem(null);
+        }}
+      />
     </div>
   );
 }

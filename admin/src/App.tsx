@@ -37,15 +37,22 @@ function AdminWorkspace({ section }: { section: AdminSectionId }) {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState("");
 
-  async function save(path: string, body: unknown, method = "PATCH") {
+  async function save(
+    path: string,
+    body: unknown,
+    method = "PATCH",
+    customToast = "Changes saved.",
+  ): Promise<boolean> {
     setBusy(true);
     setFormError("");
     try {
       await api(path, body, method);
       reload();
-      toast("Changes saved.");
+      toast(customToast);
+      return true;
     } catch (e) {
       setFormError((e as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -81,19 +88,37 @@ function AdminWorkspace({ section }: { section: AdminSectionId }) {
                 )}
                 {section === "Online Access" &&
                   (hasPermission("digital_orders.read") ? (
-                    <DigitalOrdersPage data={data} busy={busy} save={save} />
+                    <DigitalOrdersPage
+                      data={data}
+                      busy={busy}
+                      formError={formError}
+                      setFormError={setFormError}
+                      save={save}
+                    />
                   ) : (
                     <PermissionDenied />
                   ))}
                 {section === "Printed Orders" &&
                   (hasPermission("printed_orders.read") ? (
-                    <PrintedOrdersPage data={data} busy={busy} save={save} />
+                    <PrintedOrdersPage
+                      data={data}
+                      busy={busy}
+                      formError={formError}
+                      setFormError={setFormError}
+                      save={save}
+                    />
                   ) : (
                     <PermissionDenied />
                   ))}
                 {section === "Readers" &&
                   (hasPermission("readers.read") ? (
-                    <ReadersPage data={data} busy={busy} save={save} />
+                    <ReadersPage
+                      data={data}
+                      busy={busy}
+                      formError={formError}
+                      setFormError={setFormError}
+                      save={save}
+                    />
                   ) : (
                     <PermissionDenied />
                   ))}
@@ -111,13 +136,25 @@ function AdminWorkspace({ section }: { section: AdminSectionId }) {
                   ))}
                 {section === "Bulk Orders" &&
                   (hasPermission("bulk_orders.read") ? (
-                    <BulkOrdersPage data={data} busy={busy} save={save} />
+                    <BulkOrdersPage
+                      data={data}
+                      busy={busy}
+                      formError={formError}
+                      setFormError={setFormError}
+                      save={save}
+                    />
                   ) : (
                     <PermissionDenied />
                   ))}
                 {section === "Payments" &&
                   (hasPermission("payments.read") ? (
-                    <PaymentsPage data={data} busy={busy} save={save} />
+                    <PaymentsPage
+                      data={data}
+                      busy={busy}
+                      formError={formError}
+                      setFormError={setFormError}
+                      save={save}
+                    />
                   ) : (
                     <PermissionDenied />
                   ))}
@@ -127,6 +164,7 @@ function AdminWorkspace({ section }: { section: AdminSectionId }) {
                       data={data}
                       busy={busy}
                       save={save}
+                      reload={reload}
                       onNavigate={onNavigate}
                     />
                   ) : (

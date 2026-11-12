@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Landmark, Settings } from "lucide-react";
+import { useAdminAuth } from "../context/AdminAuthContext";
 import type { BankAccountSetting } from "../types";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 
@@ -12,6 +13,9 @@ export function SettingsPage({
   busy: boolean;
   save: AdminSaveFn;
 }) {
+  const { hasPermission } = useAdminAuth();
+  const canWrite = hasPermission("settings.write");
+
   const [bankAccountsDraft, setBankAccountsDraft] = useState<
     BankAccountSetting[] | null
   >(null);
@@ -24,6 +28,7 @@ export function SettingsPage({
       className="panel stack"
       onSubmit={async (e) => {
         e.preventDefault();
+        if (!canWrite) return;
         const f = new FormData(e.currentTarget);
         const defaultFeeRaw = String(
           f.get("defaultDeliveryFeeNgn") || "",
@@ -477,11 +482,17 @@ export function SettingsPage({
         Allow automatic renewal preference selection
       </label>
 
-      <div>
-        <button className="button" disabled={busy}>
-          <Settings size={16} /> Save all settings
-        </button>
-      </div>
+      {canWrite ? (
+        <div>
+          <button className="button" disabled={busy}>
+            <Settings size={16} /> Save all settings
+          </button>
+        </div>
+      ) : (
+        <p className="muted" style={{ margin: 0 }}>
+          Read-only view — only administrators with Settings Write permission can save changes.
+        </p>
+      )}
     </form>
   );
 }

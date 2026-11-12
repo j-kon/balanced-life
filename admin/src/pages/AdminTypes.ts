@@ -40,7 +40,13 @@ export type AdminUserRow = {
   digitalEntitlement?: DigitalEntitlementRecord | null;
   hasDigitalEdition?: boolean;
   onlineAccessActive?: boolean;
-  onlineAccessStatus?: "active" | "expired" | "revoked" | "none";
+  onlineAccessStatus?:
+    | "active"
+    | "scheduled"
+    | "expired"
+    | "revoked"
+    | "pending_payment"
+    | "none";
   onlineAccessStartsAt?: string | null;
   onlineAccessExpiresAt?: string | null;
   onlineAccessDaysRemaining?: number | null;
@@ -74,6 +80,7 @@ export type AdminOperationalAlert = {
     | "payment_verification"
     | "online_access"
     | "bulk_order"
+    | "devotional"
     | "inquiry";
   title: string;
   description: string;
@@ -86,8 +93,12 @@ export type AdminOverviewData = {
     readers: number;
     totalRegisteredReaders?: number;
     activeOnlineReaders?: number;
+    scheduledOnlineReaders?: number;
+    paidOnlineReaders?: number;
+    complimentaryOnlineReaders?: number;
     expiringOnlineAccessSoon?: number;
     expiredOnlineAccess?: number;
+    revokedOnlineAccess?: number;
     activeMemberships: number;
     paidMemberships: number;
     complimentaryMemberships: number;
@@ -102,7 +113,10 @@ export type AdminOverviewData = {
     published: number;
     drafts: number;
     approvedReadings: number;
+    approvedUnpublishedReadings?: number;
+    pendingReviewReadings?: number;
     needsRevisionReadings: number;
+    missingDevotionalDates?: number;
     completions: number;
     bookmarks: number;
     subscriptionRevenueKobo: number;
@@ -112,6 +126,9 @@ export type AdminOverviewData = {
     totalSalesKobo?: number;
     verifiedRevenueKobo: number;
     openInquiries: number;
+    scheduledNotificationsCount?: number;
+    pendingNotificationCampaignsCount?: number;
+    failedNotificationCampaignsCount?: number;
     bulkOrderInquiries: number;
     openBulkOrders: number;
     activeAlertsCount?: number;
@@ -202,5 +219,6 @@ export type AdminSaveFn = (
   path: string,
   body: unknown,
   method?: string,
-) => Promise<void>;
+  customToast?: string,
+) => Promise<boolean>;
 

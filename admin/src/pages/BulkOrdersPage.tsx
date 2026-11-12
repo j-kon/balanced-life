@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import { Empty } from "../components/Common";
+import { useAdminAuth } from "../context/AdminAuthContext";
+import { ConfirmDialog, Empty, ErrorBox } from "../components/Common";
 import { money } from "../api";
 import type { BulkOrderRecord } from "../types";
 import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
@@ -8,14 +9,22 @@ import type { AdminOverviewData, AdminSaveFn } from "./AdminTypes";
 export function BulkOrdersPage({
   data,
   busy,
+  formError = "",
+  setFormError,
   save,
 }: {
   data: AdminOverviewData;
   busy: boolean;
+  formError?: string;
+  setFormError?: (msg: string) => void;
   save: AdminSaveFn;
 }) {
+  const { hasPermission } = useAdminAuth();
+  const canWrite = hasPermission("bulk_orders.write");
+
   const [bulkFilter, setBulkFilter] = useState("all");
   const [editingBulk, setEditingBulk] = useState<BulkOrderRecord | null>(null);
+  const [convertTarget, setConvertTarget] = useState<BulkOrderRecord | null>(null);
 
   const filteredBulkOrders = data.bulkOrders.filter(
     (b) => bulkFilter === "all" || b.status === bulkFilter,
@@ -51,7 +60,7 @@ export function BulkOrdersPage({
         </select>
       </div>
 
-      {editingBulk && (
+      {editingBulk && canWrite && (
         <form
           className="panel stack"
           onSubmit={async (e) => {
@@ -59,7 +68,7 @@ export function BulkOrdersPage({
             const f = new FormData(e.currentTarget);
             const discountRaw = String(f.get("discountPercent") || "").trim();
             const agreedRaw = String(f.get("agreedTotalNgn") || "").trim();
-            await save(
+            const ok = await save(
               `/admin/bulk-orders/${editingBulk.id}`,
               {
                 status: f.get("status"),
@@ -77,8 +86,11 @@ export function BulkOrdersPage({
                 adminNotes: f.get("adminNotes") || "",
               },
               "PATCH",
+              `Updated bulk order quotation for ${editingBulk.organizationName}.`,
             );
-            setEditingBulk(null);
+            if (ok) {
+              setEditingBulk(null);
+            }
           }}
         >
           <div className="section-title" style={{ margin: 0 }}>
@@ -90,11 +102,16 @@ export function BulkOrdersPage({
               type="button"
               className="icon-button"
               aria-label="Close bulk order editor"
-              onClick={() => setEditingBulk(null)}
+              disabled={busy}
+              onClick={() => {
+                setFormError?.("");
+                setEditingBulk(null);
+              }}
             >
               <X />
             </button>
           </div>
+          <ErrorBox message={formError} />
           <div className="form-row-2">
             <label>
               Inquiry / Order status
@@ -260,31 +277,33 @@ export function BulkOrdersPage({
                 <strong>Contact History:</strong> {b.contactHistory}
               </p>
             )}
-            <div className="actions">
-              <button
-                type="button"
-                className="button small"
-                onClick={() => setEditingBulk(b)}
-              >
-                Prepare Quotation / Update Order
-              </button>
-              {!b.linkedPrintedOrderId && (
+            {canWrite && (
+              <div className="actions">
                 <button
                   type="button"
-                  className="button outline small"
-                  disabled={busy}
-                  onClick={() =>
-                    save(
-                      `/admin/bulk-orders/${b.id}`,
-                      { status: "converted", convertToPrintedOrder: true },
-                      "PATCH",
-                    )
-                  }
+                  className="button small"
+                  onClick={() => {
+                    setFormError?.("");
+                    setEditingBulk(b);
+                  }}
                 >
-                  Convert &amp; Link to Printed Order
+                  Prepare Quotation / Update Order
                 </button>
-              )}
-            </div>
+                {!b.linkedPrintedOrderId && (
+                  <button
+                    type="button"
+                    className="button outline small"
+                    disabled={busy}
+                    onClick={() => {
+                      setFormError?.("");
+                      setConvertTarget(b);
+                    }}
+                  >
+                    Convert &amp; Link to Printed Order
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         ))
       ) : (
@@ -293,6 +312,29 @@ export function BulkOrdersPage({
           will appear here.
         </Empty>
       )}
+
+      <ConfirmDialog
+        open={Boolean(convertTarget)}
+        title={`Convert ${convertTarget?.organizationName || ""} into a Printed Order?`}
+        description="This creates a linked Printed Book order using your quoted price without duplicating financial totals."
+        confirmLabel="Convert & Link Order"
+        busy={busy}
+        error={formError}
+        onCancel={() => {
+          setFormError?.("");
+          setConvertTarget(null);
+        }}
+        onConfirm={async () => {
+          if (!convertTarget) return;
+          const ok = await save(
+            `/admin/bulk-orders/${convertTarget.id}`,
+            { status: "converted", convertToPrintedOrder: true },
+            "PATCH",
+            `Converted ${convertTarget.organizationName} into a linked Printed Order.`,
+          );
+          if (ok) setConvertTarget(null);
+        }}
+      />
     </div>
   );
 }

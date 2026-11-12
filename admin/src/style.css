@@ -491,7 +491,8 @@ hr {
 .notice p {
   font-size: 0.85rem;
 }
-.notice strong {
+.notice > strong,
+.notice > div > strong {
   display: block;
   font-size: 0.9rem;
   margin-bottom: 4px;
@@ -3186,9 +3187,162 @@ dialog.admin-confirm-dialog::backdrop {
   overscroll-behavior: contain;
 }
 
+.pagination-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.admin-attention-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.admin-attention-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #fffdf9;
+  text-align: left;
+}
+
+.admin-attention-card.high {
+  border-color: #e4b5b7;
+  background: #fff8f8;
+}
+
+.admin-attention-card.medium {
+  border-color: #e2cfa8;
+  background: #fdf9f0;
+}
+
+.editorial-month-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.editorial-month-chip {
+  border: 1px solid var(--border);
+  background: #fffdfa;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.74rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.editorial-month-chip.active {
+  background: var(--wine);
+  border-color: var(--wine);
+  color: white;
+}
+
+.editorial-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calendar-day-btn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 6px;
+  min-height: 68px;
+  background: white;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  min-width: 0;
+}
+
+.calendar-day-btn strong {
+  font-size: 0.85rem;
+  color: var(--wine);
+}
+
+.calendar-day-btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.calendar-day-btn.published {
+  background: #eef6ee;
+  border-color: #b7d7b8;
+}
+
+.calendar-day-btn.approved-draft {
+  background: #eef3fb;
+  border-color: #b7cae8;
+}
+
+.calendar-day-btn.pending-review {
+  background: #fdf8eb;
+  border-color: #e3cd95;
+}
+
+.calendar-day-btn.needs-revision {
+  background: #fcebea;
+  border-color: #df9c9f;
+}
+
+.calendar-day-btn.missing {
+  background: #f5f3ef;
+  border-style: dashed;
+  border-color: #c8bfb2;
+  color: var(--muted);
+}
+
+.calendar-day-btn.selected {
+  outline: 2px solid var(--wine);
+  outline-offset: 1px;
+}
+
+.editorial-issue-banner {
+  background: #fff5f5;
+  border: 1px solid #e1a8ab;
+  border-left: 4px solid #a22731;
+  border-radius: 10px;
+  padding: 16px 18px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-section-checklist {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
 @media (max-width: 960px) {
-  .notif-composer-grid {
+  .notif-composer-grid,
+  .admin-plans,
+  .admin-charts-grid {
     grid-template-columns: 1fr;
+  }
+  .editorial-calendar-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
@@ -3219,6 +3373,9 @@ dialog.admin-confirm-dialog::backdrop {
   }
   .admin-layout.admin-standalone .metric-grid {
     grid-template-columns: 1fr;
+  }
+  .editorial-calendar-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .brand {
     white-space: normal;

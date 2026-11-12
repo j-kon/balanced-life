@@ -122,8 +122,8 @@ export const entrySchema = z
     "All six devotional reading sections are required before publishing.",
   )
   .refine(
-    (d) => !d.published || d.reviewStatus !== "needs_revision",
-    "Entries marked as needing revision cannot be published until approved.",
+    (d) => !d.published || d.reviewStatus === "approved",
+    "Entries must be explicitly reviewed and marked Approved before publishing.",
   );
 
 export const entryStatusPatchSchema = z.object({
@@ -467,7 +467,12 @@ export const complimentaryGrantSchema = z.object({
 });
 
 export const revokeAccessSchema = z.object({
-  reason: z.string().trim().max(500).default("Revoked by administrator"),
+  reason: z
+    .string()
+    .trim()
+    .min(2, "Provide a brief reason for revoking online access.")
+    .max(500)
+    .default("Revoked by administrator"),
 });
 
 export const userStatusUpdateSchema = z.object({

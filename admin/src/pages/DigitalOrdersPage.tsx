@@ -1,28 +1,46 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Gift, Search, X } from "lucide-react";
-import { Empty } from "../components/Common";
+import { useAdminAuth } from "../context/AdminAuthContext";
+import { ConfirmDialog, Empty, ErrorBox, PaginationBar } from "../components/Common";
 import { money } from "../api";
 import type { DigitalPurchaseRecord } from "../types";
 import type { AdminOverviewData, AdminSaveFn, AdminUserRow } from "./AdminTypes";
 
+const PAGE_SIZE = 15;
+
 export function DigitalOrdersPage({
   data,
   busy,
+  formError = "",
+  setFormError,
   save,
 }: {
   data: AdminOverviewData;
   busy: boolean;
+  formError?: string;
+  setFormError?: (msg: string) => void;
   save: AdminSaveFn;
 }) {
+  const { hasPermission } = useAdminAuth();
+  const canWriteOrders = hasPermission("digital_orders.write");
+  const canWriteSettings = hasPermission("settings.write");
+
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
   const [reconcileNotes, setReconcileNotes] = useState<Record<number, string>>(
     {},
   );
   const [selectedRecord, setSelectedRecord] =
     useState<DigitalPurchaseRecord | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    record: DigitalPurchaseRecord;
+    action: "reject" | "refund" | "revoke";
+  } | null>(null);
   const [grantUser, setGrantUser] = useState<AdminUserRow | null>(null);
-  const [grantMonths, setGrantMonths] = useState(12);
+  const [grantMonths, setGrantMonths] = useState(
+    data.settings?.digitalAccessDurationMonths || 12,
+  );
   const [grantReason, setGrantReason] = useState("");
 
   const records = data.onlineAccessRecords || data.digitalPurchases;
@@ -64,6 +82,13 @@ export function DigitalOrdersPage({
     return true;
   });
 
+  useEffect(() => {
+    setPage(1);
+  }, [search, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pagedRecords = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
   return (
     <div className="stack">
       {/* Product A Configuration Panel */}
@@ -71,6 +96,7 @@ export function DigitalOrdersPage({
         className="panel stack"
         onSubmit={(e) => {
           e.preventDefault();
+          if (!canWriteSettings) return;
           const f = new FormData(e.currentTarget);
           save(
             "/admin/settings",
@@ -86,6 +112,7 @@ export function DigitalOrdersPage({
               digitalEditionNote: f.get("digitalNote"),
             },
             "PUT",
+            "Updated 2027 Online Access settings.",
           );
         }}
       >
@@ -159,42 +186,53 @@ export function DigitalOrdersPage({
           />
         </label>
         <div className="actions">
-          <button className="button outline small" disabled={busy}>
-            Save Online Access Settings
-          </button>
-          <button
-            type="button"
-            className="button small"
-            onClick={() => {
-              const firstReader =
-                data.users.find((u) => u.role !== "admin") || data.users[0];
-              if (firstReader) {
-                setGrantUser(firstReader);
-                setGrantMonths(12);
-                setGrantReason("");
-              }
-            }}
-          >
-            <Gift size={15} /> Grant Complimentary Online Access
-          </button>
+          {canWriteSettings && (
+            <button className="button outline small" disabled={busy}>
+              Save Online Access Settings
+            </button>
+          )}
+          {canWriteOrders && (
+            <button
+              type="button"
+              className="button small"
+              onClick={() => {
+                setFormError?.("");
+                const firstReader =
+                  data.users.find((u) => u.role !== "admin") || data.users[0];
+                if (firstReader) {
+                  setGrantUser(firstReader);
+                  setGrantMonths(
+                    data.settings?.digitalAccessDurationMonths || 12,
+                  );
+                  setGrantReason("");
+                }
+              }}
+            >
+              <Gift size={15} /> Grant Complimentary Online Access
+            </button>
+          )}
         </div>
       </form>
 
       {/* Complimentary Online Access Modal / Panel */}
-      {grantUser && (
+      {grantUser && canWriteOrders && (
         <form
           className="panel stack"
           onSubmit={async (e) => {
             e.preventDefault();
-            await save(
+            const ok = await save(
               `/admin/users/${grantUser.id}/online-access/grant`,
               {
                 months: grantMonths,
                 reason: grantReason,
               },
               "POST",
+              `Granted ${grantMonths}-month complimentary 2027 Online Access to ${grantUser.name}.`,
             );
-            setGrantUser(null);
+            if (ok) {
+              setGrantUser(null);
+              setGrantReason("");
+            }
           }}
         >
           <div className="section-title" style={{ margin: 0 }}>
@@ -203,11 +241,16 @@ export function DigitalOrdersPage({
               type="button"
               className="icon-button"
               aria-label="Close complimentary grant form"
-              onClick={() => setGrantUser(null)}
+              disabled={busy}
+              onClick={() => {
+                setFormError?.("");
+                setGrantUser(null);
+              }}
             >
               <X />
             </button>
           </div>
+          <ErrorBox message={formError} />
           <div className="form-row-2">
             <label>
               Select reader account
@@ -297,7 +340,7 @@ export function DigitalOrdersPage({
       </div>
 
       {/* Online Access Table */}
-      {filtered.length ? (
+      {pagedRecords.length ? (
         <div className="table-wrap">
           <table>
             <thead>
@@ -315,7 +358,7 @@ export function DigitalOrdersPage({
               </tr>
             </thead>
             <tbody>
-              {filtered.map((dp) => (
+              {pagedRecords.map((dp) => (
                 <tr key={dp.id}>
                   <td>
                     <strong>{dp.userName}</strong>
@@ -388,11 +431,14 @@ export function DigitalOrdersPage({
                       <button
                         type="button"
                         className="button outline small"
-                        onClick={() => setSelectedRecord(dp)}
+                        onClick={() => {
+                          setFormError?.("");
+                          setSelectedRecord(dp);
+                        }}
                       >
                         Manage
                       </button>
-                      {dp.id > 0 && dp.status !== "succeeded" && (
+                      {canWriteOrders && dp.id > 0 && dp.status !== "succeeded" && (
                         <button
                           type="button"
                           className="button small"
@@ -406,6 +452,7 @@ export function DigitalOrdersPage({
                                   reconcileNotes[dp.id] ?? dp.adminNotes,
                               },
                               "POST",
+                              `Activated 12-month 2027 Online Access for ${dp.userName}.`,
                             )
                           }
                         >
@@ -426,6 +473,14 @@ export function DigitalOrdersPage({
         </Empty>
       )}
 
+      <PaginationBar
+        page={page}
+        totalPages={totalPages}
+        total={filtered.length}
+        label="online access records"
+        onPage={setPage}
+      />
+
       {/* Detailed Reconciliation & History Drawer/Panel */}
       {selectedRecord && (
         <div className="panel stack">
@@ -443,11 +498,16 @@ export function DigitalOrdersPage({
             <button
               type="button"
               className="icon-button"
-              onClick={() => setSelectedRecord(null)}
+              onClick={() => {
+                setFormError?.("");
+                setSelectedRecord(null);
+              }}
             >
               <X />
             </button>
           </div>
+
+          <ErrorBox message={formError} />
 
           <div className="form-row-2">
             <div>
@@ -486,109 +546,154 @@ export function DigitalOrdersPage({
                   [selectedRecord.id]: e.target.value,
                 })
               }
+              disabled={!canWriteOrders}
               placeholder="Record bank statement verification, renewal note, or revocation reason…"
             />
           </label>
 
-          <div className="actions">
-            {selectedRecord.id > 0 && selectedRecord.status !== "succeeded" && (
-              <button
-                type="button"
-                className="button small"
-                disabled={busy}
-                onClick={async () => {
-                  await save(
-                    `/admin/digital-purchases/${selectedRecord.id}/reconcile`,
-                    {
-                      action: "approve",
-                      adminNotes:
-                        reconcileNotes[selectedRecord.id] ??
-                        selectedRecord.adminNotes,
-                    },
-                    "POST",
-                  );
-                  setSelectedRecord(null);
-                }}
-              >
-                Verify &amp; Activate 12-Month Access
-              </button>
-            )}
-            {selectedRecord.id > 0 &&
-              (selectedRecord.status === "pending" ||
-                selectedRecord.status === "verifying_transfer") && (
+          {canWriteOrders && (
+            <div className="actions">
+              {selectedRecord.id > 0 && selectedRecord.status !== "succeeded" && (
                 <button
                   type="button"
-                  className="button outline small"
+                  className="button small"
                   disabled={busy}
                   onClick={async () => {
-                    await save(
+                    const ok = await save(
                       `/admin/digital-purchases/${selectedRecord.id}/reconcile`,
                       {
-                        action: "reject",
+                        action: "approve",
                         adminNotes:
                           reconcileNotes[selectedRecord.id] ??
                           selectedRecord.adminNotes,
                       },
                       "POST",
+                      `Activated 12-month Online Access for ${selectedRecord.userName}.`,
                     );
-                    setSelectedRecord(null);
+                    if (ok) setSelectedRecord(null);
                   }}
                 >
-                  Mark Unverified / Failed
+                  Verify &amp; Activate 12-Month Access
                 </button>
               )}
-            {selectedRecord.id > 0 && selectedRecord.status === "succeeded" && (
+              {selectedRecord.id > 0 &&
+                (selectedRecord.status === "pending" ||
+                  selectedRecord.status === "verifying_transfer") && (
+                  <button
+                    type="button"
+                    className="button outline small"
+                    disabled={busy}
+                    onClick={() => {
+                      setFormError?.("");
+                      setConfirmAction({
+                        record: selectedRecord,
+                        action: "reject",
+                      });
+                    }}
+                  >
+                    Mark Unverified / Failed
+                  </button>
+                )}
+              {selectedRecord.id > 0 && selectedRecord.status === "succeeded" && (
+                <button
+                  type="button"
+                  className="button outline small"
+                  disabled={busy}
+                  onClick={() => {
+                    setFormError?.("");
+                    setConfirmAction({
+                      record: selectedRecord,
+                      action: "refund",
+                    });
+                  }}
+                >
+                  Mark Refunded &amp; Revoke
+                </button>
+              )}
               <button
                 type="button"
                 className="button outline small"
                 disabled={busy}
-                onClick={async () => {
-                  await save(
-                    `/admin/digital-purchases/${selectedRecord.id}/reconcile`,
-                    {
-                      action: "refund",
-                      adminNotes:
-                        reconcileNotes[selectedRecord.id] ??
-                        selectedRecord.adminNotes,
-                    },
-                    "POST",
-                  );
-                  setSelectedRecord(null);
+                onClick={() => {
+                  setFormError?.("");
+                  setConfirmAction({
+                    record: selectedRecord,
+                    action: "revoke",
+                  });
                 }}
               >
-                Mark Refunded &amp; Revoke
+                Revoke Online Access
               </button>
-            )}
-            <button
-              type="button"
-              className="button outline small"
-              disabled={busy}
-              onClick={async () => {
-                const reason =
-                  reconcileNotes[selectedRecord.id] ||
-                  selectedRecord.adminNotes ||
-                  "Revoked by administrator";
-                if (selectedRecord.id > 0) {
-                  await save(
-                    `/admin/digital-purchases/${selectedRecord.id}/reconcile`,
-                    { action: "revoke", adminNotes: reason },
-                    "POST",
-                  );
-                } else {
-                  await save(
-                    `/admin/users/${selectedRecord.userId}/online-access/revoke`,
-                    { reason },
-                    "POST",
-                  );
-                }
-                setSelectedRecord(null);
-              }}
-            >
-              Revoke Online Access
-            </button>
-          </div>
+            </div>
+          )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(confirmAction)}
+        title={
+          confirmAction?.action === "refund"
+            ? `Refund & revoke access for ${confirmAction.record.userName}?`
+            : confirmAction?.action === "reject"
+              ? `Mark ${confirmAction.record.reference} as failed?`
+              : `Revoke 2027 Online Access for ${confirmAction?.record.userName || ""}?`
+        }
+        description={
+          confirmAction?.action === "refund"
+            ? "This marks the digital purchase refunded and revokes their active online access entitlement."
+            : confirmAction?.action === "reject"
+              ? "The pending transfer/order will be marked failed without granting online access."
+              : "This immediately revokes their 2027 Online Access entitlement and logs the action."
+        }
+        confirmLabel={
+          confirmAction?.action === "refund"
+            ? "Confirm Refund & Revoke"
+            : confirmAction?.action === "reject"
+              ? "Confirm Mark Failed"
+              : "Confirm Revocation"
+        }
+        busy={busy}
+        error={formError}
+        onCancel={() => {
+          setFormError?.("");
+          setConfirmAction(null);
+        }}
+        onConfirm={async () => {
+          if (!confirmAction) return;
+          const rec = confirmAction.record;
+          const reason =
+            (reconcileNotes[rec.id] ?? rec.adminNotes ?? "").trim() ||
+            (confirmAction.action === "refund"
+              ? "Refunded by administrator"
+              : confirmAction.action === "reject"
+                ? "Payment verification failed"
+                : "Revoked by administrator");
+          let ok: boolean;
+          if (confirmAction.action === "revoke" && rec.id <= 0) {
+            ok = await save(
+              `/admin/users/${rec.userId}/online-access/revoke`,
+              { reason },
+              "POST",
+              `Revoked online access for ${rec.userName}.`,
+            );
+          } else {
+            ok = await save(
+              `/admin/digital-purchases/${rec.id}/reconcile`,
+              { action: confirmAction.action, adminNotes: reason },
+              "POST",
+              confirmAction.action === "refund"
+                ? `Refunded and revoked ${rec.reference}.`
+                : confirmAction.action === "reject"
+                  ? `Marked ${rec.reference} failed.`
+                  : `Revoked access for ${rec.userName}.`,
+            );
+          }
+          if (ok) {
+            setConfirmAction(null);
+            setSelectedRecord(null);
+          }
+        }}
+      />
     </div>
   );
 }

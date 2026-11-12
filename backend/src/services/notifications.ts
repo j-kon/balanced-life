@@ -1348,6 +1348,12 @@ export function validateAdminNotificationPayload(input: {
     if (Number.isNaN(parsed.getTime())) {
       throw new HttpError(400, "Scheduled delivery time must be a valid ISO date.");
     }
+    if (parsed.getTime() < Date.now() - 60_000) {
+      throw new HttpError(
+        400,
+        "Scheduled delivery time must be in the future.",
+      );
+    }
     scheduledForIso = parsed.toISOString();
   }
 

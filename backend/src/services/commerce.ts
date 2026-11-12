@@ -116,25 +116,12 @@ export type DigitalEntitlementRecord = {
   updatedAt: string;
 };
 
-export function getUserDigitalEntitlement(
+function formatDigitalEntitlementRow(
   store: Store,
-  userId: number,
-  editionYear = 2027,
+  row: typeof s.digitalEntitlements.$inferSelect,
+  reminderDays: number,
   referenceNowIso?: string,
-): DigitalEntitlementRecord | null {
-  const row = store.db
-    .select()
-    .from(s.digitalEntitlements)
-    .where(
-      and(
-        eq(s.digitalEntitlements.userId, userId),
-        eq(s.digitalEntitlements.editionYear, editionYear),
-      ),
-    )
-    .get();
-  if (!row) return null;
-
-  const settings = getAppSettings(store);
+): DigitalEntitlementRecord {
   const nowIso = referenceNowIso || new Date().toISOString();
   const nowMs = new Date(nowIso).getTime();
   const expiresMs = new Date(row.expiresAt).getTime();
@@ -166,7 +153,7 @@ export function getUserDigitalEntitlement(
     active &&
     !row.legacyPersistent &&
     daysRemaining > 0 &&
-    daysRemaining <= (settings.renewalReminderDays || 7);
+    daysRemaining <= reminderDays;
 
   const status: DigitalEntitlementRecord["status"] = isRevoked
     ? "revoked"
@@ -218,6 +205,56 @@ export function getUserDigitalEntitlement(
     revokeReason: row.revokeReason,
     updatedAt: row.updatedAt,
   };
+}
+
+export function getDigitalEntitlementsMap(
+  store: Store,
+  editionYear = 2027,
+  referenceNowIso?: string,
+): Map<number, DigitalEntitlementRecord> {
+  const settings = getAppSettings(store);
+  const reminderDays = settings.renewalReminderDays || 7;
+  const rows = store.db
+    .select()
+    .from(s.digitalEntitlements)
+    .where(eq(s.digitalEntitlements.editionYear, editionYear))
+    .all();
+
+  const map = new Map<number, DigitalEntitlementRecord>();
+  for (const row of rows) {
+    map.set(
+      row.userId,
+      formatDigitalEntitlementRow(store, row, reminderDays, referenceNowIso),
+    );
+  }
+  return map;
+}
+
+export function getUserDigitalEntitlement(
+  store: Store,
+  userId: number,
+  editionYear = 2027,
+  referenceNowIso?: string,
+): DigitalEntitlementRecord | null {
+  const row = store.db
+    .select()
+    .from(s.digitalEntitlements)
+    .where(
+      and(
+        eq(s.digitalEntitlements.userId, userId),
+        eq(s.digitalEntitlements.editionYear, editionYear),
+      ),
+    )
+    .get();
+  if (!row) return null;
+
+  const settings = getAppSettings(store);
+  return formatDigitalEntitlementRow(
+    store,
+    row,
+    settings.renewalReminderDays || 7,
+    referenceNowIso,
+  );
 }
 
 export function hasActiveDigitalEntitlement(
@@ -805,8 +842,17 @@ export function grantComplimentaryOnlineAccessAdmin(
       throw new HttpError(404, "Reader account not found.");
     }
 
+    const reasonTrimmed = String(input.reason || "").trim();
+    if (reasonTrimmed.length < 2) {
+      throw new HttpError(400, "Provide a brief reason for complimentary access.");
+    }
+
+    const settings = getAppSettings(store);
     const now = new Date().toISOString();
-    const durationMonths = Math.max(1, Math.min(36, input.months || 12));
+    const durationMonths = Math.max(
+      1,
+      Math.min(36, input.months || settings.digitalAccessDurationMonths || 12),
+    );
     const current = db
       .select()
       .from(s.digitalEntitlements)
@@ -816,6 +862,11 @@ export function grantComplimentaryOnlineAccessAdmin(
           eq(s.digitalEntitlements.editionYear, 2027),
         ),
       )
+      .get();
+    const currentSub = db
+      .select()
+      .from(s.subscriptions)
+      .where(eq(s.subscriptions.userId, targetUserId))
       .get();
 
     let requestedStart = now;
@@ -827,13 +878,25 @@ export function grantComplimentaryOnlineAccessAdmin(
       requestedStart = parsedStart.toISOString();
     }
 
-    const hasValidExisting =
+    const validEntExpiry =
       current &&
       current.status !== "revoked" &&
       current.status !== "refunded" &&
-      current.expiresAt > requestedStart;
-
-    const base = hasValidExisting ? current.expiresAt : requestedStart;
+      current.expiresAt > requestedStart
+        ? current.expiresAt
+        : null;
+    const validSubExpiry =
+      currentSub &&
+      currentSub.status !== "revoked" &&
+      currentSub.expiresAt > requestedStart
+        ? currentSub.expiresAt
+        : null;
+    const base =
+      validEntExpiry && validSubExpiry
+        ? validEntExpiry > validSubExpiry
+          ? validEntExpiry
+          : validSubExpiry
+        : validEntExpiry || validSubExpiry || requestedStart;
 
     let computedExpiresAt = addCalendarMonths(base, durationMonths);
     if (input.expiresAt) {
@@ -847,10 +910,21 @@ export function grantComplimentaryOnlineAccessAdmin(
       throw new HttpError(400, "Expiry date must be after start date.");
     }
 
-    const effectiveStartsAt =
-      !input.startsAt && hasValidExisting && current
+    const existingStart =
+      validEntExpiry && current
         ? current.startsAt
-        : requestedStart;
+        : validSubExpiry && currentSub
+          ? currentSub.startedAt
+          : null;
+    const effectiveStartsAt =
+      !input.startsAt && existingStart ? existingStart : requestedStart;
+
+    const preserveLegacyPersistent = Boolean(
+      current?.legacyPersistent &&
+        current.status !== "revoked" &&
+        current.status !== "refunded" &&
+        !input.expiresAt,
+    );
 
     const values = {
       userId: targetUserId,
@@ -863,10 +937,12 @@ export function grantComplimentaryOnlineAccessAdmin(
       expiresAt: computedExpiresAt,
       durationMonths,
       renewalCount: current ? current.renewalCount : 0,
-      legacyPersistent: false,
-      legacyReviewRequired: false,
+      legacyPersistent: preserveLegacyPersistent,
+      legacyReviewRequired: Boolean(
+        preserveLegacyPersistent && current?.legacyReviewRequired,
+      ),
       grantedByAdminId: actor.id,
-      grantReason: input.reason.trim(),
+      grantReason: reasonTrimmed,
       grantedAt: now,
       revokedAt: null,
       revokeReason: "",
@@ -887,7 +963,7 @@ export function grantComplimentaryOnlineAccessAdmin(
     logAdminAudit(
       store,
       actor,
-      `Granted complimentary 2027 online access to ${targetUser.email} until ${new Date(computedExpiresAt).toLocaleDateString("en-GB")} (${input.reason.trim()})`,
+      `Granted complimentary ${durationMonths}-month 2027 online access to ${targetUser.email} until ${new Date(computedExpiresAt).toLocaleDateString("en-GB")} (${reasonTrimmed})`,
       "online_access",
       targetUserId,
       now,
@@ -897,7 +973,7 @@ export function grantComplimentaryOnlineAccessAdmin(
       userId: targetUserId,
       category: "digital_purchase",
       title: "Complimentary 2027 Online Access Granted",
-      body: `You have been granted complimentary 2027 online access through ${new Date(computedExpiresAt).toLocaleDateString("en-GB")} (${input.reason.trim()}).`,
+      body: `You have been granted complimentary 2027 online access through ${new Date(computedExpiresAt).toLocaleDateString("en-GB")} (${reasonTrimmed}).`,
       actionUrl: "/subscription",
       dedupeKey: `comp_online_access_${targetUserId}_${now.slice(0, 16)}`,
     });
@@ -923,6 +999,11 @@ export function revokeOnlineAccessAdmin(
       throw new HttpError(404, "Reader account not found.");
     }
 
+    const reasonTrimmed = String(reason || "").trim();
+    if (reasonTrimmed.length < 2) {
+      throw new HttpError(400, "Provide a brief reason for revoking online access.");
+    }
+
     const currentEnt = db
       .select()
       .from(s.digitalEntitlements)
@@ -943,31 +1024,44 @@ export function revokeOnlineAccessAdmin(
     if (!currentEnt && !currentSub) {
       throw new HttpError(
         404,
-        "This reader does not have an online access or membership record.",
+        "This reader does not have an online access record to revoke.",
+      );
+    }
+
+    const entAlreadyRevoked =
+      !currentEnt ||
+      currentEnt.status === "revoked" ||
+      currentEnt.status === "refunded";
+    const subAlreadyRevoked = !currentSub || currentSub.status === "revoked";
+    if (entAlreadyRevoked && subAlreadyRevoked) {
+      throw new HttpError(
+        400,
+        "This reader's online access has already been revoked.",
       );
     }
 
     const now = new Date().toISOString();
-    if (currentEnt) {
+    if (currentEnt && currentEnt.status !== "revoked" && currentEnt.status !== "refunded") {
       db.update(s.digitalEntitlements)
         .set({
           status: "revoked",
           legacyPersistent: false,
+          legacyReviewRequired: false,
           revokedAt: now,
-          revokeReason: reason.trim(),
+          revokeReason: reasonTrimmed,
           updatedAt: now,
         })
         .where(eq(s.digitalEntitlements.id, currentEnt.id))
         .run();
     }
 
-    if (currentSub) {
+    if (currentSub && currentSub.status !== "revoked") {
       db.update(s.subscriptions)
         .set({
           status: "revoked",
           expiresAt: now,
           cancelAtPeriodEnd: true,
-          grantReason: reason.trim() || currentSub.grantReason,
+          grantReason: reasonTrimmed || currentSub.grantReason,
           updatedAt: now,
         })
         .where(eq(s.subscriptions.id, currentSub.id))
@@ -977,7 +1071,7 @@ export function revokeOnlineAccessAdmin(
     logAdminAudit(
       store,
       actor,
-      `Revoked online access for ${targetUser.email} (${reason.trim()})`,
+      `Revoked online access for ${targetUser.email} (${reasonTrimmed})`,
       "online_access",
       targetUserId,
       now,
@@ -987,7 +1081,7 @@ export function revokeOnlineAccessAdmin(
       userId: targetUserId,
       category: "account",
       title: "Online Access Revoked",
-      body: `Your 2027 online reading access was revoked by an administrator (${reason.trim()}).`,
+      body: `Your 2027 online reading access was revoked by an administrator (${reasonTrimmed}).`,
       actionUrl: "/subscription",
       dedupeKey: `online_access_revoked_${targetUserId}_${now.slice(0, 16)}`,
     });

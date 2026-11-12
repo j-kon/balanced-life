@@ -25,10 +25,9 @@ import type {
 } from "../src/services/email.js";
 import {
   runNotificationWorkerCycle,
-  type PushMessagePayload,
+  type PushSubscriptionTarget,
+  type SafePushPayload,
   type WebPushProvider,
-  type WebPushSendResult,
-  type WebPushSubscriptionTarget,
 } from "../src/services/notifications.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,7 +57,6 @@ class MockPaystackProvider implements PaymentProvider {
         amountKobo,
         currency: "NGN",
         providerTransactionId: "ps_failed_" + reference,
-        paidAt: null,
       };
     }
     return {
@@ -101,40 +99,26 @@ class MockWebPushProvider implements WebPushProvider {
     "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U";
   public deliveries: Array<{
     endpoint: string;
-    payload: PushMessagePayload;
+    payload: SafePushPayload;
   }> = [];
   public expiredEndpoints = new Set<string>();
   public transientFailureEndpoints = new Set<string>();
 
   async sendNotification(
-    subscription: WebPushSubscriptionTarget,
-    payload: PushMessagePayload,
-  ): Promise<WebPushSendResult> {
+    subscription: PushSubscriptionTarget,
+    payload: SafePushPayload,
+  ): Promise<{ statusCode: number }> {
     if (this.expiredEndpoints.has(subscription.endpoint)) {
-      return {
-        ok: false,
-        statusCode: 410,
-        expired: true,
-        errorMessage: "Push subscription has unsubscribed or expired (410).",
-      };
+      return { statusCode: 410 };
     }
     if (this.transientFailureEndpoints.has(subscription.endpoint)) {
-      return {
-        ok: false,
-        statusCode: 503,
-        expired: false,
-        errorMessage: "Temporary push gateway error (503).",
-      };
+      return { statusCode: 503 };
     }
     this.deliveries.push({
       endpoint: subscription.endpoint,
       payload,
     });
-    return {
-      ok: true,
-      statusCode: 201,
-      expired: false,
-    };
+    return { statusCode: 201 };
   }
 }
 
@@ -153,17 +137,17 @@ let subscriberId = 0;
 let guestCookie = "";
 let guestId = 0;
 
-const send = (
+const send = async (
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   url: string,
-  payload?: unknown,
+  payload?: string | object | Buffer,
   cookie = "",
   extraHeaders: Record<string, string> = {},
 ) => {
   const cleanUrl = url.split("?")[0] || "";
   const isAdmin =
     cleanUrl === "/admin" || cleanUrl.startsWith("/admin/");
-  return app.inject({
+  return await app.inject({
     method,
     url: "/api/v1" + url,
     payload,
@@ -3690,5 +3674,263 @@ test("Migration 0009 marks pre-existing readers onboarding-completed, defaults a
   } finally {
     rmSync(migFolder, { recursive: true, force: true });
   }
+});
+
+test("Admin operational improvements: single complimentary grant, revocation, explicit devotional approval, past schedule rejection, and paginated RBAC endpoints", async () => {
+  // Register a fresh reader with no paid history
+  const regRes = await send("POST", "/auth/register", {
+    name: "Ops Regression Reader",
+    email: `ops-reader-${Date.now()}@example.org`,
+    password: "Reader-Ops-Pass-2027!",
+  });
+  assert.equal(regRes.statusCode, 200);
+  const readerCookie = String(regRes.headers["set-cookie"]).split(";")[0];
+  const readerId = regRes.json().user.id as number;
+
+  const revenueBefore = (
+    await send("GET", "/admin/overview", undefined, adminCookie)
+  ).json().metrics.verifiedRevenueKobo as number;
+
+  // Invalid complimentary grant (short reason) fails with 400 and leaves access ungranted
+  const badGrant = await send(
+    "POST",
+    `/admin/users/${readerId}/online-access/grant`,
+    { months: 12, reason: "x" },
+    adminCookie,
+  );
+  assert.equal(badGrant.statusCode, 400);
+  const meAfterBadGrant = (await send("GET", "/auth/me", undefined, readerCookie)).json();
+  assert.equal(meAfterBadGrant.access.status, "free");
+
+  // Single authoritative 12-month complimentary grant creates no paid transaction or duplicate subscription
+  const goodGrant = await send(
+    "POST",
+    `/admin/users/${readerId}/online-access/grant`,
+    { months: 12, reason: "Pastoral scholarship test grant" },
+    adminCookie,
+  );
+  assert.equal(goodGrant.statusCode, 200);
+  assert.equal(goodGrant.json().entitlement.status, "active");
+
+  const overviewAfterGrant = (
+    await send("GET", "/admin/overview", undefined, adminCookie)
+  ).json();
+  assert.equal(overviewAfterGrant.metrics.verifiedRevenueKobo, revenueBefore);
+  const grantedUserRow = overviewAfterGrant.users.find(
+    (u: { id: number }) => u.id === readerId,
+  );
+  assert.ok(grantedUserRow);
+  assert.equal(grantedUserRow.onlineAccessActive, true);
+  assert.equal(grantedUserRow.onlineAccessStatus, "active");
+  assert.equal(grantedUserRow.accessType, "complimentary");
+  assert.equal(grantedUserRow.digitalPurchasesCount, 0);
+
+  // Revoke requires valid reason, revokes entitlement, and rejects double-revocation
+  const badRevoke = await send(
+    "POST",
+    `/admin/users/${readerId}/online-access/revoke`,
+    { reason: "x" },
+    adminCookie,
+  );
+  assert.equal(badRevoke.statusCode, 400);
+
+  const revokeRes = await send(
+    "POST",
+    `/admin/users/${readerId}/online-access/revoke`,
+    { reason: "Scholarship ended cleanly" },
+    adminCookie,
+  );
+  assert.equal(revokeRes.statusCode, 200);
+  assert.equal(revokeRes.json().entitlement.status, "revoked");
+
+  const meAfterRevoke = (await send("GET", "/auth/me", undefined, readerCookie)).json();
+  assert.equal(meAfterRevoke.access.status, "revoked");
+
+  const doubleRevoke = await send(
+    "POST",
+    `/admin/users/${readerId}/online-access/revoke`,
+    { reason: "Duplicate revoke attempt" },
+    adminCookie,
+  );
+  assert.equal(doubleRevoke.statusCode, 400);
+
+  // Explicit editorial approval required before publishing any devotional
+  const createUnapprovedPublished = await send(
+    "POST",
+    "/admin/devotionals",
+    {
+      date: "2027-07-07",
+      title: "Unapproved Publish Attempt",
+      theme: "July Theme",
+      bibleText: "Psalm 23:1",
+      memoryVerse: "The Lord is my shepherd",
+      reflection: "Thoughtful devotional reflection body.",
+      thinkAbout: "Reflect deeply.",
+      prayer: "Lord guide us.",
+      challenge: "Encourage someone today.",
+      published: true,
+      reviewStatus: "pending_review",
+    },
+    adminCookie,
+  );
+  assert.equal(createUnapprovedPublished.statusCode, 400);
+
+  const createDraft = await send(
+    "POST",
+    "/admin/devotionals",
+    {
+      date: "2027-07-07",
+      title: "Editorial Draft For Verification",
+      theme: "July Theme",
+      bibleText: "Psalm 23:1",
+      memoryVerse: "The Lord is my shepherd",
+      reflection: "Thoughtful devotional reflection body.",
+      thinkAbout: "Reflect deeply.",
+      prayer: "Lord guide us.",
+      challenge: "Encourage someone today.",
+      published: false,
+      reviewStatus: "pending_review",
+    },
+    adminCookie,
+  );
+  assert.equal(createDraft.statusCode, 200);
+  const draftId = createDraft.json().id as number;
+
+  const statusPublishWithoutApproval = await send(
+    "PATCH",
+    `/admin/devotionals/${draftId}/status`,
+    { published: true },
+    adminCookie,
+  );
+  assert.equal(statusPublishWithoutApproval.statusCode, 400);
+
+  const approveOnly = await send(
+    "PATCH",
+    `/admin/devotionals/${draftId}/status`,
+    { reviewStatus: "approved" },
+    adminCookie,
+  );
+  assert.equal(approveOnly.statusCode, 200);
+  assert.equal(approveOnly.json().published, false);
+  assert.equal(approveOnly.json().reviewStatus, "approved");
+
+  const editorialSummary = (
+    await send("GET", "/admin/devotionals/summary", undefined, adminCookie)
+  ).json();
+  assert.ok(editorialSummary.approvedUnpublishedReadings >= 1);
+  assert.ok(Array.isArray(editorialSummary.missingDates));
+
+  const publishApproved = await send(
+    "PATCH",
+    `/admin/devotionals/${draftId}/status`,
+    { published: true, reviewStatus: "approved" },
+    adminCookie,
+  );
+  assert.equal(publishApproved.statusCode, 200);
+  assert.equal(publishApproved.json().published, true);
+
+  // Notification campaign rejects scheduledFor in the past
+  const pastSchedule = await send(
+    "POST",
+    "/admin/notifications/campaigns",
+    {
+      targetType: "individual",
+      targetUserId: readerId,
+      category: "announcement",
+      title: "Past Time Should Fail",
+      body: "Testing server future date validation.",
+      actionUrl: "/dashboard",
+      scheduledFor: "2020-01-01T10:00:00.000Z",
+      confirmed: true,
+      idempotencyKey: `past-${Date.now()}`,
+    },
+    adminCookie,
+  );
+  assert.equal(pastSchedule.statusCode, 400);
+
+  // Paginated operational endpoints work for owner & maintain array compat for unpaginated printed orders
+  const readersPaged = (
+    await send("GET", "/admin/readers?page=1&limit=5", undefined, adminCookie)
+  ).json();
+  assert.ok(Array.isArray(readersPaged.items));
+  assert.ok(readersPaged.total >= 1);
+
+  const onlinePaged = (
+    await send("GET", "/admin/online-access?page=1&limit=5", undefined, adminCookie)
+  ).json();
+  assert.ok(Array.isArray(onlinePaged.items));
+
+  const paymentsPaged = (
+    await send("GET", "/admin/payments?page=1&limit=5", undefined, adminCookie)
+  ).json();
+  assert.ok(Array.isArray(paymentsPaged.items));
+
+  const inquiriesPaged = (
+    await send("GET", "/admin/inquiries?page=1&limit=5", undefined, adminCookie)
+  ).json();
+  assert.ok(Array.isArray(inquiriesPaged.items));
+
+  const printedLegacy = (
+    await send("GET", "/admin/printed-orders", undefined, adminCookie)
+  ).json();
+  assert.ok(Array.isArray(printedLegacy));
+
+  const printedPaged = (
+    await send("GET", "/admin/printed-orders?page=1&limit=5", undefined, adminCookie)
+  ).json();
+  assert.ok(Array.isArray(printedPaged.items));
+
+  // Role boundary check: create a content_editor and verify restricted endpoints fail 403 and overview scopes cleanly
+  const editorEmail = `ed-ops-${Date.now()}@cossyteens.com`;
+  const staffCreate = await send(
+    "POST",
+    "/admin/staff",
+    {
+      name: "Editorial Helper",
+      email: editorEmail,
+      role: "content_editor",
+      password: "Editor-Strong-Pass-2027!",
+    },
+    adminCookie,
+  );
+  assert.equal(staffCreate.statusCode, 200);
+  const editorLogin = await send("POST", "/admin/auth/login", {
+    email: editorEmail,
+    password: "Editor-Strong-Pass-2027!",
+  });
+  const editorCookie = String(editorLogin.headers["set-cookie"]).split(";")[0];
+  const editorMfaEnroll = await send("POST", "/admin/auth/mfa/enroll", {}, editorCookie);
+  await send(
+    "POST",
+    "/admin/auth/mfa/confirm",
+    { code: generateTotpCode(editorMfaEnroll.json().manualEntryKey) },
+    editorCookie,
+  );
+
+  assert.equal(
+    (await send("GET", "/admin/readers", undefined, editorCookie)).statusCode,
+    403,
+  );
+  assert.equal(
+    (await send("GET", "/admin/payments", undefined, editorCookie)).statusCode,
+    403,
+  );
+  assert.equal(
+    (
+      await send(
+        "POST",
+        `/admin/users/${readerId}/online-access/grant`,
+        { months: 12, reason: "Unauthorized attempt" },
+        editorCookie,
+      )
+    ).statusCode,
+    403,
+  );
+  const editorOverview = (
+    await send("GET", "/admin/overview", undefined, editorCookie)
+  ).json();
+  assert.deepEqual(editorOverview.users, []);
+  assert.deepEqual(editorOverview.payments, []);
+  assert.ok(editorOverview.devotionals.length >= 1);
 });
 

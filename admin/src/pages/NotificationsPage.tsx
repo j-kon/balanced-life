@@ -13,7 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import { api } from "../api";
-import { Empty, ErrorBox } from "../components/Common";
+import { Empty, ErrorBox, ConfirmDialog } from "../components/Common";
 import { useAdminAuth } from "../context/AdminAuthContext";
 import type {
   AdminNotificationCampaign,
@@ -27,7 +27,13 @@ const tabMap: Record<string, AdminSectionId> = {
   payments: "Payments",
   "online-access": "Online Access",
   "bulk-orders": "Bulk Orders",
+  devotionals: "Devotionals",
+  notifications: "Notifications",
 };
+
+function makeDraftKey() {
+  return `admin_camp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
 
 const SAFE_DESTINATIONS = [
   { value: "/dashboard", label: "Reader Dashboard (/dashboard)" },
@@ -70,11 +76,13 @@ export function NotificationsPage({
   data,
   busy,
   save,
+  reload,
   onNavigate,
 }: {
   data: AdminOverviewData;
   busy: boolean;
   save: AdminSaveFn;
+  reload?: () => void;
   onNavigate: (tab: AdminSectionId) => void;
 }) {
   const { hasPermission, toast } = useAdminAuth();
@@ -98,8 +106,12 @@ export function NotificationsPage({
   const [actionUrl, setActionUrl] = useState("/dashboard");
   const [deliveryTiming, setDeliveryTiming] = useState<"now" | "later">("now");
   const [scheduledLocal, setScheduledLocal] = useState("");
+  const [draftKey, setDraftKey] = useState<string>(() => makeDraftKey());
 
   const [readerSearch, setReaderSearch] = useState("");
+  const [readerSegmentFilter, setReaderSegmentFilter] = useState<
+    "all" | "free" | "pending_payment" | "scheduled" | "active" | "expired" | "revoked"
+  >("all");
   const [readerResults, setReaderResults] = useState<SearchReaderRow[]>([]);
   const [selectedReader, setSelectedReader] = useState<SearchReaderRow | null>(
     null,
@@ -113,6 +125,10 @@ export function NotificationsPage({
   const [campaignsData, setCampaignsData] = useState<CampaignsResponse | null>(
     null,
   );
+  const [cancelTarget, setCancelTarget] =
+    useState<AdminNotificationCampaign | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState("");
   const confirmDialogRef = useRef<HTMLDialogElement | null>(null);
 
   const loadCampaigns = useCallback(async () => {
@@ -136,6 +152,7 @@ export function NotificationsPage({
     setSearchLoading(true);
     const params = new URLSearchParams({ limit: "25" });
     if (readerSearch.trim()) params.set("search", readerSearch.trim());
+    if (readerSegmentFilter !== "all") params.set("segment", readerSegmentFilter);
     api<{ items: SearchReaderRow[] }>(
       `/admin/notifications/readers?${params.toString()}`,
     )
@@ -151,18 +168,29 @@ export function NotificationsPage({
     return () => {
       active = false;
     };
-  }, [canWrite, targetType, readerSearch]);
+  }, [canWrite, targetType, readerSearch, readerSegmentFilter]);
+
+  useEffect(() => {
+    setDraftKey(makeDraftKey());
+  }, [targetType, targetSegment, selectedReader?.id, title, body, actionUrl, scheduledLocal, deliveryTiming]);
 
   const effectiveCategory =
     targetType === "individual" ? category : "announcement";
 
   const buildPayload = () => {
     let scheduledFor: string | null = null;
-    if (deliveryTiming === "later" && scheduledLocal) {
-      const dt = new Date(scheduledLocal);
-      if (!Number.isNaN(dt.getTime())) {
-        scheduledFor = dt.toISOString();
+    if (deliveryTiming === "later") {
+      if (!scheduledLocal) {
+        throw new Error("Choose a future date and time for scheduled delivery.");
       }
+      const dt = new Date(scheduledLocal);
+      if (Number.isNaN(dt.getTime())) {
+        throw new Error("Enter a valid scheduled date and time.");
+      }
+      if (dt.getTime() < Date.now() - 60_000) {
+        throw new Error("Scheduled delivery time must be in the future.");
+      }
+      scheduledFor = dt.toISOString();
     }
     return {
       targetType,
@@ -201,18 +229,18 @@ export function NotificationsPage({
   }
 
   async function submitConfirmedCampaign() {
+    if (composerBusy) return;
     setComposerError("");
     setComposerBusy(true);
     try {
       const payload = buildPayload();
-      const key = `admin_camp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const res = await api<{
         deduplicated: boolean;
         campaign: AdminNotificationCampaign;
       }>("/admin/notifications/campaigns", {
         ...payload,
         confirmed: true,
-        idempotencyKey: key,
+        idempotencyKey: draftKey,
       });
 
       if (confirmDialogRef.current?.open) {
@@ -220,16 +248,20 @@ export function NotificationsPage({
       }
 
       toast(
-        res.campaign.status === "scheduled"
-          ? `Notification scheduled for ${res.campaign.eligibleCount} eligible reader(s).`
-          : `Notification queued (${res.campaign.inAppCreatedCount} in-app alert(s) created).`,
+        res.deduplicated
+          ? "Duplicate request prevented; existing notification campaign reused."
+          : res.campaign.status === "scheduled"
+            ? `Notification scheduled for ${res.campaign.eligibleCount} eligible reader(s).`
+            : `Notification queued (${res.campaign.inAppCreatedCount} in-app alert(s) created).`,
       );
       setTitle("");
       setBody("");
       setPreview(null);
       setScheduledLocal("");
       setDeliveryTiming("now");
+      setDraftKey(makeDraftKey());
       await loadCampaigns();
+      reload?.();
     } catch (err) {
       if (confirmDialogRef.current?.open) {
         confirmDialogRef.current.close();
@@ -253,17 +285,27 @@ export function NotificationsPage({
             background Web Push worker delivery.
           </p>
         </div>
-        <button
-          type="button"
-          className="button small"
-          disabled={busy || !canWrite}
-          onClick={async () => {
-            await save("/admin/notifications/run-worker", {}, "POST");
-            await loadCampaigns();
-          }}
-        >
-          <Play size={15} /> Run Notification Worker Now
-        </button>
+        {canWrite && (
+          <button
+            type="button"
+            className="button small"
+            disabled={busy}
+            onClick={async () => {
+              const ok = await save(
+                "/admin/notifications/run-worker",
+                {},
+                "POST",
+                "Notification worker cycle executed.",
+              );
+              if (ok) {
+                await loadCampaigns();
+                reload?.();
+              }
+            }}
+          >
+            <Play size={15} /> Run Notification Worker Now
+          </button>
+        )}
       </div>
 
       {/* Administrator Reader Notification & Broadcast Composer */}
@@ -364,14 +406,36 @@ export function NotificationsPage({
 
               {targetType === "individual" && (
                 <div className="stack" style={{ gap: "8px" }}>
-                  <label>
-                    Search registered reader (by name or email)
-                    <input
-                      placeholder="Type reader name or email..."
-                      value={readerSearch}
-                      onChange={(e) => setReaderSearch(e.target.value)}
-                    />
-                  </label>
+                  <div className="form-row-2">
+                    <label>
+                      Search registered reader (by name or email)
+                      <input
+                        placeholder="Type reader name or email..."
+                        value={readerSearch}
+                        onChange={(e) => setReaderSearch(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Filter by access segment
+                      <select
+                        aria-label="Filter individual reader search by segment"
+                        value={readerSegmentFilter}
+                        onChange={(e) =>
+                          setReaderSegmentFilter(
+                            e.target.value as typeof readerSegmentFilter,
+                          )
+                        }
+                      >
+                        <option value="all">All access states</option>
+                        <option value="free">Free readers</option>
+                        <option value="pending_payment">Payment pending</option>
+                        <option value="scheduled">Scheduled 2027</option>
+                        <option value="active">Active 2027</option>
+                        <option value="expired">Expired</option>
+                        <option value="revoked">Revoked</option>
+                      </select>
+                    </label>
+                  </div>
                   <div
                     className="reader-search-list"
                     aria-label="Reader search results"
@@ -761,13 +825,9 @@ export function NotificationsPage({
                             type="button"
                             className="text-link"
                             style={{ display: "block", marginTop: "4px" }}
-                            onClick={async () => {
-                              await api(
-                                `/admin/notifications/campaigns/${c.id}/cancel`,
-                                {},
-                              );
-                              await loadCampaigns();
-                              toast("Scheduled campaign cancelled.");
+                            onClick={() => {
+                              setCancelError("");
+                              setCancelTarget(c);
                             }}
                           >
                             Cancel schedule
@@ -912,6 +972,38 @@ export function NotificationsPage({
           </p>
         )}
       </div>
+
+      <ConfirmDialog
+        open={Boolean(cancelTarget)}
+        title={`Cancel scheduled notification "${cancelTarget?.title || ""}"?`}
+        description="Scheduled delivery will be stopped and pending queued items for this campaign cancelled."
+        confirmLabel="Cancel Scheduled Notification"
+        busy={cancelBusy}
+        error={cancelError}
+        onCancel={() => {
+          setCancelError("");
+          setCancelTarget(null);
+        }}
+        onConfirm={async () => {
+          if (!cancelTarget) return;
+          setCancelBusy(true);
+          setCancelError("");
+          try {
+            await api(
+              `/admin/notifications/campaigns/${cancelTarget.id}/cancel`,
+              {},
+            );
+            setCancelTarget(null);
+            await loadCampaigns();
+            reload?.();
+            toast("Scheduled campaign cancelled.");
+          } catch (err) {
+            setCancelError((err as Error).message);
+          } finally {
+            setCancelBusy(false);
+          }
+        }}
+      />
     </div>
   );
 }

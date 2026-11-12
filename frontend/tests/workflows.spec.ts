@@ -99,23 +99,25 @@ function cleanupTestRecords(sqlite: Database.Database) {
     sqlite.prepare(`DELETE FROM users WHERE id = ?`).run(id);
   }
   const testAdmins = sqlite
-    .prepare(`SELECT id FROM admin_users WHERE email = ?`)
-    .all(adminEmail) as { id: number }[];
+    .prepare(
+      `SELECT id, email FROM admin_users WHERE email = ? OR email LIKE 'e2e-editor-%@cossyteens.com'`,
+    )
+    .all(adminEmail) as { id: number; email: string }[];
   for (const adm of testAdmins) {
     sqlite
       .prepare(
         `DELETE FROM admin_notification_campaign_recipients WHERE campaign_id IN (SELECT id FROM admin_notification_campaigns WHERE created_by_admin_id = ? OR actor_email = ?)`,
       )
-      .run(adm.id, adminEmail);
+      .run(adm.id, adm.email);
     sqlite
       .prepare(
         `DELETE FROM admin_notification_campaigns WHERE created_by_admin_id = ? OR actor_email = ?`,
       )
-      .run(adm.id, adminEmail);
+      .run(adm.id, adm.email);
     sqlite.prepare(`DELETE FROM admin_sessions WHERE admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM admin_mfa_recovery_codes WHERE admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM admin_password_reset_tokens WHERE admin_id = ?`).run(adm.id);
-    sqlite.prepare(`DELETE FROM admin_audit_logs WHERE admin_id = ? OR actor_email = ?`).run(adm.id, adminEmail);
+    sqlite.prepare(`DELETE FROM admin_audit_logs WHERE admin_id = ? OR actor_email = ?`).run(adm.id, adm.email);
     sqlite.prepare(`DELETE FROM subscriptions WHERE granted_by_admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM digital_entitlements WHERE granted_by_admin_id = ?`).run(adm.id);
     sqlite.prepare(`DELETE FROM digital_purchases WHERE verified_by_admin_id = ?`).run(adm.id);
@@ -636,12 +638,15 @@ test.describe("End-to-End Production Workflows", () => {
       page.getByRole("heading", { level: 1, name: /Executive Overview/i }),
     ).toBeVisible();
 
-    // Verify Overview shows Verified revenue and Digital editions sold
+    // Verify Overview hierarchy & Needs Your Attention section
     await expect(
-      page.getByText(/Verified revenue/i).first(),
+      page.getByText(/Verified Revenue/i).first(),
     ).toBeVisible();
     await expect(
-      page.getByText(/Digital editions sold/i).first(),
+      page.getByText(/Active Online Readers/i).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Needs Your Attention/i }),
     ).toBeVisible();
 
     // Readers route: navigate via sidebar & verify deep-link reload works cleanly
@@ -661,13 +666,15 @@ test.describe("End-to-End Production Workflows", () => {
 
     await page
       .getByLabel(/Reason for complimentary access/i)
-      .fill("E2E complimentary membership grant verification");
+      .fill("E2E complimentary online access grant verification");
     await page
       .getByRole("button", { name: /Confirm complimentary grant/i })
       .click();
-    await expect(page.getByText(/Changes saved/i)).toBeVisible();
+    await expect(
+      page.getByText(/Granted 12-month complimentary 2027 Online Access/i),
+    ).toBeVisible();
 
-    // Devotionals route: approve & publish 2027-01-08
+    // Devotionals route: explicit approval first, then confirmed publish for 2027-01-08
     await page.getByRole("link", { name: /^Devotionals$/i }).click();
     await expect(page).toHaveURL(/5174\/devotionals$/);
     await page
@@ -675,8 +682,18 @@ test.describe("End-to-End Production Workflows", () => {
       .fill("2027-01-08");
     const entryRow = page.locator("tr", { hasText: "2027-01-08" });
     await expect(entryRow).toBeVisible();
-    await entryRow.getByRole("button", { name: /Approve & publish/i }).click();
-    await expect(page.getByText(/Changes saved/i)).toBeVisible();
+    await entryRow.getByRole("button", { name: /^Approve$/i }).click();
+    await expect(
+      page.getByText(/Marked 2027-01-08 devotional Approved/i),
+    ).toBeVisible();
+    await entryRow.getByRole("button", { name: /^Publish$/i }).click();
+    await expect(
+      page.getByRole("heading", { name: /Publish 2027-01-08 devotional\?/i }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /Confirm Publish/i }).click();
+    await expect(
+      page.getByText(/Published 2027-01-08 devotional/i),
+    ).toBeVisible();
 
     // Printed Orders route: verify printed order and unconfigured stock
     await page.getByRole("link", { name: /^Printed Orders$/i }).click();
@@ -816,8 +833,11 @@ test.describe("End-to-End Production Workflows", () => {
       .getByPlaceholder(/Find a title or date/i)
       .fill("2027-01-08");
     const entryRow = adminPage.locator("tr", { hasText: "2027-01-08" });
-    await entryRow.getByRole("button", { name: /Unpublish/i }).click();
-    await expect(adminPage.getByText(/Changes saved/i)).toBeVisible();
+    await entryRow.getByRole("button", { name: /^Unpublish$/i }).click();
+    await adminPage.getByRole("button", { name: /Confirm Unpublish/i }).click();
+    await expect(
+      adminPage.getByText(/Unpublished 2027-01-08 devotional/i),
+    ).toBeVisible();
     await adminCtx.close();
   });
 
@@ -1790,5 +1810,139 @@ test.describe("End-to-End Production Workflows", () => {
     }
 
     await ctx.close();
+  });
+
+  test("8. Admin operational improvements: failed grant keeps form open, 2027 editorial calendar & Feb 13 issue, Printed Orders PII minimization, notification timing validation & Content Editor RBAC UI", async ({
+    browser,
+  }) => {
+    const adminCtx = await browser.newContext();
+    const page = await adminCtx.newPage();
+    await page.setViewportSize({ width: 1440, height: 960 });
+
+    await page.goto(`${ADMIN_URL}/login`);
+    await page.getByLabel(/Administrator email/i).fill(adminEmail);
+    await page.getByLabel(/Administrator password/i).fill(adminPassword);
+    await page.getByRole("button", { name: /Continue to verification/i }).click();
+    await expect(page).toHaveURL(/5174\/mfa-verify$/);
+    await page
+      .getByLabel(/6-digit authenticator code/i)
+      .fill(generateTestTotp(e2eAdminMfaSecret));
+    await page
+      .getByRole("button", { name: /Verify & enter dashboard/i })
+      .click();
+    await expect(page).toHaveURL(/5174\/dashboard$/);
+
+    // 1. Dashboard Overview: Needs Your Attention & no obsolete membership phrasing
+    await expect(
+      page.getByRole("heading", { name: /Needs Your Attention/i }),
+    ).toBeVisible();
+    await expect(page.getByText(/paid memberships/i)).toHaveCount(0);
+
+    // 2. ReadersPage: invalid reason keeps modal open & displays inline error
+    await page.getByRole("link", { name: /^Readers$/i }).click();
+    await expect(page).toHaveURL(/5174\/readers$/);
+    await page
+      .locator("tr", { hasText: readerEmail })
+      .getByRole("button", { name: /Grant complimentary/i })
+      .click();
+    await page.getByLabel(/Reason for complimentary access/i).fill("x");
+    await page
+      .getByRole("button", { name: /Confirm complimentary grant/i })
+      .click();
+    await expect(
+      page.getByRole("button", { name: /Confirm complimentary grant/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Provide a brief reason/i).first(),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^Cancel$/i }).click();
+
+    // 3. DevotionalsPage: 2027 editorial calendar + Feb 13 issue highlight & 6-section preview
+    await page.getByRole("link", { name: /^Devotionals$/i }).click();
+    await expect(page).toHaveURL(/5174\/devotionals$/);
+    await expect(
+      page.getByText(/2027 Editorial Calendar/i),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /Inspect Feb 13, 2027/i }).click();
+    await expect(page.getByText(/Reader Preview · 2027-02-13/i)).toBeVisible();
+    await expect(page.getByText(/6 \/ 6 sections complete/i)).toBeVisible();
+    await page.getByRole("button", { name: /Close preview/i }).click();
+
+    // 4. Printed Orders: street address is hidden in summary table, revealed inside Manage drawer
+    await page.getByRole("link", { name: /^Printed Orders$/i }).click();
+    await expect(page).toHaveURL(/5174\/printed-orders$/);
+    const printedTable = page.locator("table").first();
+    await expect(printedTable).toContainText(/Wuse Zone 4|Garki|Lagos|Abuja/i);
+    await expect(printedTable).not.toContainText(/Plot 14|Herbert Macaulay/i);
+
+    // 5. Notifications: selecting Schedule later without future timestamp rejects cleanly
+    await page.getByRole("link", { name: /^Notifications/i }).click();
+    await expect(page).toHaveURL(/5174\/notifications$/);
+    await page.getByLabel(/Delivery schedule/i).selectOption("later");
+    await page.getByLabel(/Notification title/i).fill("Schedule Check");
+    await page
+      .getByLabel(/Message body/i)
+      .fill("Checking future schedule validation in composer.");
+    await page
+      .locator(".reader-search-list button.reader-search-item")
+      .first()
+      .click();
+    await page.getByRole("button", { name: /Preview Eligible Count/i }).click();
+    await expect(
+      page.getByText(/Choose a future date and time for scheduled delivery/i),
+    ).toBeVisible();
+
+    // 6. Content Editor RBAC UI verification via Activity & Security staff creation
+    const editorEmail = `e2e-editor-${Date.now()}@cossyteens.com`;
+    const editorPassword = "E2E-Editor-Strong-2027!";
+    await page.getByRole("link", { name: /Activity & Security/i }).click();
+    await page.getByLabel(/Full name/i).fill("E2E Content Editor");
+    await page.getByLabel(/Dedicated staff email/i).fill(editorEmail);
+    await page.getByLabel(/Assigned role/i).selectOption("content_editor");
+    await page.getByLabel(/Initial temporary password/i).fill(editorPassword);
+    await page.getByRole("button", { name: /Create administrator account/i }).click();
+    await expect(page.getByText(editorEmail).first()).toBeVisible();
+
+    // Sign in as Content Editor in fresh context & confirm scoped nav + zero fake revenue cards
+    const edCtx = await browser.newContext();
+    const edPage = await edCtx.newPage();
+    await edPage.setViewportSize({ width: 1440, height: 960 });
+    await edPage.goto(`${ADMIN_URL}/login`);
+    await edPage.getByLabel(/Administrator email/i).fill(editorEmail);
+    await edPage.getByLabel(/Administrator password/i).fill(editorPassword);
+    await edPage.getByRole("button", { name: /Continue to verification/i }).click();
+    await expect(edPage).toHaveURL(/5174\/mfa-setup$/);
+    const edManualKey = edPage.locator(".mfa-manual-key");
+    await expect(edManualKey).toBeVisible();
+    const edSecret = (await edManualKey.textContent())?.trim() || "";
+    await edPage
+      .getByLabel(/Enter the 6-digit code/i)
+      .fill(generateTestTotp(edSecret));
+    await edPage.getByRole("button", { name: /Verify & enable MFA/i }).click();
+    await edPage.locator('input[type="checkbox"]').check();
+    await edPage
+      .getByRole("button", { name: /Enter Administration Dashboard/i })
+      .click();
+    await expect(edPage).toHaveURL(/5174\/dashboard$/);
+
+    await expect(edPage.getByRole("link", { name: /^Devotionals$/i })).toBeVisible();
+    await expect(edPage.getByRole("link", { name: /^Readers$/i })).toHaveCount(0);
+    await expect(edPage.getByRole("link", { name: /^Payments$/i })).toHaveCount(0);
+    await expect(edPage.getByText(/Verified Revenue/i)).toHaveCount(0);
+
+    // 7. Mobile admin viewport 390px: zero horizontal overflow on Devotionals & Readers
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const path of ["/devotionals", "/readers", "/notifications"]) {
+      await page.goto(`${ADMIN_URL}${path}`);
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth >
+          document.documentElement.clientWidth,
+      );
+      expect(overflow).toBe(false);
+    }
+
+    await edCtx.close();
+    await adminCtx.close();
   });
 });

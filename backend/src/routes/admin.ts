@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { and, asc, desc, eq, gt } from "drizzle-orm";
+import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
@@ -37,13 +37,13 @@ import {
 } from "../validation.js";
 import { getAppSettings, updateAppSettings } from "../services/settings.js";
 import {
-  getSubscriptionDetails,
+  getSubscriptionsMap,
   grantComplimentaryAccess,
   revokeSubscriptionAccess,
 } from "../services/subscriptions.js";
 import {
+  getDigitalEntitlementsMap,
   getPrintedOrderById,
-  getUserDigitalEntitlement,
   grantComplimentaryOnlineAccessAdmin,
   reconcileDigitalPurchaseAdmin,
   revokeOnlineAccessAdmin,
@@ -122,61 +122,63 @@ export function registerAdminRoutes(
     }
   };
 
-  app.get(prefix + "/admin/overview", async (req) => {
-    const admin = requireAdminPermission(req, "overview.read");
-    const canReaders = adminHasPermission(admin, "readers.read");
-    const canDevotionals = adminHasPermission(admin, "devotionals.read");
-    const canDigital = adminHasPermission(admin, "digital_orders.read");
-    const canPrinted = adminHasPermission(admin, "printed_orders.read");
-    const canBulk = adminHasPermission(admin, "bulk_orders.read");
-    const canPayments = adminHasPermission(admin, "payments.read");
-    const canNotifications = adminHasPermission(admin, "notifications.read");
-    const canAudit = adminHasPermission(admin, "audit.read");
+  const buildEditorialStats = (
+    entries: Array<{
+      date: string;
+      published: boolean;
+      reviewStatus: string;
+    }>,
+  ) => {
+    const existing2027Dates = new Set(
+      entries.filter((e) => e.date.startsWith("2027-")).map((e) => e.date),
+    );
+    let missingDevotionalDates = 0;
+    for (let i = 0; i < 365; i += 1) {
+      const iso = new Date(Date.UTC(2027, 0, 1 + i)).toISOString().slice(0, 10);
+      if (!existing2027Dates.has(iso)) missingDevotionalDates += 1;
+    }
+    return {
+      published: entries.filter((e) => e.published).length,
+      drafts: entries.filter((e) => !e.published).length,
+      approvedReadings: entries.filter((e) => e.reviewStatus === "approved")
+        .length,
+      approvedUnpublishedReadings: entries.filter(
+        (e) => !e.published && e.reviewStatus === "approved",
+      ).length,
+      pendingReviewReadings: entries.filter(
+        (e) => e.reviewStatus === "pending_review",
+      ).length,
+      needsRevisionReadings: entries.filter(
+        (e) => e.reviewStatus === "needs_revision",
+      ).length,
+      missingDevotionalDates,
+    };
+  };
 
-    const settings = getAppSettings(store);
-
-    const progressRows = db.select().from(s.progress).all();
-    const bookmarkRows = db.select().from(s.bookmarks).all();
-    const inquiryRows = db
-      .select()
-      .from(s.inquiries)
-      .orderBy(desc(s.inquiries.createdAt))
-      .all();
-
-    const printedOrderRows = db
+  const buildPrintedOrdersList = () => {
+    const orderRows = db
       .select()
       .from(s.printedOrders)
       .orderBy(desc(s.printedOrders.createdAt))
       .all();
-    const printedOrderItemsRows = db
-      .select()
-      .from(s.printedOrderItems)
-      .all();
-
-    const printedOrders = printedOrderRows.map((order) => ({
+    const itemRows = db.select().from(s.printedOrderItems).all();
+    const itemsByOrderId = new Map<number, typeof itemRows>();
+    for (const item of itemRows) {
+      const list = itemsByOrderId.get(item.orderId);
+      if (list) list.push(item);
+      else itemsByOrderId.set(item.orderId, [item]);
+    }
+    return orderRows.map((order) => ({
       ...order,
-      items: printedOrderItemsRows.filter(
-        (item) => item.orderId === order.id,
-      ),
+      items: itemsByOrderId.get(order.id) ?? [],
     }));
+  };
 
-    const allUsers = db
-      .select({
-        id: s.users.id,
-        name: s.users.name,
-        email: s.users.email,
-        role: s.users.role,
-        status: s.users.status,
-        suspendedReason: s.users.suspendedReason,
-        ageGroup: s.users.ageGroup,
-        guardianConsentConfirmed: s.users.guardianConsentConfirmed,
-        createdAt: s.users.createdAt,
-      })
-      .from(s.users)
-      .orderBy(desc(s.users.createdAt))
-      .all();
-
-    const digitalPurchaseRowsRaw = db
+  const buildDigitalPurchaseRows = (
+    settings: ReturnType<typeof getAppSettings>,
+    entitlementsMap: ReturnType<typeof getDigitalEntitlementsMap>,
+  ) => {
+    const raw = db
       .select({
         id: s.digitalPurchases.id,
         userId: s.digitalPurchases.userId,
@@ -203,118 +205,8 @@ export function registerAdminRoutes(
       .orderBy(desc(s.digitalPurchases.createdAt))
       .all();
 
-    const enrichedUsers = allUsers.map((u) => {
-      const sub = getSubscriptionDetails(
-        store,
-        u.id,
-        settings.renewalReminderDays,
-      );
-      const digitalEntitlement = getUserDigitalEntitlement(store, u.id, 2027);
-      const userCompletionsCount = progressRows.filter(
-        (p) => p.userId === u.id,
-      ).length;
-      const userBookmarksCount = bookmarkRows.filter(
-        (b) => b.userId === u.id,
-      ).length;
-      const userDigitalPurchasesCount = digitalPurchaseRowsRaw.filter(
-        (dp) => dp.userId === u.id && dp.status === "succeeded",
-      ).length;
-      const userPrintedOrdersCount = printedOrders.filter(
-        (po) => po.userId === u.id,
-      ).length;
-
-      const onlineAccessActive = Boolean(
-        digitalEntitlement?.active || sub?.active,
-      );
-      const onlineAccessStatus =
-        digitalEntitlement?.active || sub?.active
-          ? "active"
-          : digitalEntitlement?.status === "scheduled" ||
-              sub?.effectiveStatus === "scheduled"
-            ? "scheduled"
-            : digitalEntitlement?.status === "revoked" ||
-                sub?.effectiveStatus === "revoked"
-              ? "revoked"
-              : digitalEntitlement?.status === "expired" ||
-                  sub?.effectiveStatus === "expired"
-                ? "expired"
-                : "none";
-
-      return {
-        ...u,
-        subscription: sub,
-        digitalEntitlement,
-        hasDigitalEdition: Boolean(digitalEntitlement?.active),
-        onlineAccessActive,
-        onlineAccessStatus,
-        onlineAccessStartsAt:
-          digitalEntitlement?.startsAt || sub?.startedAt || null,
-        onlineAccessExpiresAt:
-          digitalEntitlement?.expiresAt || sub?.expiresAt || null,
-        onlineAccessDaysRemaining:
-          digitalEntitlement?.daysRemaining ?? sub?.daysRemaining ?? null,
-        completedReadingsCount: userCompletionsCount,
-        bookmarksCount: userBookmarksCount,
-        digitalPurchasesCount: userDigitalPurchasesCount,
-        printedOrdersCount: userPrintedOrdersCount,
-        planName:
-          sub?.planName ||
-          (digitalEntitlement ? "2027 Digital Devotional Access" : null),
-        accessType:
-          digitalEntitlement?.grantReason && !digitalEntitlement?.purchaseId
-            ? "complimentary"
-            : sub?.accessType || (digitalEntitlement ? "paid" : null),
-        subscriptionStatus:
-          digitalEntitlement?.status || sub?.effectiveStatus || "none",
-        expiresAt: digitalEntitlement?.expiresAt || sub?.expiresAt || null,
-        renewalMode: sub?.renewalMode || "manual",
-        cancelAtPeriodEnd: sub?.cancelAtPeriodEnd || false,
-        grantReason:
-          digitalEntitlement?.grantReason || sub?.grantReason || "",
-      };
-    });
-
-    const entries = db
-      .select({
-        id: s.devotionals.id,
-        date: s.devotionals.date,
-        title: s.devotionals.title,
-        theme: s.devotionals.theme,
-        sample: s.devotionals.sample,
-        published: s.devotionals.published,
-        reviewStatus: s.devotionals.reviewStatus,
-        reviewerNotes: s.devotionals.reviewerNotes,
-        reviewedAt: s.devotionals.reviewedAt,
-        sourcePages: s.devotionals.sourcePages,
-        updatedAt: s.devotionals.updatedAt,
-      })
-      .from(s.devotionals)
-      .orderBy(s.devotionals.date)
-      .all();
-
-    const paymentRows = db
-      .select({
-        id: s.payments.id,
-        userId: s.payments.userId,
-        userName: s.users.name,
-        email: s.users.email,
-        planName: s.payments.planName,
-        amountKobo: s.payments.amountKobo,
-        currency: s.payments.currency,
-        reference: s.payments.reference,
-        provider: s.payments.provider,
-        status: s.payments.status,
-        renewalMode: s.payments.renewalMode,
-        verifiedAt: s.payments.verifiedAt,
-        createdAt: s.payments.createdAt,
-      })
-      .from(s.payments)
-      .innerJoin(s.users, eq(s.users.id, s.payments.userId))
-      .orderBy(desc(s.payments.createdAt))
-      .all();
-
-    const digitalPurchaseRows = digitalPurchaseRowsRaw.map((dp) => {
-      const entitlement = getUserDigitalEntitlement(store, dp.userId, 2027);
+    return raw.map((dp) => {
+      const entitlement = entitlementsMap.get(dp.userId) ?? null;
       const accessStatus =
         dp.status === "refunded"
           ? "refunded"
@@ -349,60 +241,350 @@ export function registerAdminRoutes(
         legacyReviewRequired: entitlement?.legacyReviewRequired ?? false,
       };
     });
+  };
+
+  const buildEnrichedUsers = (
+    settings: ReturnType<typeof getAppSettings>,
+    subscriptionsMap: ReturnType<typeof getSubscriptionsMap>,
+    entitlementsMap: ReturnType<typeof getDigitalEntitlementsMap>,
+  ) => {
+    const progressByUser = new Map(
+      db
+        .select({ userId: s.progress.userId, count: sql<number>`count(*)` })
+        .from(s.progress)
+        .groupBy(s.progress.userId)
+        .all()
+        .map((r) => [r.userId, Number(r.count)]),
+    );
+    const bookmarksByUser = new Map(
+      db
+        .select({ userId: s.bookmarks.userId, count: sql<number>`count(*)` })
+        .from(s.bookmarks)
+        .groupBy(s.bookmarks.userId)
+        .all()
+        .map((r) => [r.userId, Number(r.count)]),
+    );
+    const digitalSuccessByUser = new Map(
+      db
+        .select({
+          userId: s.digitalPurchases.userId,
+          count: sql<number>`count(*)`,
+        })
+        .from(s.digitalPurchases)
+        .where(eq(s.digitalPurchases.status, "succeeded"))
+        .groupBy(s.digitalPurchases.userId)
+        .all()
+        .map((r) => [r.userId, Number(r.count)]),
+    );
+    const pendingDigitalUsers = new Set(
+      db
+        .select({
+          userId: s.digitalPurchases.userId,
+          status: s.digitalPurchases.status,
+        })
+        .from(s.digitalPurchases)
+        .all()
+        .filter(
+          (r) => r.status === "pending" || r.status === "verifying_transfer",
+        )
+        .map((r) => r.userId),
+    );
+    const printedCountByUser = new Map(
+      db
+        .select({
+          userId: s.printedOrders.userId,
+          count: sql<number>`count(*)`,
+        })
+        .from(s.printedOrders)
+        .groupBy(s.printedOrders.userId)
+        .all()
+        .filter((r) => r.userId !== null)
+        .map((r) => [Number(r.userId), Number(r.count)]),
+    );
+
+    const allUsers = db
+      .select({
+        id: s.users.id,
+        name: s.users.name,
+        email: s.users.email,
+        role: s.users.role,
+        status: s.users.status,
+        suspendedReason: s.users.suspendedReason,
+        ageGroup: s.users.ageGroup,
+        guardianConsentConfirmed: s.users.guardianConsentConfirmed,
+        createdAt: s.users.createdAt,
+      })
+      .from(s.users)
+      .orderBy(desc(s.users.createdAt))
+      .all();
+
+    return allUsers.map((u) => {
+      const sub = subscriptionsMap.get(u.id) ?? null;
+      const digitalEntitlement = entitlementsMap.get(u.id) ?? null;
+      const hasPendingPayment = pendingDigitalUsers.has(u.id);
+
+      const onlineAccessActive = Boolean(
+        digitalEntitlement?.active || sub?.active,
+      );
+      const onlineAccessStatus = onlineAccessActive
+        ? "active"
+        : digitalEntitlement?.status === "scheduled" ||
+            sub?.effectiveStatus === "scheduled"
+          ? "scheduled"
+          : digitalEntitlement?.status === "revoked" ||
+              sub?.effectiveStatus === "revoked"
+            ? "revoked"
+            : digitalEntitlement?.status === "expired" ||
+                sub?.effectiveStatus === "expired"
+              ? "expired"
+              : hasPendingPayment
+                ? "pending_payment"
+                : "none";
+
+      const isComplimentaryGrant = Boolean(
+        (digitalEntitlement &&
+          digitalEntitlement.grantReason &&
+          !digitalEntitlement.purchaseId) ||
+          sub?.accessType === "complimentary",
+      );
+
+      return {
+        ...u,
+        subscription: sub,
+        digitalEntitlement,
+        hasDigitalEdition: Boolean(digitalEntitlement?.active),
+        onlineAccessActive,
+        onlineAccessStatus,
+        onlineAccessStartsAt:
+          digitalEntitlement?.startsAt || sub?.startedAt || null,
+        onlineAccessExpiresAt:
+          digitalEntitlement?.expiresAt || sub?.expiresAt || null,
+        onlineAccessDaysRemaining:
+          digitalEntitlement?.daysRemaining ?? sub?.daysRemaining ?? null,
+        completedReadingsCount: progressByUser.get(u.id) ?? 0,
+        bookmarksCount: bookmarksByUser.get(u.id) ?? 0,
+        digitalPurchasesCount: digitalSuccessByUser.get(u.id) ?? 0,
+        printedOrdersCount: printedCountByUser.get(u.id) ?? 0,
+        planName:
+          sub?.planName ||
+          (digitalEntitlement ? "2027 Online Access (12 Months)" : null),
+        accessType: isComplimentaryGrant
+          ? "complimentary"
+          : sub?.accessType || (digitalEntitlement ? "paid" : null),
+        subscriptionStatus:
+          digitalEntitlement?.status || sub?.effectiveStatus || "none",
+        expiresAt: digitalEntitlement?.expiresAt || sub?.expiresAt || null,
+        renewalMode: sub?.renewalMode || "manual",
+        cancelAtPeriodEnd: sub?.cancelAtPeriodEnd || false,
+        grantReason:
+          digitalEntitlement?.grantReason || sub?.grantReason || "",
+      };
+    });
+  };
+
+  app.get(prefix + "/admin/overview", async (req) => {
+    const admin = requireAdminPermission(req, "overview.read");
+    const canReaders = adminHasPermission(admin, "readers.read");
+    const canDevotionals = adminHasPermission(admin, "devotionals.read");
+    const canDigital = adminHasPermission(admin, "digital_orders.read");
+    const canPrinted = adminHasPermission(admin, "printed_orders.read");
+    const canBulk = adminHasPermission(admin, "bulk_orders.read");
+    const canPayments = adminHasPermission(admin, "payments.read");
+    const canNotifications = adminHasPermission(admin, "notifications.read");
+    const canAudit = adminHasPermission(admin, "audit.read");
+    const canFinanceMetrics = canPayments || canDigital || canPrinted;
+
+    const settings = getAppSettings(store);
+
+    const needUsers = canReaders || canDigital || canPayments;
+    const needDigitalPurchases = canDigital || canPayments;
+    const needPrintedOrders = canPrinted || canPayments;
+
+    const subscriptionsMap = needUsers
+      ? getSubscriptionsMap(store, settings.renewalReminderDays)
+      : new Map();
+    const entitlementsMap =
+      needUsers || needDigitalPurchases
+        ? getDigitalEntitlementsMap(store, 2027)
+        : new Map();
+
+    const enrichedUsers = needUsers
+      ? buildEnrichedUsers(settings, subscriptionsMap, entitlementsMap)
+      : [];
+
+    const printedOrders = needPrintedOrders ? buildPrintedOrdersList() : [];
+
+    const digitalPurchaseRows = needDigitalPurchases
+      ? buildDigitalPurchaseRows(settings, entitlementsMap)
+      : [];
 
     // Also include complimentary or legacy entitlements that do not have a row in digital_purchases
     const entitlementUsersWithPurchases = new Set(
       digitalPurchaseRows.map((dp) => dp.userId),
     );
-    const standaloneEntitlements = enrichedUsers
-      .filter(
-        (u) =>
-          u.digitalEntitlement && !entitlementUsersWithPurchases.has(u.id),
-      )
-      .map((u) => {
-        const ent = u.digitalEntitlement!;
-        return {
-          id: -ent.id,
-          userId: u.id,
-          userName: u.name,
-          email: u.email,
-          productCode: "digital_2027",
-          productName: "2027 Digital Devotional Access (Complimentary)",
-          amountKobo: 0,
-          currency: "NGN",
-          reference: `COMP_${ent.id}`,
-          paymentMethod: "complimentary",
-          transferReference: "",
-          payerNote: ent.grantReason || "Complimentary grant",
-          status: "succeeded",
-          adminNotes: ent.grantReason || "",
-          verifiedAt: ent.grantedAt,
-          startsAt: ent.startsAt || ent.grantedAt,
-          expiresAt: ent.expiresAt,
-          createdAt: ent.grantedAt,
-          updatedAt: ent.updatedAt,
-          editionYear: 2027,
-          accessScope: ent.accessScope,
-          entitlementStatus: ent.status,
-          accessStatus: ent.status,
-          daysRemaining: ent.daysRemaining,
-          expiringSoon: ent.expiringSoon,
-          renewalCount: ent.renewalCount,
-          legacyPersistent: ent.legacyPersistent,
-          legacyReviewRequired: ent.legacyReviewRequired,
-        };
-      });
+    const standaloneEntitlements =
+      needUsers && needDigitalPurchases
+        ? enrichedUsers
+            .filter(
+              (u) =>
+                u.digitalEntitlement &&
+                !entitlementUsersWithPurchases.has(u.id),
+            )
+            .map((u) => {
+              const ent = u.digitalEntitlement!;
+              return {
+                id: -ent.id,
+                userId: u.id,
+                userName: u.name,
+                email: u.email,
+                productCode: "digital_2027",
+                productName: "2027 Online Access (Complimentary)",
+                amountKobo: 0,
+                currency: "NGN",
+                reference: `COMP_${ent.id}`,
+                paymentMethod: "complimentary",
+                transferReference: "",
+                payerNote: ent.grantReason || "Complimentary grant",
+                status: "succeeded",
+                adminNotes: ent.grantReason || "",
+                verifiedAt: ent.grantedAt,
+                startsAt: ent.startsAt || ent.grantedAt,
+                expiresAt: ent.expiresAt,
+                createdAt: ent.grantedAt,
+                updatedAt: ent.updatedAt,
+                editionYear: 2027,
+                accessScope: ent.accessScope,
+                entitlementStatus: ent.status,
+                accessStatus: ent.status,
+                daysRemaining: ent.daysRemaining,
+                expiringSoon: ent.expiringSoon,
+                renewalCount: ent.renewalCount,
+                legacyPersistent: ent.legacyPersistent,
+                legacyReviewRequired: ent.legacyReviewRequired,
+              };
+            })
+        : [];
 
     const onlineAccessRecords = [
       ...digitalPurchaseRows,
       ...standaloneEntitlements,
     ];
 
-    const bulkOrderRows = db
-      .select()
-      .from(s.bulkOrders)
-      .orderBy(desc(s.bulkOrders.createdAt))
-      .all();
+    const paymentRows = canPayments
+      ? db
+          .select({
+            id: s.payments.id,
+            userId: s.payments.userId,
+            userName: s.users.name,
+            email: s.users.email,
+            planName: s.payments.planName,
+            amountKobo: s.payments.amountKobo,
+            currency: s.payments.currency,
+            reference: s.payments.reference,
+            provider: s.payments.provider,
+            status: s.payments.status,
+            renewalMode: s.payments.renewalMode,
+            verifiedAt: s.payments.verifiedAt,
+            createdAt: s.payments.createdAt,
+          })
+          .from(s.payments)
+          .innerJoin(s.users, eq(s.users.id, s.payments.userId))
+          .orderBy(desc(s.payments.createdAt))
+          .all()
+      : [];
+
+    const entries = canDevotionals
+      ? db
+          .select({
+            id: s.devotionals.id,
+            date: s.devotionals.date,
+            title: s.devotionals.title,
+            theme: s.devotionals.theme,
+            sample: s.devotionals.sample,
+            published: s.devotionals.published,
+            reviewStatus: s.devotionals.reviewStatus,
+            reviewerNotes: s.devotionals.reviewerNotes,
+            reviewedAt: s.devotionals.reviewedAt,
+            sourcePages: s.devotionals.sourcePages,
+            updatedAt: s.devotionals.updatedAt,
+          })
+          .from(s.devotionals)
+          .orderBy(s.devotionals.date)
+          .all()
+      : [];
+
+    const editorialStats = canDevotionals
+      ? buildEditorialStats(entries)
+      : {
+          published: 0,
+          drafts: 0,
+          approvedReadings: 0,
+          approvedUnpublishedReadings: 0,
+          pendingReviewReadings: 0,
+          needsRevisionReadings: 0,
+          missingDevotionalDates: 0,
+        };
+
+    const progressByDevotional = canDevotionals
+      ? new Map(
+          db
+            .select({
+              devotionalId: s.progress.devotionalId,
+              count: sql<number>`count(*)`,
+            })
+            .from(s.progress)
+            .groupBy(s.progress.devotionalId)
+            .all()
+            .map((r) => [r.devotionalId, Number(r.count)]),
+        )
+      : new Map<number, number>();
+    const bookmarksByDevotional = canDevotionals
+      ? new Map(
+          db
+            .select({
+              devotionalId: s.bookmarks.devotionalId,
+              count: sql<number>`count(*)`,
+            })
+            .from(s.bookmarks)
+            .groupBy(s.bookmarks.devotionalId)
+            .all()
+            .map((r) => [r.devotionalId, Number(r.count)]),
+        )
+      : new Map<number, number>();
+
+    const totalCompletionsCount = canDevotionals
+      ? Number(
+          db
+            .select({ count: sql<number>`count(*)` })
+            .from(s.progress)
+            .get()?.count ?? 0,
+        )
+      : 0;
+    const totalBookmarksCount = canDevotionals
+      ? Number(
+          db
+            .select({ count: sql<number>`count(*)` })
+            .from(s.bookmarks)
+            .get()?.count ?? 0,
+        )
+      : 0;
+
+    const bulkOrderRows = canBulk
+      ? db
+          .select()
+          .from(s.bulkOrders)
+          .orderBy(desc(s.bulkOrders.createdAt))
+          .all()
+      : [];
+
+    const inquiryRows =
+      canNotifications || canBulk
+        ? db
+            .select()
+            .from(s.inquiries)
+            .orderBy(desc(s.inquiries.createdAt))
+            .all()
+        : [];
 
     const readerUsers = enrichedUsers.filter((u) => u.role === "reader");
     const activeSubs = enrichedUsers.filter((u) => u.subscription?.active);
@@ -417,6 +599,15 @@ export function registerAdminRoutes(
     const activeOnlineReaders = readerUsers.filter(
       (u) => u.onlineAccessActive,
     ).length;
+    const scheduledOnlineReaders = readerUsers.filter(
+      (u) => u.onlineAccessStatus === "scheduled",
+    ).length;
+    const paidOnlineReaders = readerUsers.filter(
+      (u) => u.onlineAccessActive && u.accessType !== "complimentary",
+    ).length;
+    const complimentaryOnlineReaders = readerUsers.filter(
+      (u) => u.onlineAccessActive && u.accessType === "complimentary",
+    ).length;
     const expiringOnlineAccessSoon = readerUsers.filter(
       (u) =>
         Boolean(u.digitalEntitlement?.expiringSoon) ||
@@ -425,9 +616,12 @@ export function registerAdminRoutes(
     const expiredOnlineAccess = readerUsers.filter(
       (u) => u.onlineAccessStatus === "expired",
     ).length;
+    const revokedOnlineAccess = readerUsers.filter(
+      (u) => u.onlineAccessStatus === "revoked",
+    ).length;
 
-    const activeEntitlementsCount = readerUsers.filter(
-      (u) => Boolean(u.digitalEntitlement?.active),
+    const activeEntitlementsCount = readerUsers.filter((u) =>
+      Boolean(u.digitalEntitlement?.active),
     ).length;
 
     const paidDigitalPurchasesCount = digitalPurchaseRows.filter(
@@ -475,147 +669,159 @@ export function registerAdminRoutes(
       .reduce((sum, po) => sum + po.quantity, 0);
 
     // Build chart series from real verified records
-    const verifiedDigitalEvents = [
-      ...digitalPurchaseRows
-        .filter((dp) => dp.status === "succeeded" && dp.currency === "NGN")
-        .map((dp) => ({
-          date: (dp.verifiedAt || dp.createdAt).slice(0, 10),
-          amountKobo: dp.amountKobo,
-        })),
-      ...paymentRows
-        .filter(
-          (p) =>
-            p.status === "succeeded" &&
-            p.provider === "paystack" &&
-            p.currency === "NGN",
-        )
-        .map((p) => ({
-          date: (p.verifiedAt || p.createdAt).slice(0, 10),
-          amountKobo: p.amountKobo,
-        })),
-    ];
+    const verifiedDigitalEvents = canFinanceMetrics
+      ? [
+          ...digitalPurchaseRows
+            .filter((dp) => dp.status === "succeeded" && dp.currency === "NGN")
+            .map((dp) => ({
+              date: (dp.verifiedAt || dp.createdAt).slice(0, 10),
+              amountKobo: dp.amountKobo,
+            })),
+          ...paymentRows
+            .filter(
+              (p) =>
+                p.status === "succeeded" &&
+                p.provider === "paystack" &&
+                p.currency === "NGN",
+            )
+            .map((p) => ({
+              date: (p.verifiedAt || p.createdAt).slice(0, 10),
+              amountKobo: p.amountKobo,
+            })),
+        ]
+      : [];
 
-    const verifiedPrintedEvents = printedOrders
-      .filter((po) => po.paymentStatus === "paid" && po.currency === "NGN")
-      .map((po) => ({
-        date: (po.paidAt || po.createdAt).slice(0, 10),
-        amountKobo: po.finalTotalKobo ?? po.subtotalKobo,
-      }));
+    const verifiedPrintedEvents = canFinanceMetrics
+      ? printedOrders
+          .filter((po) => po.paymentStatus === "paid" && po.currency === "NGN")
+          .map((po) => ({
+            date: (po.paidAt || po.createdAt).slice(0, 10),
+            amountKobo: po.finalTotalKobo ?? po.subtotalKobo,
+          }))
+      : [];
 
     const nowDate = new Date();
-    const dailySeries = Array.from({ length: 14 }, (_, idx) => {
-      const d = new Date(
-        Date.UTC(
-          nowDate.getUTCFullYear(),
-          nowDate.getUTCMonth(),
-          nowDate.getUTCDate() - (13 - idx),
-        ),
-      );
-      const isoDate = d.toISOString().slice(0, 10);
-      const digitalKobo = verifiedDigitalEvents
-        .filter((e) => e.date === isoDate)
-        .reduce((sum, e) => sum + e.amountKobo, 0);
-      const printedKobo = verifiedPrintedEvents
-        .filter((e) => e.date === isoDate)
-        .reduce((sum, e) => sum + e.amountKobo, 0);
-      return {
-        date: isoDate,
-        label: d.toLocaleDateString("en-GB", {
-          day: "2-digit",
-          month: "short",
-          timeZone: "UTC",
-        }),
-        digitalKobo,
-        printedKobo,
-        totalKobo: digitalKobo + printedKobo,
-      };
-    });
+    const dailySeries = canFinanceMetrics
+      ? Array.from({ length: 14 }, (_, idx) => {
+          const d = new Date(
+            Date.UTC(
+              nowDate.getUTCFullYear(),
+              nowDate.getUTCMonth(),
+              nowDate.getUTCDate() - (13 - idx),
+            ),
+          );
+          const isoDate = d.toISOString().slice(0, 10);
+          const digitalKobo = verifiedDigitalEvents
+            .filter((e) => e.date === isoDate)
+            .reduce((sum, e) => sum + e.amountKobo, 0);
+          const printedKobo = verifiedPrintedEvents
+            .filter((e) => e.date === isoDate)
+            .reduce((sum, e) => sum + e.amountKobo, 0);
+          return {
+            date: isoDate,
+            label: d.toLocaleDateString("en-GB", {
+              day: "2-digit",
+              month: "short",
+              timeZone: "UTC",
+            }),
+            digitalKobo,
+            printedKobo,
+            totalKobo: digitalKobo + printedKobo,
+          };
+        })
+      : [];
 
-    const weeklySeries = Array.from({ length: 8 }, (_, idx) => {
-      const endOffset = (7 - idx) * 7;
-      const startOffset = endOffset + 6;
-      const startDate = new Date(
-        Date.UTC(
-          nowDate.getUTCFullYear(),
-          nowDate.getUTCMonth(),
-          nowDate.getUTCDate() - startOffset,
-        ),
-      )
-        .toISOString()
-        .slice(0, 10);
-      const endDate = new Date(
-        Date.UTC(
-          nowDate.getUTCFullYear(),
-          nowDate.getUTCMonth(),
-          nowDate.getUTCDate() - endOffset,
-        ),
-      )
-        .toISOString()
-        .slice(0, 10);
-      const digitalKobo = verifiedDigitalEvents
-        .filter((e) => e.date >= startDate && e.date <= endDate)
-        .reduce((sum, e) => sum + e.amountKobo, 0);
-      const printedKobo = verifiedPrintedEvents
-        .filter((e) => e.date >= startDate && e.date <= endDate)
-        .reduce((sum, e) => sum + e.amountKobo, 0);
-      return {
-        label: `${startDate.slice(5)}–${endDate.slice(5)}`,
-        digitalKobo,
-        printedKobo,
-        totalKobo: digitalKobo + printedKobo,
-      };
-    });
+    const weeklySeries = canFinanceMetrics
+      ? Array.from({ length: 8 }, (_, idx) => {
+          const endOffset = (7 - idx) * 7;
+          const startOffset = endOffset + 6;
+          const startDate = new Date(
+            Date.UTC(
+              nowDate.getUTCFullYear(),
+              nowDate.getUTCMonth(),
+              nowDate.getUTCDate() - startOffset,
+            ),
+          )
+            .toISOString()
+            .slice(0, 10);
+          const endDate = new Date(
+            Date.UTC(
+              nowDate.getUTCFullYear(),
+              nowDate.getUTCMonth(),
+              nowDate.getUTCDate() - endOffset,
+            ),
+          )
+            .toISOString()
+            .slice(0, 10);
+          const digitalKobo = verifiedDigitalEvents
+            .filter((e) => e.date >= startDate && e.date <= endDate)
+            .reduce((sum, e) => sum + e.amountKobo, 0);
+          const printedKobo = verifiedPrintedEvents
+            .filter((e) => e.date >= startDate && e.date <= endDate)
+            .reduce((sum, e) => sum + e.amountKobo, 0);
+          return {
+            label: `${startDate.slice(5)}–${endDate.slice(5)}`,
+            digitalKobo,
+            printedKobo,
+            totalKobo: digitalKobo + printedKobo,
+          };
+        })
+      : [];
 
-    const monthlySeries = Array.from({ length: 6 }, (_, idx) => {
-      const d = new Date(
-        Date.UTC(
-          nowDate.getUTCFullYear(),
-          nowDate.getUTCMonth() - (5 - idx),
-          1,
-        ),
-      );
-      const ym = d.toISOString().slice(0, 7);
-      const digitalKobo = verifiedDigitalEvents
-        .filter((e) => e.date.startsWith(ym))
-        .reduce((sum, e) => sum + e.amountKobo, 0);
-      const printedKobo = verifiedPrintedEvents
-        .filter((e) => e.date.startsWith(ym))
-        .reduce((sum, e) => sum + e.amountKobo, 0);
-      return {
-        month: ym,
-        label: d.toLocaleDateString("en-GB", {
-          month: "short",
-          year: "2-digit",
-          timeZone: "UTC",
-        }),
-        digitalKobo,
-        printedKobo,
-        totalKobo: digitalKobo + printedKobo,
-      };
-    });
+    const monthlySeries = canFinanceMetrics
+      ? Array.from({ length: 6 }, (_, idx) => {
+          const d = new Date(
+            Date.UTC(
+              nowDate.getUTCFullYear(),
+              nowDate.getUTCMonth() - (5 - idx),
+              1,
+            ),
+          );
+          const ym = d.toISOString().slice(0, 7);
+          const digitalKobo = verifiedDigitalEvents
+            .filter((e) => e.date.startsWith(ym))
+            .reduce((sum, e) => sum + e.amountKobo, 0);
+          const printedKobo = verifiedPrintedEvents
+            .filter((e) => e.date.startsWith(ym))
+            .reduce((sum, e) => sum + e.amountKobo, 0);
+          return {
+            month: ym,
+            label: d.toLocaleDateString("en-GB", {
+              month: "short",
+              year: "2-digit",
+              timeZone: "UTC",
+            }),
+            digitalKobo,
+            printedKobo,
+            totalKobo: digitalKobo + printedKobo,
+          };
+        })
+      : [];
 
-    const registrationsByMonth = Array.from({ length: 6 }, (_, idx) => {
-      const d = new Date(
-        Date.UTC(
-          nowDate.getUTCFullYear(),
-          nowDate.getUTCMonth() - (5 - idx),
-          1,
-        ),
-      );
-      const ym = d.toISOString().slice(0, 7);
-      const count = readerUsers.filter((u) =>
-        u.createdAt.startsWith(ym),
-      ).length;
-      return {
-        month: ym,
-        label: d.toLocaleDateString("en-GB", {
-          month: "short",
-          year: "2-digit",
-          timeZone: "UTC",
-        }),
-        count,
-      };
-    });
+    const registrationsByMonth = canReaders
+      ? Array.from({ length: 6 }, (_, idx) => {
+          const d = new Date(
+            Date.UTC(
+              nowDate.getUTCFullYear(),
+              nowDate.getUTCMonth() - (5 - idx),
+              1,
+            ),
+          );
+          const ym = d.toISOString().slice(0, 7);
+          const count = readerUsers.filter((u) =>
+            u.createdAt.startsWith(ym),
+          ).length;
+          return {
+            month: ym,
+            label: d.toLocaleDateString("en-GB", {
+              month: "short",
+              year: "2-digit",
+              timeZone: "UTC",
+            }),
+            count,
+          };
+        })
+      : [];
 
     const fulfillmentStatuses: Array<{
       status: string;
@@ -630,11 +836,40 @@ export function registerAdminRoutes(
       { status: "delivered", label: "Delivered" },
       { status: "cancelled", label: "Cancelled" },
     ];
-    const ordersByFulfillmentStatus = fulfillmentStatuses.map((st) => ({
-      ...st,
-      count: printedOrders.filter((po) => po.fulfillmentStatus === st.status)
-        .length,
-    }));
+    const ordersByFulfillmentStatus = canPrinted
+      ? fulfillmentStatuses.map((st) => ({
+          ...st,
+          count: printedOrders.filter((po) => po.fulfillmentStatus === st.status)
+            .length,
+        }))
+      : [];
+
+    const campaignsSummary = canNotifications
+      ? getAdminNotificationCampaigns(store, { limit: 15 })
+      : { items: [], total: 0 };
+    const notificationStatusCounts = canNotifications
+      ? new Map(
+          db
+            .select({
+              status: s.adminNotificationCampaigns.status,
+              count: sql<number>`count(*)`,
+            })
+            .from(s.adminNotificationCampaigns)
+            .groupBy(s.adminNotificationCampaigns.status)
+            .all()
+            .map((r) => [r.status, Number(r.count)]),
+        )
+      : new Map<string, number>();
+
+    const scheduledNotificationsCount =
+      notificationStatusCounts.get("scheduled") ?? 0;
+    const failedNotificationCampaignsCount =
+      (notificationStatusCounts.get("failed") ?? 0) +
+      (notificationStatusCounts.get("partial") ?? 0);
+    const pendingNotificationCampaignsCount =
+      scheduledNotificationsCount +
+      (notificationStatusCounts.get("queued") ?? 0) +
+      (notificationStatusCounts.get("sending") ?? 0);
 
     // Operational notifications for the administrator
     const operationalAlerts: Array<{
@@ -645,6 +880,7 @@ export function registerAdminRoutes(
         | "payment_verification"
         | "online_access"
         | "bulk_order"
+        | "devotional"
         | "inquiry";
       title: string;
       description: string;
@@ -652,87 +888,138 @@ export function registerAdminRoutes(
       createdAt: string;
     }> = [];
 
-    for (const po of printedOrders) {
-      if (po.fulfillmentStatus === "awaiting_delivery_quotation") {
-        operationalAlerts.push({
-          id: `po_quote_${po.id}`,
-          severity: "high",
-          category: "printed_order",
-          title: `Delivery Quotation Needed: ${po.orderNumber}`,
-          description: `${po.fullName} ordered ${po.quantity} cop${po.quantity === 1 ? "y" : "ies"} to ${po.city}, ${po.state}. Provide delivery fee so customer can approve and pay.`,
-          actionTab: "printed-orders",
-          createdAt: po.createdAt,
-        });
-      }
-      if (po.paymentStatus === "awaiting_verification") {
-        operationalAlerts.push({
-          id: `po_verify_${po.id}`,
-          severity: "high",
-          category: "payment_verification",
-          title: `Printed Order Bank Transfer Awaiting Verification: ${po.orderNumber}`,
-          description: `${po.fullName} submitted transfer reference "${po.transferReference || po.paymentReference}" for ₦${((po.finalTotalKobo ?? po.subtotalKobo) / 100).toLocaleString()}.`,
-          actionTab: "payments",
-          createdAt: po.updatedAt,
-        });
-      }
-      if (
-        po.paymentStatus === "paid" &&
-        (po.fulfillmentStatus === "new" ||
-          po.fulfillmentStatus === "processing" ||
-          po.fulfillmentStatus === "ready_for_dispatch")
-      ) {
-        operationalAlerts.push({
-          id: `po_dispatch_${po.id}`,
-          severity: "medium",
-          category: "printed_order",
-          title: `Paid Order Ready for Fulfillment: ${po.orderNumber}`,
-          description: `${po.fullName} (${po.quantity} cop${po.quantity === 1 ? "y" : "ies"}) is paid and currently "${po.fulfillmentStatus.replace(/_/g, " ")}".`,
-          actionTab: "printed-orders",
-          createdAt: po.paidAt || po.updatedAt,
-        });
-      }
-    }
-
-    for (const dp of digitalPurchaseRows) {
-      if (dp.status === "verifying_transfer" || dp.status === "pending") {
-        operationalAlerts.push({
-          id: `dp_verify_${dp.id}`,
-          severity: dp.status === "verifying_transfer" ? "high" : "medium",
-          category: "payment_verification",
-          title: `Digital Access Payment ${dp.status === "verifying_transfer" ? "Awaiting Transfer Verification" : "Pending"}: ${dp.reference}`,
-          description: `${dp.userName} (${dp.email}) — ${dp.currency} ${(dp.amountKobo / 100).toLocaleString()}${dp.transferReference ? ` • Ref: ${dp.transferReference}` : ""}.`,
-          actionTab: "online-access",
-          createdAt: dp.updatedAt,
-        });
+    if (canPrinted) {
+      for (const po of printedOrders) {
+        if (po.fulfillmentStatus === "awaiting_delivery_quotation") {
+          operationalAlerts.push({
+            id: `po_quote_${po.id}`,
+            severity: "high",
+            category: "printed_order",
+            title: `Delivery Quotation Needed: ${po.orderNumber}`,
+            description: `${po.fullName} ordered ${po.quantity} cop${po.quantity === 1 ? "y" : "ies"} to ${po.city}, ${po.state}. Provide delivery fee so customer can approve and pay.`,
+            actionTab: "printed-orders",
+            createdAt: po.createdAt,
+          });
+        }
+        if (po.paymentStatus === "awaiting_verification") {
+          operationalAlerts.push({
+            id: `po_verify_${po.id}`,
+            severity: "high",
+            category: "payment_verification",
+            title: `Printed Order Bank Transfer Awaiting Verification: ${po.orderNumber}`,
+            description: `${po.fullName} submitted transfer reference "${po.transferReference || po.paymentReference}" for ₦${((po.finalTotalKobo ?? po.subtotalKobo) / 100).toLocaleString()}.`,
+            actionTab: "payments",
+            createdAt: po.updatedAt,
+          });
+        }
+        if (
+          po.paymentStatus === "paid" &&
+          (po.fulfillmentStatus === "new" ||
+            po.fulfillmentStatus === "processing" ||
+            po.fulfillmentStatus === "ready_for_dispatch")
+        ) {
+          operationalAlerts.push({
+            id: `po_dispatch_${po.id}`,
+            severity: "medium",
+            category: "printed_order",
+            title: `Paid Order Ready for Fulfillment: ${po.orderNumber}`,
+            description: `${po.fullName} (${po.quantity} cop${po.quantity === 1 ? "y" : "ies"}) is paid and currently "${po.fulfillmentStatus.replace(/_/g, " ")}".`,
+            actionTab: "printed-orders",
+            createdAt: po.paidAt || po.updatedAt,
+          });
+        }
       }
     }
 
-    for (const ent of onlineAccessRecords) {
-      if (ent.legacyReviewRequired) {
+    if (canDigital || canPayments) {
+      for (const dp of digitalPurchaseRows) {
+        if (dp.status === "verifying_transfer" || dp.status === "pending") {
+          operationalAlerts.push({
+            id: `dp_verify_${dp.id}`,
+            severity: dp.status === "verifying_transfer" ? "high" : "medium",
+            category: "payment_verification",
+            title: `Online Access Payment ${dp.status === "verifying_transfer" ? "Awaiting Transfer Verification" : "Pending"}: ${dp.reference}`,
+            description: `${dp.userName} (${dp.email}) — ${dp.currency} ${(dp.amountKobo / 100).toLocaleString()}${dp.transferReference ? ` • Ref: ${dp.transferReference}` : ""}.`,
+            actionTab: "online-access",
+            createdAt: dp.updatedAt,
+          });
+        }
+      }
+    }
+
+    if (canDigital) {
+      for (const ent of onlineAccessRecords) {
+        if (ent.legacyReviewRequired) {
+          operationalAlerts.push({
+            id: `legacy_ent_${ent.userId}`,
+            severity: "info",
+            category: "online_access",
+            title: `Legacy Persistent Entitlement Preserved: ${ent.userName}`,
+            description: `${ent.email} holds a legacy persistent 2027 digital entitlement preserved during migration.`,
+            actionTab: "online-access",
+            createdAt: ent.createdAt,
+          });
+        }
+      }
+    }
+
+    if (canDevotionals) {
+      for (const entry of entries) {
+        if (entry.reviewStatus === "needs_revision") {
+          operationalAlerts.push({
+            id: `dev_rev_${entry.id}`,
+            severity: "high",
+            category: "devotional",
+            title: `Devotional Needs Revision: ${entry.date} (${entry.title})`,
+            description:
+              entry.reviewerNotes ||
+              `Source page ${entry.sourcePages || "manuscript"} flagged for editorial review before approval.`,
+            actionTab: "devotionals",
+            createdAt: entry.updatedAt,
+          });
+        }
+      }
+      if (editorialStats.approvedUnpublishedReadings > 0) {
         operationalAlerts.push({
-          id: `legacy_ent_${ent.userId}`,
+          id: "dev_approved_unpublished",
           severity: "info",
-          category: "online_access",
-          title: `Legacy Persistent Entitlement Preserved: ${ent.userName}`,
-          description: `${ent.email} holds a legacy persistent 2027 digital entitlement preserved during migration.`,
-          actionTab: "online-access",
-          createdAt: ent.createdAt,
+          category: "devotional",
+          title: `${editorialStats.approvedUnpublishedReadings} Approved Devotional${editorialStats.approvedUnpublishedReadings === 1 ? "" : "s"} Awaiting Publication`,
+          description:
+            "Reviewed and approved entries can be published from the 2027 editorial calendar.",
+          actionTab: "devotionals",
+          createdAt: nowDate.toISOString(),
         });
       }
     }
 
-    for (const bo of bulkOrderRows) {
-      if (bo.status === "new") {
-        operationalAlerts.push({
-          id: `bo_new_${bo.id}`,
-          severity: "medium",
-          category: "bulk_order",
-          title: `New Bulk Order Request: ${bo.organizationName}`,
-          description: `${bo.contactName} requested ${bo.quantity} copies (${bo.preferredFormat}) for delivery to ${bo.deliveryLocation}.`,
-          actionTab: "bulk-orders",
-          createdAt: bo.createdAt,
-        });
+    if (canBulk) {
+      for (const bo of bulkOrderRows) {
+        if (bo.status === "new") {
+          operationalAlerts.push({
+            id: `bo_new_${bo.id}`,
+            severity: "medium",
+            category: "bulk_order",
+            title: `New Bulk Order Request: ${bo.organizationName}`,
+            description: `${bo.contactName} requested ${bo.quantity} copies (${bo.preferredFormat}) for delivery to ${bo.deliveryLocation}.`,
+            actionTab: "bulk-orders",
+            createdAt: bo.createdAt,
+          });
+        }
       }
+    }
+
+    if (canNotifications && failedNotificationCampaignsCount > 0) {
+      operationalAlerts.push({
+        id: "notif_failed_campaigns",
+        severity: "high",
+        category: "inquiry",
+        title: `${failedNotificationCampaignsCount} Notification Campaign${failedNotificationCampaignsCount === 1 ? "" : "s"} Need Attention`,
+        description:
+          "Review partial or failed reader notification deliveries on the Notifications page.",
+        actionTab: "notifications",
+        createdAt: nowDate.toISOString(),
+      });
     }
 
     const scopedAlerts = operationalAlerts.filter((alert) => {
@@ -742,6 +1029,7 @@ export function registerAdminRoutes(
       }
       if (alert.category === "online_access") return canDigital;
       if (alert.category === "bulk_order") return canBulk;
+      if (alert.category === "devotional") return canDevotionals;
       return canNotifications;
     });
 
@@ -754,11 +1042,13 @@ export function registerAdminRoutes(
           .all()
       : [];
     const activePushDevicesCount = canNotifications
-      ? db
-          .select()
-          .from(s.pushSubscriptions)
-          .where(eq(s.pushSubscriptions.status, "active"))
-          .all().length
+      ? Number(
+          db
+            .select({ count: sql<number>`count(*)` })
+            .from(s.pushSubscriptions)
+            .where(eq(s.pushSubscriptions.status, "active"))
+            .get()?.count ?? 0,
+        )
       : 0;
 
     const auditRows = canAudit
@@ -786,16 +1076,20 @@ export function registerAdminRoutes(
           }))
       : [];
 
-    const canFinanceMetrics = canPayments || canDigital || canPrinted;
-
     return {
       metrics: {
         readers: canReaders ? readerUsers.length : 0,
         totalRegisteredReaders: canReaders ? readerUsers.length : 0,
         activeOnlineReaders: canReaders || canDigital ? activeOnlineReaders : 0,
+        scheduledOnlineReaders:
+          canReaders || canDigital ? scheduledOnlineReaders : 0,
+        paidOnlineReaders: canReaders || canDigital ? paidOnlineReaders : 0,
+        complimentaryOnlineReaders:
+          canReaders || canDigital ? complimentaryOnlineReaders : 0,
         expiringOnlineAccessSoon:
           canReaders || canDigital ? expiringOnlineAccessSoon : 0,
         expiredOnlineAccess: canReaders || canDigital ? expiredOnlineAccess : 0,
+        revokedOnlineAccess: canReaders || canDigital ? revokedOnlineAccess : 0,
         activeMemberships: canReaders || canPayments ? activeSubs.length : 0,
         paidMemberships:
           canReaders || canPayments
@@ -819,15 +1113,23 @@ export function registerAdminRoutes(
         deliveredOrders: canPrinted ? deliveredOrdersCount : 0,
         printedOrdersTotal: canPrinted ? printedOrders.length : 0,
         printedBooksCopiesOrdered: canPrinted ? printedBooksCopiesOrdered : 0,
-        published: entries.filter((e) => e.published).length,
-        drafts: entries.filter((e) => !e.published).length,
-        approvedReadings: entries.filter((e) => e.reviewStatus === "approved")
-          .length,
-        needsRevisionReadings: entries.filter(
-          (e) => e.reviewStatus === "needs_revision",
-        ).length,
-        completions: progressRows.length,
-        bookmarks: bookmarkRows.length,
+        published: canDevotionals ? editorialStats.published : 0,
+        drafts: canDevotionals ? editorialStats.drafts : 0,
+        approvedReadings: canDevotionals ? editorialStats.approvedReadings : 0,
+        approvedUnpublishedReadings: canDevotionals
+          ? editorialStats.approvedUnpublishedReadings
+          : 0,
+        pendingReviewReadings: canDevotionals
+          ? editorialStats.pendingReviewReadings
+          : 0,
+        needsRevisionReadings: canDevotionals
+          ? editorialStats.needsRevisionReadings
+          : 0,
+        missingDevotionalDates: canDevotionals
+          ? editorialStats.missingDevotionalDates
+          : 0,
+        completions: totalCompletionsCount,
+        bookmarks: totalBookmarksCount,
         subscriptionRevenueKobo: canPayments ? subscriptionRevenueKobo : 0,
         digitalRevenueKobo: canPayments || canDigital ? digitalRevenueKobo : 0,
         digitalAccessRevenueKobo:
@@ -838,6 +1140,15 @@ export function registerAdminRoutes(
         verifiedRevenueKobo: canFinanceMetrics ? verifiedRevenueKobo : 0,
         openInquiries: canNotifications
           ? inquiryRows.filter((i) => i.status === "new").length
+          : 0,
+        scheduledNotificationsCount: canNotifications
+          ? scheduledNotificationsCount
+          : 0,
+        pendingNotificationCampaignsCount: canNotifications
+          ? pendingNotificationCampaignsCount
+          : 0,
+        failedNotificationCampaignsCount: canNotifications
+          ? failedNotificationCampaignsCount
           : 0,
         bulkOrderInquiries: canBulk ? bulkOrderRows.length : 0,
         openBulkOrders: canBulk
@@ -895,9 +1206,7 @@ export function registerAdminRoutes(
         configured: pushProvider.configured,
         activePushDevicesCount,
         recentEvents: pushEventsAll.slice(0, 20),
-        campaigns: canNotifications
-          ? getAdminNotificationCampaigns(store, { limit: 15 }).items
-          : [],
+        campaigns: campaignsSummary.items,
       },
       engagement: canDevotionals
         ? entries
@@ -906,10 +1215,8 @@ export function registerAdminRoutes(
               id: e.id,
               date: e.date,
               title: e.title,
-              completions: progressRows.filter((p) => p.devotionalId === e.id)
-                .length,
-              bookmarks: bookmarkRows.filter((b) => b.devotionalId === e.id)
-                .length,
+              completions: progressByDevotional.get(e.id) ?? 0,
+              bookmarks: bookmarksByDevotional.get(e.id) ?? 0,
             }))
         : [],
       audit: auditRows,
@@ -998,16 +1305,21 @@ export function registerAdminRoutes(
   app.post(prefix + "/admin/devotionals", async (req) => {
     const admin = requireAdminPermission(req, "devotionals.write");
     const input = entrySchema.parse(req.body);
+    if (input.published && input.reviewStatus !== "approved") {
+      throw new HttpError(
+        400,
+        "Entries must be explicitly reviewed and marked Approved before publishing.",
+      );
+    }
     const now = new Date().toISOString();
-    const reviewStatus = input.published ? "approved" : input.reviewStatus;
 
     return sqlite.transaction(() => {
       const entry = db
         .insert(s.devotionals)
         .values({
           ...input,
-          reviewStatus,
-          reviewedAt: reviewStatus === "approved" ? now : null,
+          reviewStatus: input.reviewStatus,
+          reviewedAt: input.reviewStatus === "approved" ? now : null,
           createdAt: now,
           updatedAt: now,
         })
@@ -1016,7 +1328,7 @@ export function registerAdminRoutes(
       if (input.published) syncMonthlyTheme(input.date, input.theme);
       audit(
         admin,
-        `Created devotional ${input.date}: ${input.title} (${input.published ? "published" : "draft"})`,
+        `Created devotional ${input.date}: ${input.title} (${input.published ? "published" : "draft"}, ${input.reviewStatus})`,
         "devotional",
         entry.id,
       );
@@ -1028,23 +1340,39 @@ export function registerAdminRoutes(
     const admin = requireAdminPermission(req, "devotionals.write");
     const id = idOf(req);
     const input = entrySchema.parse(req.body);
+    if (input.published && input.reviewStatus !== "approved") {
+      throw new HttpError(
+        400,
+        "Entries must be explicitly reviewed and marked Approved before publishing.",
+      );
+    }
     const now = new Date().toISOString();
-    const reviewStatus = input.published ? "approved" : input.reviewStatus;
 
     return sqlite.transaction(() => {
+      const existing = db
+        .select()
+        .from(s.devotionals)
+        .where(eq(s.devotionals.id, id))
+        .get();
+      if (!existing) throw new HttpError(404, "Devotional not found.");
+
       const entry = db
         .update(s.devotionals)
         .set({
           ...input,
-          reviewStatus,
-          reviewedAt: reviewStatus === "approved" ? now : null,
+          reviewStatus: input.reviewStatus,
+          reviewedAt:
+            input.reviewStatus === "approved"
+              ? existing.reviewedAt || now
+              : input.reviewStatus === "needs_revision"
+                ? now
+                : null,
           updatedAt: now,
         })
         .where(eq(s.devotionals.id, id))
         .returning()
         .get();
 
-      if (!entry) throw new HttpError(404, "Devotional not found.");
       if (input.published) syncMonthlyTheme(input.date, input.theme);
       audit(
         admin,
@@ -1071,15 +1399,19 @@ export function registerAdminRoutes(
       if (!existing) throw new HttpError(404, "Devotional not found.");
 
       const nextPublished = input.published ?? existing.published;
-      const nextReviewStatus =
-        input.reviewStatus ??
-        (nextPublished ? "approved" : existing.reviewStatus);
+      const nextReviewStatus = input.reviewStatus ?? existing.reviewStatus;
 
       if (nextPublished) {
         if (nextReviewStatus === "needs_revision") {
           throw new HttpError(
             400,
             "Cannot publish an entry marked as needing revision.",
+          );
+        }
+        if (nextReviewStatus !== "approved") {
+          throw new HttpError(
+            400,
+            "Devotionals must be explicitly reviewed and marked Approved before publishing.",
           );
         }
         const complete = [
@@ -1306,18 +1638,397 @@ export function registerAdminRoutes(
     },
   );
 
+  app.get(prefix + "/admin/readers", async (req) => {
+    requireAdminPermission(req, "readers.read");
+    const query = (req.query || {}) as {
+      search?: string;
+      status?: string;
+      accessStatus?: string;
+      page?: string;
+      limit?: string;
+    };
+    const settings = getAppSettings(store);
+    const subscriptionsMap = getSubscriptionsMap(
+      store,
+      settings.renewalReminderDays,
+    );
+    const entitlementsMap = getDigitalEntitlementsMap(store, 2027);
+    let rows = buildEnrichedUsers(
+      settings,
+      subscriptionsMap,
+      entitlementsMap,
+    ).filter((u) => u.role === "reader");
+
+    if (query.status && query.status !== "all") {
+      rows = rows.filter((u) => u.status === query.status);
+    }
+    if (query.accessStatus && query.accessStatus !== "all") {
+      rows = rows.filter(
+        (u) => (u.onlineAccessStatus || "none") === query.accessStatus,
+      );
+    }
+    if (query.search?.trim()) {
+      const q = query.search.trim().toLowerCase();
+      rows = rows.filter((u) =>
+        `${u.name} ${u.email} ${u.planName || ""} ${u.onlineAccessStatus || ""} ${u.grantReason || ""}`
+          .toLowerCase()
+          .includes(q),
+      );
+    }
+
+    const total = rows.length;
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(query.limit) || 25));
+    const items = rows.slice((page - 1) * limit, page * limit);
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  });
+
+  app.get(prefix + "/admin/online-access", async (req) => {
+    const admin = requireAdminPermission(req, "overview.read");
+    if (
+      !adminHasPermission(admin, "digital_orders.read") &&
+      !adminHasPermission(admin, "payments.read")
+    ) {
+      throw new HttpError(403, "Insufficient administrator permissions.");
+    }
+    const query = (req.query || {}) as {
+      search?: string;
+      status?: string;
+      method?: string;
+      page?: string;
+      limit?: string;
+    };
+    const settings = getAppSettings(store);
+    const subscriptionsMap = getSubscriptionsMap(
+      store,
+      settings.renewalReminderDays,
+    );
+    const entitlementsMap = getDigitalEntitlementsMap(store, 2027);
+    const digitalPurchaseRows = buildDigitalPurchaseRows(
+      settings,
+      entitlementsMap,
+    );
+    const entitlementUsersWithPurchases = new Set(
+      digitalPurchaseRows.map((dp) => dp.userId),
+    );
+    const enrichedUsers = buildEnrichedUsers(
+      settings,
+      subscriptionsMap,
+      entitlementsMap,
+    );
+    const standaloneEntitlements = enrichedUsers
+      .filter(
+        (u) =>
+          u.digitalEntitlement && !entitlementUsersWithPurchases.has(u.id),
+      )
+      .map((u) => {
+        const ent = u.digitalEntitlement!;
+        return {
+          id: -ent.id,
+          userId: u.id,
+          userName: u.name,
+          email: u.email,
+          productCode: "digital_2027",
+          productName: "2027 Online Access (Complimentary)",
+          amountKobo: 0,
+          currency: "NGN",
+          reference: `COMP_${ent.id}`,
+          paymentMethod: "complimentary",
+          transferReference: "",
+          payerNote: ent.grantReason || "Complimentary grant",
+          status: "succeeded",
+          adminNotes: ent.grantReason || "",
+          verifiedAt: ent.grantedAt,
+          startsAt: ent.startsAt || ent.grantedAt,
+          expiresAt: ent.expiresAt,
+          createdAt: ent.grantedAt,
+          updatedAt: ent.updatedAt,
+          editionYear: 2027,
+          accessScope: ent.accessScope,
+          entitlementStatus: ent.status,
+          accessStatus: ent.status,
+          daysRemaining: ent.daysRemaining,
+          expiringSoon: ent.expiringSoon,
+          renewalCount: ent.renewalCount,
+          legacyPersistent: ent.legacyPersistent,
+          legacyReviewRequired: ent.legacyReviewRequired,
+        };
+      });
+
+    let rows = [...digitalPurchaseRows, ...standaloneEntitlements].sort((a, b) =>
+      b.updatedAt.localeCompare(a.updatedAt),
+    );
+
+    if (query.status && query.status !== "all") {
+      rows = rows.filter(
+        (r) =>
+          r.status === query.status || r.accessStatus === query.status,
+      );
+    }
+    if (query.method && query.method !== "all") {
+      rows = rows.filter((r) => r.paymentMethod === query.method);
+    }
+    if (query.search?.trim()) {
+      const q = query.search.trim().toLowerCase();
+      rows = rows.filter((r) =>
+        `${r.userName} ${r.email} ${r.reference} ${r.transferReference} ${r.payerNote}`
+          .toLowerCase()
+          .includes(q),
+      );
+    }
+
+    const total = rows.length;
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(query.limit) || 25));
+    return {
+      items: rows.slice((page - 1) * limit, page * limit),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  });
+
+  app.get(prefix + "/admin/payments", async (req) => {
+    requireAdminPermission(req, "payments.read");
+    const query = (req.query || {}) as {
+      search?: string;
+      status?: string;
+      kind?: string;
+      page?: string;
+      limit?: string;
+    };
+    const settings = getAppSettings(store);
+    const entitlementsMap = getDigitalEntitlementsMap(store, 2027);
+    const digitalPurchaseRows = buildDigitalPurchaseRows(
+      settings,
+      entitlementsMap,
+    );
+    const printedOrders = buildPrintedOrdersList();
+    const paymentRows = db
+      .select({
+        id: s.payments.id,
+        userId: s.payments.userId,
+        userName: s.users.name,
+        email: s.users.email,
+        planName: s.payments.planName,
+        amountKobo: s.payments.amountKobo,
+        currency: s.payments.currency,
+        reference: s.payments.reference,
+        provider: s.payments.provider,
+        status: s.payments.status,
+        renewalMode: s.payments.renewalMode,
+        verifiedAt: s.payments.verifiedAt,
+        createdAt: s.payments.createdAt,
+      })
+      .from(s.payments)
+      .innerJoin(s.users, eq(s.users.id, s.payments.userId))
+      .orderBy(desc(s.payments.createdAt))
+      .all();
+
+    let items = [
+      ...digitalPurchaseRows.map((dp) => ({
+        uid: `dp-${dp.id}`,
+        kind: "Online Access",
+        reference: dp.reference,
+        transferRef: dp.transferReference,
+        customer: dp.userName,
+        email: dp.email,
+        method:
+          dp.paymentMethod === "paystack"
+            ? "Paystack"
+            : dp.paymentMethod === "bank_transfer"
+              ? "Bank Transfer"
+              : "Complimentary",
+        amountKobo: dp.amountKobo,
+        currency: dp.currency,
+        status: dp.status,
+        verifiedAt: dp.verifiedAt,
+        createdAt: dp.createdAt,
+      })),
+      ...printedOrders.map((po) => ({
+        uid: `po-${po.id}`,
+        kind: "Printed Book",
+        reference: po.orderNumber,
+        transferRef: po.transferReference || po.paymentReference,
+        customer: po.fullName,
+        email: po.email,
+        method:
+          po.paymentMethod === "paystack"
+            ? "Paystack"
+            : po.paymentMethod === "bank_transfer"
+              ? "Bank Transfer"
+              : "Paystack",
+        amountKobo: po.finalTotalKobo ?? po.subtotalKobo,
+        currency: po.currency,
+        status: po.paymentStatus,
+        verifiedAt: po.paidAt,
+        createdAt: po.createdAt,
+      })),
+      ...paymentRows.map((p) => ({
+        uid: `sub-${p.id}`,
+        kind: "Legacy Membership",
+        reference: p.reference,
+        transferRef: "",
+        customer: p.userName,
+        email: p.email,
+        method: p.provider === "paystack" ? "Paystack" : "Complimentary",
+        amountKobo: p.amountKobo,
+        currency: p.currency,
+        status: p.status,
+        verifiedAt: p.verifiedAt,
+        createdAt: p.createdAt,
+      })),
+    ].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+    if (query.kind && query.kind !== "all") {
+      items = items.filter((item) => item.kind === query.kind);
+    }
+    if (query.status && query.status !== "all") {
+      items = items.filter((item) => item.status === query.status);
+    }
+    if (query.search?.trim()) {
+      const q = query.search.trim().toLowerCase();
+      items = items.filter((item) =>
+        `${item.reference} ${item.transferRef} ${item.customer} ${item.email} ${item.kind}`
+          .toLowerCase()
+          .includes(q),
+      );
+    }
+
+    const total = items.length;
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(query.limit) || 25));
+    return {
+      items: items.slice((page - 1) * limit, page * limit),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  });
+
+  app.get(prefix + "/admin/inquiries", async (req) => {
+    const admin = requireAdminPermission(req, "overview.read");
+    if (
+      !adminHasPermission(admin, "notifications.read") &&
+      !adminHasPermission(admin, "bulk_orders.read")
+    ) {
+      throw new HttpError(403, "Insufficient administrator permissions.");
+    }
+    const query = (req.query || {}) as {
+      search?: string;
+      status?: string;
+      page?: string;
+      limit?: string;
+    };
+    let rows = db
+      .select()
+      .from(s.inquiries)
+      .orderBy(desc(s.inquiries.createdAt))
+      .all();
+
+    if (query.status && query.status !== "all") {
+      rows = rows.filter((i) => i.status === query.status);
+    }
+    if (query.search?.trim()) {
+      const q = query.search.trim().toLowerCase();
+      rows = rows.filter((i) =>
+        `${i.name} ${i.email} ${i.inquiryType} ${i.deliveryLocation} ${i.message}`
+          .toLowerCase()
+          .includes(q),
+      );
+    }
+    const total = rows.length;
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(query.limit) || 25));
+    return {
+      items: rows.slice((page - 1) * limit, page * limit),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  });
+
+  app.get(prefix + "/admin/devotionals/summary", async (req) => {
+    requireAdminPermission(req, "devotionals.read");
+    const entries = db
+      .select({
+        date: s.devotionals.date,
+        published: s.devotionals.published,
+        reviewStatus: s.devotionals.reviewStatus,
+      })
+      .from(s.devotionals)
+      .orderBy(s.devotionals.date)
+      .all();
+    const existing2027Dates = new Set(
+      entries.filter((e) => e.date.startsWith("2027-")).map((e) => e.date),
+    );
+    const missingDates: string[] = [];
+    for (let i = 0; i < 365; i += 1) {
+      const iso = new Date(Date.UTC(2027, 0, 1 + i)).toISOString().slice(0, 10);
+      if (!existing2027Dates.has(iso)) missingDates.push(iso);
+    }
+    return {
+      ...buildEditorialStats(entries),
+      totalEntries: entries.length,
+      missingDates,
+    };
+  });
+
   app.get(prefix + "/admin/printed-orders", async (req) => {
     requireAdminPermission(req, "printed_orders.read");
-    const orders = db
-      .select()
-      .from(s.printedOrders)
-      .orderBy(desc(s.printedOrders.createdAt))
-      .all();
-    const items = db.select().from(s.printedOrderItems).all();
-    return orders.map((order) => ({
-      ...order,
-      items: items.filter((item) => item.orderId === order.id),
-    }));
+    const query = (req.query || {}) as {
+      search?: string;
+      status?: string;
+      paymentStatus?: string;
+      page?: string;
+      limit?: string;
+    };
+    const allOrders = buildPrintedOrdersList();
+    const hasPaginationOrFilter =
+      Boolean(query.page) ||
+      Boolean(query.limit) ||
+      Boolean(query.search?.trim()) ||
+      (Boolean(query.status) && query.status !== "all") ||
+      (Boolean(query.paymentStatus) && query.paymentStatus !== "all");
+    if (!hasPaginationOrFilter) {
+      return allOrders;
+    }
+
+    let rows = allOrders;
+    if (query.status && query.status !== "all") {
+      rows = rows.filter((o) => o.fulfillmentStatus === query.status);
+    }
+    if (query.paymentStatus && query.paymentStatus !== "all") {
+      rows = rows.filter((o) => o.paymentStatus === query.paymentStatus);
+    }
+    if (query.search?.trim()) {
+      const q = query.search.trim().toLowerCase();
+      rows = rows.filter((o) =>
+        `${o.orderNumber} ${o.fullName} ${o.email} ${o.city} ${o.state}`
+          .toLowerCase()
+          .includes(q),
+      );
+    }
+
+    const total = rows.length;
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(query.limit) || 25));
+    return {
+      items: rows.slice((page - 1) * limit, page * limit),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
   });
 
   app.get(prefix + "/admin/printed-orders/:id", async (req) => {

@@ -49,36 +49,29 @@ export type EnrichedSubscription = {
   } | null;
 };
 
-export function getSubscriptionDetails(
+type JoinedSubscriptionRow = {
+  id: number;
+  userId: number;
+  planId: number;
+  planName: string;
+  planMonths: number;
+  planAmountKobo: number;
+  accessType: string;
+  status: string;
+  startedAt: string;
+  expiresAt: string;
+  renewalMode: string;
+  cancelAtPeriodEnd: boolean;
+  grantReason: string;
+};
+
+function formatSubscriptionRow(
   store: Store,
-  userId: number,
-  reminderDays = 7,
+  row: JoinedSubscriptionRow,
+  reminderDays: number,
   referenceNowIso?: string,
-): EnrichedSubscription | null {
+): EnrichedSubscription {
   const { db } = store;
-  const row = db
-    .select({
-      id: s.subscriptions.id,
-      userId: s.subscriptions.userId,
-      planId: s.subscriptions.planId,
-      planName: s.plans.name,
-      planMonths: s.plans.months,
-      planAmountKobo: s.plans.amountKobo,
-      accessType: s.subscriptions.accessType,
-      status: s.subscriptions.status,
-      startedAt: s.subscriptions.startedAt,
-      expiresAt: s.subscriptions.expiresAt,
-      renewalMode: s.subscriptions.renewalMode,
-      cancelAtPeriodEnd: s.subscriptions.cancelAtPeriodEnd,
-      grantReason: s.subscriptions.grantReason,
-    })
-    .from(s.subscriptions)
-    .innerJoin(s.plans, eq(s.plans.id, s.subscriptions.planId))
-    .where(eq(s.subscriptions.userId, userId))
-    .get();
-
-  if (!row) return null;
-
   const nowIso = referenceNowIso || new Date().toISOString();
   const nowMs = new Date(nowIso).getTime();
   const expiresMs = new Date(row.expiresAt).getTime();
@@ -115,7 +108,7 @@ export function getSubscriptionDetails(
       dueSoon: false,
       expired: true,
       daysRemaining: 0,
-      message: `Your ${row.planName.toLowerCase()} membership expired on ${new Date(row.expiresAt).toLocaleDateString("en-GB")}. Renew to restore full access to all 2027 devotionals.`,
+      message: `Your ${row.planName.toLowerCase()} online access expired on ${new Date(row.expiresAt).toLocaleDateString("en-GB")}. Purchase 12-month access to restore full access to all 2027 devotionals.`,
     };
   } else if (active && daysRemaining <= reminderDays) {
     renewalReminder = {
@@ -123,8 +116,8 @@ export function getSubscriptionDetails(
       expired: false,
       daysRemaining,
       message: row.cancelAtPeriodEnd
-        ? `Your membership is scheduled to end in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} (${new Date(row.expiresAt).toLocaleDateString("en-GB")}). You will retain full access until then.`
-        : `Your ${row.planName.toLowerCase()} membership renews or expires in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} (${new Date(row.expiresAt).toLocaleDateString("en-GB")}).`,
+        ? `Your online access is scheduled to end in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} (${new Date(row.expiresAt).toLocaleDateString("en-GB")}). You will retain full access until then.`
+        : `Your ${row.planName.toLowerCase()} online access expires in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} (${new Date(row.expiresAt).toLocaleDateString("en-GB")}).`,
     };
   }
 
@@ -149,6 +142,72 @@ export function getSubscriptionDetails(
     daysRemaining,
     renewalReminder,
   };
+}
+
+export function getSubscriptionsMap(
+  store: Store,
+  reminderDays = 7,
+  referenceNowIso?: string,
+): Map<number, EnrichedSubscription> {
+  const rows = store.db
+    .select({
+      id: s.subscriptions.id,
+      userId: s.subscriptions.userId,
+      planId: s.subscriptions.planId,
+      planName: s.plans.name,
+      planMonths: s.plans.months,
+      planAmountKobo: s.plans.amountKobo,
+      accessType: s.subscriptions.accessType,
+      status: s.subscriptions.status,
+      startedAt: s.subscriptions.startedAt,
+      expiresAt: s.subscriptions.expiresAt,
+      renewalMode: s.subscriptions.renewalMode,
+      cancelAtPeriodEnd: s.subscriptions.cancelAtPeriodEnd,
+      grantReason: s.subscriptions.grantReason,
+    })
+    .from(s.subscriptions)
+    .innerJoin(s.plans, eq(s.plans.id, s.subscriptions.planId))
+    .all();
+
+  const map = new Map<number, EnrichedSubscription>();
+  for (const row of rows) {
+    map.set(
+      row.userId,
+      formatSubscriptionRow(store, row, reminderDays, referenceNowIso),
+    );
+  }
+  return map;
+}
+
+export function getSubscriptionDetails(
+  store: Store,
+  userId: number,
+  reminderDays = 7,
+  referenceNowIso?: string,
+): EnrichedSubscription | null {
+  const row = store.db
+    .select({
+      id: s.subscriptions.id,
+      userId: s.subscriptions.userId,
+      planId: s.subscriptions.planId,
+      planName: s.plans.name,
+      planMonths: s.plans.months,
+      planAmountKobo: s.plans.amountKobo,
+      accessType: s.subscriptions.accessType,
+      status: s.subscriptions.status,
+      startedAt: s.subscriptions.startedAt,
+      expiresAt: s.subscriptions.expiresAt,
+      renewalMode: s.subscriptions.renewalMode,
+      cancelAtPeriodEnd: s.subscriptions.cancelAtPeriodEnd,
+      grantReason: s.subscriptions.grantReason,
+    })
+    .from(s.subscriptions)
+    .innerJoin(s.plans, eq(s.plans.id, s.subscriptions.planId))
+    .where(eq(s.subscriptions.userId, userId))
+    .get();
+
+  if (!row) return null;
+  return formatSubscriptionRow(store, row, reminderDays, referenceNowIso);
 }
 
 export function hasSubscriptionAccess(
