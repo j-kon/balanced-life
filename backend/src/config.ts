@@ -72,6 +72,30 @@ export const getEnvConfig = () => {
     process.env.EMAIL_WEBHOOK_SECRET?.trim() || "";
   const emailDomainVerified = process.env.EMAIL_DOMAIN_VERIFIED === "true";
 
+  const parseQuotaInt = (raw: string | undefined, fallback: number, min: number) => {
+    const parsed = Number(raw?.trim());
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min) {
+      return fallback;
+    }
+    return parsed;
+  };
+
+  // Resend Free tier defaults: 100 emails/day, 3,000 emails/month, 20/day reserved for resets & security
+  const emailDailyLimit = parseQuotaInt(process.env.EMAIL_DAILY_LIMIT, 100, 1);
+  const emailMonthlyLimit = parseQuotaInt(
+    process.env.EMAIL_MONTHLY_LIMIT,
+    3000,
+    emailDailyLimit,
+  );
+  const emailTransactionalReserve = Math.min(
+    emailDailyLimit,
+    parseQuotaInt(
+      process.env.EMAIL_TRANSACTIONAL_RESERVE,
+      Math.min(20, emailDailyLimit),
+      0,
+    ),
+  );
+
   const emailConfigured =
     (emailProvider === "resend" && Boolean(emailApiKey)) ||
     (emailProvider === "postmark" && Boolean(emailApiKey)) ||
@@ -116,6 +140,9 @@ export const getEnvConfig = () => {
       fromName: emailFromName,
       replyTo: emailReplyTo,
       domainVerified: emailDomainVerified,
+      dailyLimit: emailDailyLimit,
+      monthlyLimit: emailMonthlyLimit,
+      transactionalReserve: emailTransactionalReserve,
       sesRegion: emailSesRegion,
       sesAccessKeyId: emailSesAccessKeyId,
       sesSecretAccessKey: emailSesSecretAccessKey,

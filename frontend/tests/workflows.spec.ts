@@ -2323,11 +2323,28 @@ test.describe("End-to-End Production Workflows", () => {
       .getByRole("button", { name: /Verify & enter dashboard/i })
       .click();
     await expect(adminPage).toHaveURL(/5174\/dashboard$/);
+    await expect(
+      adminPage.getByTestId("dashboard-email-status-panel"),
+    ).toBeVisible();
+    await expect(
+      adminPage.getByText(/Daily Free-Tier Quota/i),
+    ).toBeVisible();
+    await expect(
+      adminPage.getByText(/Monthly Free-Tier Usage/i),
+    ).toBeVisible();
 
     await adminPage.getByRole("link", { name: /^Email Management$/i }).click();
     await expect(adminPage).toHaveURL(/5174\/email$/);
     await expect(
       adminPage.getByText(/Sender Domain DNS Unverified/i),
+    ).toBeVisible();
+    await adminPage
+      .getByRole("button", { name: /Process Email Queue/i })
+      .click();
+    await expect(
+      adminPage
+        .getByText(/Email worker completed:.*reminders queued/i)
+        .first(),
     ).toBeVisible();
 
     // Capture desktop & mobile PNG screenshots of key rendered HTML email templates

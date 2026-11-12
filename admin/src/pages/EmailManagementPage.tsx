@@ -54,6 +54,24 @@ type EmailOverview = {
     bounced: number;
     suppressed: number;
     suppressedReaders: number;
+    pausedCampaigns?: number;
+  };
+  quota?: {
+    dailyLimit: number;
+    monthlyLimit: number;
+    transactionalReserve: number;
+    optionalDailyLimit: number;
+    sentToday: number;
+    transactionalSentToday: number;
+    optionalSentToday: number;
+    sentThisMonth: number;
+    remainingDaily: number;
+    remainingMonthly: number;
+    remainingTransactional: number;
+    remainingOptional: number;
+    optionalPausedByQuota: boolean;
+    dailyExhausted: boolean;
+    nextResetAt: string;
   };
   recentQueue: Array<{
     id: number;
@@ -91,6 +109,7 @@ type EmailOverview = {
     subject: string;
     actionPath: string;
     status: string;
+    pauseReason?: string;
     scheduledFor: string | null;
     eligibleCount: number;
     skippedOptOutCount: number;
@@ -211,6 +230,9 @@ export function EmailManagementPage({
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelError, setCancelError] = useState("");
   const [retryingQueueId, setRetryingQueueId] = useState<number | null>(null);
+  const [resumingCampaignId, setResumingCampaignId] = useState<number | null>(
+    null,
+  );
 
   const loadOverview = useCallback(async () => {
     setLoading(true);
@@ -402,19 +424,52 @@ export function EmailManagementPage({
       const res = await api<{
         ok: boolean;
         result: {
-          queue: { sent: number; retried: number; failed: number };
-          campaignsReleased: number;
-          remindersQueued: number;
+          reminders: { generatedCount: number };
+          campaigns: {
+            checkedCampaigns: number;
+            enqueuedEmails: number;
+            pausedCampaigns?: number;
+          };
+          delivery: {
+            sentCount: number;
+            retryingCount: number;
+            failedCount: number;
+            pausedByQuotaCount?: number;
+          };
         };
       }>("/admin/email/run-worker", {});
+      const pausedSuffix = res.result.delivery.pausedByQuotaCount
+        ? `, ${res.result.delivery.pausedByQuotaCount} paused by quota`
+        : "";
       notify(
-        `Email worker completed: ${res.result.queue.sent} sent, ${res.result.queue.retried} retried, ${res.result.queue.failed} failed, ${res.result.remindersQueued} reminders queued.`,
+        `Email worker completed: ${res.result.delivery.sentCount} sent, ${res.result.delivery.retryingCount} retrying, ${res.result.delivery.failedCount} failed, ${res.result.reminders.generatedCount} reminders queued${pausedSuffix}.`,
       );
       await loadOverview();
     } catch (err) {
       setActionError((err as Error).message);
     } finally {
       setWorkerBusy(false);
+    }
+  }
+
+  async function handleResumeCampaign(id: number) {
+    setActionError("");
+    setResumingCampaignId(id);
+    try {
+      const res = await api<{
+        ok: boolean;
+        campaign: { status: string; pauseReason?: string; queuedCount?: number };
+      }>(`/admin/email/campaigns/${id}/resume`, {});
+      notify(
+        res.campaign.status === "paused"
+          ? `Campaign #${id} remains paused (${res.campaign.pauseReason || "free-tier quota exhausted"}).`
+          : `Campaign #${id} resumed (${res.campaign.queuedCount ?? 0} queued).`,
+      );
+      await loadOverview();
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setResumingCampaignId(null);
     }
   }
 
@@ -550,7 +605,7 @@ export function EmailManagementPage({
         </div>
 
         <div className="panel stack">
-          <h3>Email Queue Health</h3>
+          <h3>Email Queue Health &amp; Free-Tier Quota</h3>
           <div className="kpis">
             <div className="kpi">
               <span>Sent</span>
@@ -572,10 +627,44 @@ export function EmailManagementPage({
                 {overview.counts.bounced + overview.counts.suppressedReaders}
               </strong>
             </div>
+            {overview.quota && (
+              <>
+                <div className="kpi">
+                  <span>Daily Free-Tier Quota</span>
+                  <strong>
+                    {overview.quota.sentToday} / {overview.quota.dailyLimit}
+                  </strong>
+                  <small className="muted">
+                    {overview.quota.transactionalReserve} reserved for resets
+                    · {overview.quota.remainingOptional} optional left
+                  </small>
+                </div>
+                <div className="kpi">
+                  <span>Monthly Quota</span>
+                  <strong>
+                    {overview.quota.sentThisMonth} /{" "}
+                    {overview.quota.monthlyLimit}
+                  </strong>
+                  <small className="muted">
+                    {overview.quota.remainingMonthly} remaining this month
+                  </small>
+                </div>
+              </>
+            )}
           </div>
+          {overview.quota?.optionalPausedByQuota && (
+            <div className="alert warn">
+              Optional email campaigns are paused because today&apos;s or this
+              month&apos;s free-tier campaign budget is exhausted. Remaining
+              capacity stays reserved strictly for password-reset codes and
+              security emails.
+            </div>
+          )}
           <p className="muted small">
-            Bounces and spam complaints automatically suppress optional and
-            bouncing emails without altering Web Push or In-App alerts.
+            Transactional emails (password resets and security codes) always
+            process before optional campaigns. Bounces and spam complaints
+            automatically suppress failing addresses without altering Web Push
+            or In-App alerts.
           </p>
         </div>
       </div>
@@ -974,7 +1063,22 @@ export function EmailManagementPage({
                       </div>
                     </td>
                     <td>
-                      <span className="badge">{c.status}</span>
+                      <span
+                        className={`badge ${
+                          c.status === "paused" || c.status === "failed"
+                            ? "warn"
+                            : c.status === "completed"
+                              ? "success"
+                              : ""
+                        }`}
+                      >
+                        {c.status}
+                      </span>
+                      {c.pauseReason ? (
+                        <div className="muted small" style={{ maxWidth: "240px", marginTop: "0.25rem" }}>
+                          {c.pauseReason}
+                        </div>
+                      ) : null}
                     </td>
                     <td>
                       {c.eligibleCount} eligible / {c.skippedOptOutCount}{" "}
@@ -989,17 +1093,34 @@ export function EmailManagementPage({
                         : new Date(c.createdAt).toLocaleString()}
                     </td>
                     <td>
-                      {canWrite && c.status === "scheduled" ? (
-                        <button
-                          type="button"
-                          className="button outline small"
-                          onClick={() => {
-                            setCancelError("");
-                            setCancelTarget(c);
-                          }}
-                        >
-                          Cancel
-                        </button>
+                      {canWrite &&
+                      (c.status === "scheduled" ||
+                        c.status === "paused" ||
+                        c.status === "enqueueing") ? (
+                        <div className="row" style={{ gap: "0.4rem", justifyContent: "flex-start" }}>
+                          {c.status === "paused" && (
+                            <button
+                              type="button"
+                              className="button outline small"
+                              disabled={resumingCampaignId === c.id}
+                              onClick={() => void handleResumeCampaign(c.id)}
+                            >
+                              {resumingCampaignId === c.id
+                                ? "Resuming..."
+                                : "Resume"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="button outline small"
+                            onClick={() => {
+                              setCancelError("");
+                              setCancelTarget(c);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       ) : (
                         <span className="muted small">—</span>
                       )}

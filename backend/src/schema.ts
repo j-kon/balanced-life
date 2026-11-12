@@ -689,6 +689,7 @@ export const emailCampaigns = sqliteTable("email_campaigns", {
   actionUrl: text("action_url").notNull().default("/dashboard"),
   idempotencyKey: text("idempotency_key").notNull().unique(),
   status: text("status").notNull().default("queued"),
+  pauseReason: text("pause_reason").notNull().default(""),
   scheduledFor: text("scheduled_for"),
   eligibleCount: integer("eligible_count").notNull().default(0),
   skippedOptOutCount: integer("skipped_opt_out_count").notNull().default(0),

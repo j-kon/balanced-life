@@ -7,7 +7,25 @@ export type EmailDeliveryResult = {
   provider: string;
   messageId?: string;
   error?: string;
+  statusCode?: number;
+  retryable?: boolean;
+  rateLimited?: boolean;
 };
+
+export function sanitizeProviderError(
+  raw: unknown,
+  fallback = "Email delivery was not accepted by the provider.",
+): string {
+  const msg = String(raw || "")
+    .replace(/re_[a-zA-Z0-9_]{8,}/g, "[REDACTED_RESEND_KEY]")
+    .replace(/sk_(live|test)_[a-zA-Z0-9]+/gi, "[REDACTED_KEY]")
+    .replace(/Bearer\s+[a-zA-Z0-9._-]+/gi, "Bearer [REDACTED]")
+    .replace(/AKIA[0-9A-Z]{16}/g, "[REDACTED_AWS_KEY]")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!msg) return fallback;
+  return msg.slice(0, 280);
+}
 
 export type OutboundEmailMessage = {
   to: string;
@@ -207,6 +225,8 @@ export class ResendEmailAdapter extends BaseEmailAdapter {
         delivered: false,
         provider: this.providerName,
         error: "Resend API key is not configured.",
+        statusCode: 503,
+        retryable: false,
       };
     }
 
@@ -222,6 +242,7 @@ export class ResendEmailAdapter extends BaseEmailAdapter {
       const response = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers,
+        signal: AbortSignal.timeout(12_000),
         body: JSON.stringify({
           from: this.formattedFrom(),
           to: [payload.to],
@@ -236,33 +257,98 @@ export class ResendEmailAdapter extends BaseEmailAdapter {
       const body = (await response.json().catch(() => ({}))) as {
         id?: string;
         message?: string;
+        name?: string;
         error?: { message?: string };
       };
 
       if (!response.ok) {
+        const rawMsg = body?.message || body?.error?.message || "";
+        const safeDetail = sanitizeProviderError(
+          rawMsg,
+          `Resend responded with HTTP ${response.status}.`,
+        );
+
+        if (response.status === 401) {
+          return {
+            delivered: false,
+            provider: this.providerName,
+            statusCode: 401,
+            retryable: false,
+            error:
+              "Resend rejected the API key (HTTP 401). Check EMAIL_API_KEY configuration.",
+          };
+        }
+        if (response.status === 403) {
+          return {
+            delivered: false,
+            provider: this.providerName,
+            statusCode: 403,
+            retryable: false,
+            error: `Resend rejected the sender or recipient (HTTP 403): ${safeDetail}`,
+          };
+        }
+        if (response.status === 429) {
+          return {
+            delivered: false,
+            provider: this.providerName,
+            statusCode: 429,
+            retryable: true,
+            rateLimited: true,
+            error: `Resend free-tier sending or rate limit reached (HTTP 429): ${safeDetail}`,
+          };
+        }
+        if (response.status >= 500) {
+          return {
+            delivered: false,
+            provider: this.providerName,
+            statusCode: response.status,
+            retryable: true,
+            error: `Resend service is temporarily unavailable (HTTP ${response.status}).`,
+          };
+        }
         return {
           delivered: false,
           provider: this.providerName,
+          statusCode: response.status,
+          retryable: false,
+          error: safeDetail,
+        };
+      }
+
+      const acceptedId =
+        typeof body?.id === "string" ? body.id.trim() : "";
+      if (!acceptedId) {
+        return {
+          delivered: false,
+          provider: this.providerName,
+          statusCode: response.status,
+          retryable: true,
           error:
-            body?.message ||
-            body?.error?.message ||
-            `Resend responded with HTTP ${response.status}.`,
+            "Resend did not return an accepted email ID. The email was not confirmed as sent.",
         };
       }
 
       return {
         delivered: true,
         provider: this.providerName,
-        messageId: body.id,
+        statusCode: response.status,
+        messageId: acceptedId,
       };
     } catch (error) {
+      const isAbort =
+        error instanceof Error &&
+        (error.name === "TimeoutError" || error.name === "AbortError");
       return {
         delivered: false,
         provider: this.providerName,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Resend delivery failed.",
+        statusCode: 504,
+        retryable: true,
+        error: isAbort
+          ? "Resend request timed out before confirming delivery."
+          : sanitizeProviderError(
+              error instanceof Error ? error.message : "",
+              "Network error while contacting Resend.",
+            ),
       };
     }
   }

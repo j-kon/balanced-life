@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   CreditCard,
   Gift,
+  Mail,
   Package,
   PenLine,
   Settings,
@@ -25,6 +26,7 @@ const TAB_MAP: Record<string, AdminSectionId> = {
   "bulk-orders": "Bulk Orders",
   devotionals: "Devotionals",
   notifications: "Notifications",
+  email: "Email Management",
   readers: "Readers",
 };
 
@@ -335,6 +337,15 @@ export function DashboardOverview({
               <Settings size={15} /> Pricing &amp; Delivery Settings
             </button>
           )}
+          {canNotifications && (
+            <button
+              type="button"
+              className="button outline small"
+              onClick={() => onNavigate("Email Management")}
+            >
+              <Mail size={15} /> Email Management
+            </button>
+          )}
           <button
             type="button"
             className="button outline small"
@@ -344,6 +355,114 @@ export function DashboardOverview({
           </button>
         </div>
       </div>
+
+      {data.emailStatusSummary && (
+        <div
+          className="panel stack"
+          data-testid="dashboard-email-status-panel"
+        >
+          <div className="row" style={{ alignItems: "center", gap: "0.75rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+              <Mail size={18} />
+              <div>
+                <h3 style={{ margin: 0 }}>
+                  Email Delivery Configuration &amp; Queue Status
+                </h3>
+                <small className="muted">
+                  Provider:{" "}
+                  <strong>{data.emailStatusSummary.configuration.provider}</strong>{" "}
+                  · Sender:{" "}
+                  <code>
+                    {data.emailStatusSummary.configuration.fromAddress}
+                  </code>{" "}
+                  ·{" "}
+                  {data.emailStatusSummary.configuration.domainVerified
+                    ? "Sender domain verified"
+                    : "Sender domain verification pending"}
+                </small>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "0.45rem", alignItems: "center", flexWrap: "wrap" }}>
+              <span
+                className={`badge ${data.emailStatusSummary.configuration.configured ? "success" : "warn"}`}
+              >
+                {data.emailStatusSummary.configuration.configured
+                  ? "Provider Ready"
+                  : "Provider Not Configured"}
+              </span>
+              {data.emailStatusSummary.quota.optionalPausedByQuota && (
+                <span className="badge warn">Optional Campaigns Paused</span>
+              )}
+              {canNotifications && (
+                <button
+                  type="button"
+                  className="button outline small"
+                  onClick={() => onNavigate("Email Management")}
+                >
+                  Open Email Management
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div
+            className="cards-grid"
+            style={{
+              gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))",
+              gap: "0.75rem",
+            }}
+          >
+            <div
+              className="card"
+              style={{ padding: "0.85rem 1rem", background: "var(--surface-alt)" }}
+            >
+              <small className="muted">Daily Free-Tier Quota</small>
+              <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "0.2rem" }}>
+                {data.emailStatusSummary.quota.sentToday} /{" "}
+                {data.emailStatusSummary.quota.dailyLimit}
+              </div>
+              <small className="muted">
+                {data.emailStatusSummary.quota.transactionalReserve} reserved for
+                resets &amp; security ·{" "}
+                {data.emailStatusSummary.quota.remainingOptional} optional left
+              </small>
+            </div>
+
+            <div
+              className="card"
+              style={{ padding: "0.85rem 1rem", background: "var(--surface-alt)" }}
+            >
+              <small className="muted">Monthly Free-Tier Usage</small>
+              <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "0.2rem" }}>
+                {data.emailStatusSummary.quota.sentThisMonth} /{" "}
+                {data.emailStatusSummary.quota.monthlyLimit}
+              </div>
+              <small className="muted">
+                {data.emailStatusSummary.quota.remainingMonthly} remaining this
+                month
+              </small>
+            </div>
+
+            <div
+              className="card"
+              style={{ padding: "0.85rem 1rem", background: "var(--surface-alt)" }}
+            >
+              <small className="muted">Queue &amp; Delivery</small>
+              <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "0.2rem" }}>
+                {data.emailStatusSummary.counts.sent} sent ·{" "}
+                {data.emailStatusSummary.counts.pending +
+                  data.emailStatusSummary.counts.retrying}{" "}
+                queued
+              </div>
+              <small className="muted">
+                {data.emailStatusSummary.counts.failed} failed ·{" "}
+                {data.emailStatusSummary.counts.pausedCampaigns} paused
+                campaigns
+              </small>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Permission-Scoped Charts Grid */}
       {(canFinance || canPrinted || canReaders) && (

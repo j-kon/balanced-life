@@ -1,11 +1,15 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { and, desc, eq, inArray, lte, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import type { Store } from "../db.js";
 import * as s from "../schema.js";
 import { getEnvConfig } from "../config.js";
 import { HttpError } from "../errors.js";
 import { logAdminAudit, publicUser, type AdminActor } from "../auth.js";
-import type { EmailDeliveryResult, EmailService } from "./email.js";
+import {
+  sanitizeProviderError,
+  type EmailDeliveryResult,
+  type EmailService,
+} from "./email.js";
 import {
   renderEmailTemplate,
   sanitizePlainText,
@@ -41,6 +45,134 @@ export type OptionalEmailPreferenceKey =
   | "community_updates"
   | "expiry_reminder"
   | "all_optional";
+
+export type EmailQuotaOverrides = {
+  dailyLimit?: number;
+  monthlyLimit?: number;
+  transactionalReserve?: number;
+};
+
+export type EmailQuotaStatus = {
+  dailyLimit: number;
+  monthlyLimit: number;
+  transactionalReserve: number;
+  optionalDailyLimit: number;
+  sentToday: number;
+  transactionalSentToday: number;
+  optionalSentToday: number;
+  sentThisMonth: number;
+  remainingDaily: number;
+  remainingMonthly: number;
+  remainingTransactional: number;
+  remainingOptional: number;
+  optionalPausedByQuota: boolean;
+  dailyExhausted: boolean;
+  dayStartIso: string;
+  nextResetAt: string;
+};
+
+export function getEmailQuotaStatus(
+  store: Store,
+  overrides: EmailQuotaOverrides = {},
+  now: Date = new Date(),
+): EmailQuotaStatus {
+  const envEmail = getEnvConfig().email;
+  const dailyLimit =
+    typeof overrides.dailyLimit === "number" && overrides.dailyLimit >= 1
+      ? Math.floor(overrides.dailyLimit)
+      : envEmail.dailyLimit;
+  const monthlyLimit =
+    typeof overrides.monthlyLimit === "number" && overrides.monthlyLimit >= 1
+      ? Math.max(dailyLimit, Math.floor(overrides.monthlyLimit))
+      : Math.max(dailyLimit, envEmail.monthlyLimit);
+  const rawReserve =
+    typeof overrides.transactionalReserve === "number" &&
+    overrides.transactionalReserve >= 0
+      ? Math.floor(overrides.transactionalReserve)
+      : envEmail.transactionalReserve;
+  const transactionalReserve = Math.min(dailyLimit, rawReserve);
+
+  const dayStartIso = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0),
+  ).toISOString();
+  const nextResetAt = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() + 1,
+      0,
+      0,
+      0,
+      0,
+    ),
+  ).toISOString();
+  const monthStartIso = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0),
+  ).toISOString();
+
+  const monthSent = store.db
+    .select({
+      channelKind: s.emailQueue.channelKind,
+      sentAt: s.emailQueue.sentAt,
+    })
+    .from(s.emailQueue)
+    .where(
+      and(
+        eq(s.emailQueue.status, "sent"),
+        gte(s.emailQueue.sentAt, monthStartIso),
+      ),
+    )
+    .all();
+
+  let sentToday = 0;
+  let transactionalSentToday = 0;
+  let optionalSentToday = 0;
+  for (const row of monthSent) {
+    if (row.sentAt && row.sentAt >= dayStartIso) {
+      sentToday++;
+      if (row.channelKind === "transactional") {
+        transactionalSentToday++;
+      } else {
+        optionalSentToday++;
+      }
+    }
+  }
+  const sentThisMonth = monthSent.length;
+
+  const optionalDailyLimit = Math.max(0, dailyLimit - transactionalReserve);
+  const optionalMonthlyLimit = Math.max(0, monthlyLimit - transactionalReserve);
+  const remainingDaily = Math.max(0, dailyLimit - sentToday);
+  const remainingMonthly = Math.max(0, monthlyLimit - sentThisMonth);
+  const remainingTransactional = Math.min(remainingDaily, remainingMonthly);
+  const remainingOptionalDaily = Math.max(0, optionalDailyLimit - sentToday);
+  const remainingOptionalMonthly = Math.max(
+    0,
+    optionalMonthlyLimit - sentThisMonth,
+  );
+  const remainingOptional = Math.min(
+    remainingOptionalDaily,
+    remainingOptionalMonthly,
+  );
+
+  return {
+    dailyLimit,
+    monthlyLimit,
+    transactionalReserve,
+    optionalDailyLimit,
+    sentToday,
+    transactionalSentToday,
+    optionalSentToday,
+    sentThisMonth,
+    remainingDaily,
+    remainingMonthly,
+    remainingTransactional,
+    remainingOptional,
+    optionalPausedByQuota: remainingOptional <= 0,
+    dailyExhausted: remainingDaily <= 0 || remainingMonthly <= 0,
+    dayStartIso,
+    nextResetAt,
+  };
+}
 
 const SENSITIVE_EMAIL_PATTERNS = [
   /sk_(live|test)_[a-zA-Z0-9]+/i,
@@ -433,6 +565,64 @@ export function enqueueEmail<T extends EmailTemplateId>(
   return row ?? existing ?? null;
 }
 
+function pauseCampaignForQuota(
+  store: Store,
+  campaignId: number,
+  reason: string,
+  nowIso: string,
+) {
+  store.db
+    .update(s.emailCampaigns)
+    .set({
+      status: "paused",
+      pauseReason: reason.slice(0, 300),
+      updatedAt: nowIso,
+    })
+    .where(
+      and(
+        eq(s.emailCampaigns.id, campaignId),
+        inArray(s.emailCampaigns.status, ["scheduled", "enqueueing", "sending"]),
+      ),
+    )
+    .run();
+}
+
+function deferQueueRowForQuota(
+  store: Store,
+  rowId: number,
+  nextAttemptAt: string,
+  providerName: string,
+  reason: string,
+  nowIso: string,
+) {
+  store.sqlite.transaction(() => {
+    store.db
+      .update(s.emailQueue)
+      .set({
+        status: "pending",
+        lockedUntil: null,
+        nextAttemptAt,
+        providerName,
+        lastError: reason.slice(0, 400),
+        updatedAt: nowIso,
+      })
+      .where(eq(s.emailQueue.id, rowId))
+      .run();
+
+    store.db
+      .insert(s.emailDeliveryEvents)
+      .values({
+        emailQueueId: rowId,
+        eventType: "paused_quota",
+        providerName,
+        providerEventId: "",
+        detail: reason.slice(0, 400),
+        createdAt: nowIso,
+      })
+      .run();
+  })();
+}
+
 export async function sendImmediateTransactionalEmail<
   T extends EmailTemplateId,
 >(
@@ -448,26 +638,47 @@ export async function sendImmediateTransactionalEmail<
     payload: EmailTemplatePayloads[T];
     dedupeKey: string;
     redactCodeInAudit?: boolean;
+    quotaOverrides?: EmailQuotaOverrides;
+    now?: Date;
   },
 ): Promise<EmailDeliveryResult> {
   const normalizedEmail = String(input.recipientEmail || "")
     .trim()
     .toLowerCase();
-  const nowIso = new Date().toISOString();
+  const now = input.now || new Date();
+  const nowIso = now.toISOString();
   const rendered = renderEmailTemplate(input.templateId, input.payload);
 
-  const result = await emailService.sendEmail({
-    to: normalizedEmail,
-    subject: rendered.subject,
-    html: rendered.html,
-    text: rendered.text,
-    templateId: input.templateId,
-    category: "transactional",
-    idempotencyKey: input.dedupeKey,
-  });
+  const quota = getEmailQuotaStatus(store, input.quotaOverrides, now);
+  const result: EmailDeliveryResult =
+    quota.remainingTransactional <= 0
+      ? {
+          delivered: false,
+          provider: emailService.providerName || "unconfigured",
+          statusCode: 429,
+          retryable: true,
+          rateLimited: true,
+          error:
+            "Daily email sending limit reached. Please wait until the quota resets or contact support.",
+        }
+      : await emailService.sendEmail({
+          to: normalizedEmail,
+          subject: rendered.subject,
+          html: rendered.html,
+          text: rendered.text,
+          templateId: input.templateId,
+          category: "transactional",
+          idempotencyKey: input.dedupeKey,
+        });
 
   const providerName =
     result.provider || emailService.providerName || "unconfigured";
+  const safeError = result.delivered
+    ? ""
+    : sanitizeProviderError(
+        result.error,
+        "Email delivery was rejected by the provider.",
+      );
 
   const redactBody =
     input.redactCodeInAudit || input.templateId === "password_reset_code";
@@ -499,7 +710,7 @@ export async function sendImmediateTransactionalEmail<
         maxAttempts: 1,
         nextAttemptAt: nowIso,
         lockedUntil: null,
-        lastError: result.error || "",
+        lastError: safeError,
         sentAt: result.delivered ? nowIso : null,
         bouncedAt: null,
         complainedAt: null,
@@ -518,7 +729,7 @@ export async function sendImmediateTransactionalEmail<
           eventType: result.delivered ? "sent" : "failed",
           providerName,
           providerEventId: result.messageId || "",
-          detail: result.error || "",
+          detail: safeError,
           createdAt: nowIso,
         })
         .run();
@@ -529,6 +740,7 @@ export async function sendImmediateTransactionalEmail<
 
   return {
     ...result,
+    error: result.delivered ? undefined : safeError,
     provider: providerName,
   };
 }
@@ -540,6 +752,7 @@ export async function processEmailQueueBatch(
     batchSize?: number;
     now?: Date;
     defaultAppBaseUrl?: string;
+    quotaOverrides?: EmailQuotaOverrides;
   } = {},
 ) {
   const now = options.now || new Date();
@@ -563,7 +776,11 @@ export async function processEmailQueueBatch(
           ),
         ),
       )
-      .orderBy(s.emailQueue.nextAttemptAt, s.emailQueue.id)
+      .orderBy(
+        sql`CASE WHEN ${s.emailQueue.channelKind} = 'transactional' THEN 0 ELSE 1 END`,
+        s.emailQueue.nextAttemptAt,
+        s.emailQueue.id,
+      )
       .limit(batchSize)
       .all();
 
@@ -585,6 +802,8 @@ export async function processEmailQueueBatch(
   let retryingCount = 0;
   let failedCount = 0;
   let suppressedCount = 0;
+  let pausedByQuotaCount = 0;
+  let optionalQuotaExhausted = false;
 
   for (const row of claimed) {
     const prefKey = preferenceKeyFromChannelKind(row.channelKind);
@@ -638,6 +857,45 @@ export async function processEmailQueueBatch(
       continue;
     }
 
+    const liveQuota = getEmailQuotaStatus(store, options.quotaOverrides, now);
+    const providerLabel = emailService.providerName || "unconfigured";
+
+    if (!isOptional && liveQuota.remainingTransactional <= 0) {
+      const updateNow = new Date().toISOString();
+      const pauseReason =
+        "Daily sending limit reached; transactional email deferred until quota resets.";
+      deferQueueRowForQuota(
+        store,
+        row.id,
+        liveQuota.nextResetAt,
+        providerLabel,
+        pauseReason,
+        updateNow,
+      );
+      pausedByQuotaCount++;
+      continue;
+    }
+
+    if (isOptional && (optionalQuotaExhausted || liveQuota.remainingOptional <= 0)) {
+      const updateNow = new Date().toISOString();
+      const pauseReason =
+        "Paused: daily optional email sending capacity exhausted; password-reset and security email capacity remains reserved.";
+      deferQueueRowForQuota(
+        store,
+        row.id,
+        liveQuota.nextResetAt,
+        providerLabel,
+        pauseReason,
+        updateNow,
+      );
+      if (row.campaignId) {
+        pauseCampaignForQuota(store, row.campaignId, pauseReason, updateNow);
+      }
+      optionalQuotaExhausted = true;
+      pausedByQuotaCount++;
+      continue;
+    }
+
     const appBaseUrl = (
       options.defaultAppBaseUrl || "https://cossyteens.com"
     ).replace(/\/+$/, "");
@@ -675,7 +933,7 @@ export async function processEmailQueueBatch(
             status: "sent",
             attempts: row.attempts + 1,
             lockedUntil: null,
-            sentAt: finishedIso,
+            sentAt: nowIso,
             providerName,
             providerMessageId: result.messageId || "",
             lastError: "",
@@ -708,17 +966,32 @@ export async function processEmailQueueBatch(
         }
       })();
       sentCount++;
+    } else if (isOptional && result.rateLimited) {
+      const pauseReason = `Paused after provider rate/quota limit (${sanitizeProviderError(result.error)}); transactional priority preserved.`;
+      deferQueueRowForQuota(
+        store,
+        row.id,
+        liveQuota.nextResetAt,
+        providerName,
+        pauseReason,
+        finishedIso,
+      );
+      if (row.campaignId) {
+        pauseCampaignForQuota(store, row.campaignId, pauseReason, finishedIso);
+      }
+      optionalQuotaExhausted = true;
+      pausedByQuotaCount++;
     } else {
       const nextAttempts = row.attempts + 1;
-      const exhausted = nextAttempts >= row.maxAttempts;
+      const exhausted = result.retryable === false || nextAttempts >= row.maxAttempts;
       const delayMs =
         RETRY_BACKOFF_MS[
           Math.min(nextAttempts - 1, RETRY_BACKOFF_MS.length - 1)
         ] || 120 * 60_000;
       const nextAttemptAt = new Date(now.getTime() + delayMs).toISOString();
-      const errorDetail = String(result.error || "Email delivery error").slice(
-        0,
-        400,
+      const errorDetail = sanitizeProviderError(
+        result.error,
+        "Email delivery error",
       );
 
       store.sqlite.transaction(() => {
@@ -769,12 +1042,33 @@ export async function processEmailQueueBatch(
     }
   }
 
+  const finalQuota = getEmailQuotaStatus(store, options.quotaOverrides, now);
+  if (finalQuota.remainingOptional <= 0) {
+    const activeCampaigns = store.db
+      .select({ id: s.emailCampaigns.id })
+      .from(s.emailCampaigns)
+      .where(inArray(s.emailCampaigns.status, ["enqueueing", "sending"]))
+      .all();
+    const finishPauseIso = new Date().toISOString();
+    for (const ac of activeCampaigns) {
+      syncCampaignCounters(store, ac.id, finishPauseIso);
+      pauseCampaignForQuota(
+        store,
+        ac.id,
+        "Daily optional email sending capacity exhausted; password-reset and security email capacity remains reserved.",
+        finishPauseIso,
+      );
+    }
+  }
+
   return {
     processed: claimed.length,
     sentCount,
     retryingCount,
     failedCount,
     suppressedCount,
+    pausedByQuotaCount,
+    quota: finalQuota,
   };
 }
 
@@ -1093,6 +1387,7 @@ export async function createAndQueueAdminEmailCampaign(
     actionLabel?: string;
     scheduledFor?: string | null;
     idempotencyKey?: string;
+    quotaOverrides?: EmailQuotaOverrides;
   },
   emailService: EmailService,
   appBaseUrl: string,
@@ -1122,8 +1417,14 @@ export async function createAndQueueAdminEmailCampaign(
     );
   }
 
-  const nowIso = new Date().toISOString();
+  const nowDate = new Date();
+  const nowIso = nowDate.toISOString();
   const isScheduled = Boolean(sanitized.scheduledFor);
+  const quota = getEmailQuotaStatus(store, input.quotaOverrides, nowDate);
+  const startPaused = !isScheduled && quota.remainingOptional <= 0;
+  const initialPauseReason = startPaused
+    ? "Daily optional email capacity exhausted; campaign paused automatically so password-reset and security email capacity remains protected."
+    : "";
 
   const created = store.sqlite.transaction(() => {
     const campaign = store.db
@@ -1148,7 +1449,8 @@ export async function createAndQueueAdminEmailCampaign(
         actionLabel: sanitized.actionLabel,
         actionUrl: sanitized.actionPath,
         idempotencyKey: key,
-        status: isScheduled ? "scheduled" : "enqueueing",
+        status: isScheduled ? "scheduled" : startPaused ? "paused" : "enqueueing",
+        pauseReason: initialPauseReason,
         scheduledFor: sanitized.scheduledFor,
         eligibleCount: audience.eligible.length,
         skippedOptOutCount: audience.skippedOptOutCount,
@@ -1156,7 +1458,7 @@ export async function createAndQueueAdminEmailCampaign(
         sentCount: 0,
         failedCount: 0,
         confirmedByAdmin: true,
-        startedAt: isScheduled ? null : nowIso,
+        startedAt: isScheduled || startPaused ? null : nowIso,
         completedAt: null,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -1188,7 +1490,7 @@ export async function createAndQueueAdminEmailCampaign(
     logAdminAudit(
       store,
       actor,
-      `${isScheduled ? "Scheduled" : "Queued"} email campaign #${campaign.id} (${input.audienceChannel}) to ${audienceDesc} ("${sanitized.title}", eligible: ${audience.eligible.length}, opted-out skipped: ${audience.skippedOptOutCount})`,
+      `${isScheduled ? "Scheduled" : startPaused ? "Paused (quota)" : "Queued"} email campaign #${campaign.id} (${input.audienceChannel}) to ${audienceDesc} ("${sanitized.title}", eligible: ${audience.eligible.length}, opted-out skipped: ${audience.skippedOptOutCount})`,
       "email_campaign",
       campaign.id,
       nowIso,
@@ -1197,14 +1499,18 @@ export async function createAndQueueAdminEmailCampaign(
     return campaign;
   })();
 
-  if (!isScheduled) {
+  if (!isScheduled && !startPaused) {
     processEmailCampaignQueue(store, {
       campaignId: created.id,
       appBaseUrl,
+      quotaOverrides: input.quotaOverrides,
+      now: nowDate,
     });
     await processEmailQueueBatch(store, emailService, {
       batchSize: 50,
+      now: nowDate,
       defaultAppBaseUrl: appBaseUrl,
+      quotaOverrides: input.quotaOverrides,
     });
   }
 
@@ -1227,12 +1533,14 @@ export function processEmailCampaignQueue(
     batchSize?: number;
     appBaseUrl?: string;
     now?: Date;
+    quotaOverrides?: EmailQuotaOverrides;
   } = {},
 ) {
   const now = options.now || new Date();
   const nowIso = now.toISOString();
   const batchSize = Math.min(Math.max(1, options.batchSize || 100), 250);
   const appBaseUrl = options.appBaseUrl || "https://cossyteens.com";
+  const quota = getEmailQuotaStatus(store, options.quotaOverrides, now);
 
   const campaigns = options.campaignId
     ? store.db
@@ -1243,20 +1551,89 @@ export function processEmailCampaignQueue(
     : store.db
         .select()
         .from(s.emailCampaigns)
-        .where(inArray(s.emailCampaigns.status, ["scheduled", "enqueueing"]))
+        .where(
+          inArray(s.emailCampaigns.status, [
+            "scheduled",
+            "enqueueing",
+            "paused",
+            "sending",
+          ]),
+        )
         .orderBy(s.emailCampaigns.createdAt)
         .all();
 
   const dueCampaigns = campaigns.filter(
     (c) =>
       c.status === "enqueueing" ||
+      c.status === "sending" ||
+      c.status === "paused" ||
       (c.status === "scheduled" &&
         (!c.scheduledFor || c.scheduledFor <= nowIso)),
   );
 
+  if (quota.remainingOptional <= 0) {
+    const pauseReason =
+      "Daily optional email sending capacity exhausted; password-reset and security email capacity remains reserved.";
+    let pausedCount = 0;
+    for (const campaign of dueCampaigns) {
+      if (campaign.status !== "paused") {
+        pauseCampaignForQuota(store, campaign.id, pauseReason, nowIso);
+        pausedCount++;
+      } else if (!campaign.pauseReason) {
+        store.db
+          .update(s.emailCampaigns)
+          .set({ pauseReason, updatedAt: nowIso })
+          .where(eq(s.emailCampaigns.id, campaign.id))
+          .run();
+      }
+    }
+    return {
+      checkedCampaigns: dueCampaigns.length,
+      enqueuedEmails: 0,
+      pausedCampaigns: pausedCount,
+    };
+  }
+
   let enqueuedEmails = 0;
+  let remainingBudget = quota.remainingOptional;
 
   for (const campaign of dueCampaigns) {
+    if (campaign.status === "paused") {
+      // Capacity has reopened: resume pending/queued delivery cleanly
+      store.db
+        .update(s.emailCampaigns)
+        .set({
+          pauseReason: "",
+          updatedAt: nowIso,
+        })
+        .where(eq(s.emailCampaigns.id, campaign.id))
+        .run();
+      store.db
+        .update(s.emailQueue)
+        .set({
+          nextAttemptAt: nowIso,
+          lastError: "",
+          updatedAt: nowIso,
+        })
+        .where(
+          and(
+            eq(s.emailQueue.campaignId, campaign.id),
+            eq(s.emailQueue.status, "pending"),
+          ),
+        )
+        .run();
+    }
+
+    if (remainingBudget <= 0) {
+      pauseCampaignForQuota(
+        store,
+        campaign.id,
+        "Daily optional email sending capacity exhausted; password-reset and security email capacity remains reserved.",
+        nowIso,
+      );
+      continue;
+    }
+
     const pendingRecipients = store.db
       .select()
       .from(s.adminEmailCampaignRecipients)
@@ -1267,7 +1644,7 @@ export function processEmailCampaignQueue(
         ),
       )
       .orderBy(s.adminEmailCampaignRecipients.id)
-      .limit(batchSize)
+      .limit(Math.min(batchSize, remainingBudget))
       .all();
 
     store.sqlite.transaction(() => {
@@ -1305,6 +1682,7 @@ export function processEmailCampaignQueue(
           preferenceKey: prefKey,
           dedupeKey: `email_campaign_${campaign.id}_user_${user.id}`,
           campaignId: campaign.id,
+          scheduledFor: nowIso,
           payload: {
             recipientName: user.name,
             title: campaign.subject,
@@ -1338,19 +1716,26 @@ export function processEmailCampaignQueue(
           .where(eq(s.adminEmailCampaignRecipients.id, rec.id))
           .run();
         enqueuedEmails++;
+        remainingBudget = Math.max(0, remainingBudget - 1);
       }
 
-      syncCampaignCounters(store, campaign.id, nowIso);
+      syncCampaignCounters(store, campaign.id, nowIso, { forceActive: true });
     })();
   }
 
   return {
     checkedCampaigns: dueCampaigns.length,
     enqueuedEmails,
+    pausedCampaigns: 0,
   };
 }
 
-function syncCampaignCounters(store: Store, campaignId: number, nowIso: string) {
+function syncCampaignCounters(
+  store: Store,
+  campaignId: number,
+  nowIso: string,
+  options: { forceActive?: boolean } = {},
+) {
   const campaign = store.db
     .select()
     .from(s.emailCampaigns)
@@ -1372,21 +1757,28 @@ function syncCampaignCounters(store: Store, campaignId: number, nowIso: string) 
   const sent = recipients.filter((r) => r.status === "sent").length;
   const failed = recipients.filter((r) => r.status === "failed").length;
 
+  const isDone = pending === 0 && (queued === 0 || sent + failed >= queued);
   const nextStatus =
     campaign.status === "cancelled"
       ? "cancelled"
-      : pending > 0
-        ? campaign.scheduledFor && campaign.scheduledFor > nowIso
-          ? "scheduled"
-          : "enqueueing"
-        : queued > 0 && sent + failed < queued
-          ? "sending"
-          : "completed";
+      : campaign.status === "paused" && !options.forceActive && !isDone
+        ? "paused"
+        : pending > 0
+          ? campaign.scheduledFor && campaign.scheduledFor > nowIso
+            ? "scheduled"
+            : "enqueueing"
+          : queued > 0 && sent + failed < queued
+            ? "sending"
+            : "completed";
 
   store.db
     .update(s.emailCampaigns)
     .set({
       status: nextStatus,
+      pauseReason:
+        nextStatus === "paused"
+          ? campaign.pauseReason
+          : "",
       queuedCount: queued,
       sentCount: sent,
       failedCount: failed,
@@ -1423,6 +1815,7 @@ export function formatEmailCampaignSummary(
     subject: fresh.subject,
     actionPath: fresh.actionUrl,
     status: fresh.status,
+    pauseReason: fresh.pauseReason || "",
     scheduledFor: fresh.scheduledFor,
     eligibleCount: fresh.eligibleCount,
     skippedOptOutCount: fresh.skippedOptOutCount,
@@ -1446,10 +1839,14 @@ export function cancelAdminEmailCampaign(
   if (!campaign) {
     throw new HttpError(404, "Email campaign not found.");
   }
-  if (campaign.status !== "scheduled" && campaign.status !== "enqueueing") {
+  if (
+    campaign.status !== "scheduled" &&
+    campaign.status !== "enqueueing" &&
+    campaign.status !== "paused"
+  ) {
     throw new HttpError(
       400,
-      "Only scheduled or queueing email campaigns can be cancelled.",
+      "Only scheduled, queueing, or paused email campaigns can be cancelled.",
     );
   }
   const nowIso = new Date().toISOString();
@@ -1458,6 +1855,7 @@ export function cancelAdminEmailCampaign(
       .update(s.emailCampaigns)
       .set({
         status: "cancelled",
+        pauseReason: "",
         updatedAt: nowIso,
       })
       .where(eq(s.emailCampaigns.id, campaignId))
@@ -1473,6 +1871,20 @@ export function cancelAdminEmailCampaign(
         and(
           eq(s.adminEmailCampaignRecipients.campaignId, campaignId),
           eq(s.adminEmailCampaignRecipients.status, "pending"),
+        ),
+      )
+      .run();
+    store.db
+      .update(s.emailQueue)
+      .set({
+        status: "cancelled",
+        lastError: "Campaign cancelled by administrator.",
+        updatedAt: nowIso,
+      })
+      .where(
+        and(
+          eq(s.emailQueue.campaignId, campaignId),
+          inArray(s.emailQueue.status, ["pending", "retrying"]),
         ),
       )
       .run();
@@ -1493,6 +1905,91 @@ export function cancelAdminEmailCampaign(
       .where(eq(s.emailCampaigns.id, campaignId))
       .get()!,
   );
+}
+
+export async function resumeAdminEmailCampaign(
+  store: Store,
+  actor: AdminActor,
+  campaignId: number,
+  emailService: EmailService,
+  appBaseUrl: string,
+  quotaOverrides: EmailQuotaOverrides = {},
+  now: Date = new Date(),
+) {
+  const campaign = store.db
+    .select()
+    .from(s.emailCampaigns)
+    .where(eq(s.emailCampaigns.id, campaignId))
+    .get();
+  if (!campaign) {
+    throw new HttpError(404, "Email campaign not found.");
+  }
+  if (campaign.status !== "paused") {
+    throw new HttpError(400, "Only paused email campaigns can be resumed.");
+  }
+
+  const quota = getEmailQuotaStatus(store, quotaOverrides, now);
+  if (quota.remainingOptional <= 0) {
+    throw new HttpError(
+      429,
+      `Daily optional email capacity is still exhausted (${quota.sentToday}/${quota.dailyLimit} used today; ${quota.transactionalReserve} slots reserved for password resets & security). Resets at ${quota.nextResetAt}.`,
+    );
+  }
+
+  const nowIso = now.toISOString();
+  store.sqlite.transaction(() => {
+    store.db
+      .update(s.emailCampaigns)
+      .set({
+        status: "enqueueing",
+        pauseReason: "",
+        updatedAt: nowIso,
+      })
+      .where(eq(s.emailCampaigns.id, campaignId))
+      .run();
+    store.db
+      .update(s.emailQueue)
+      .set({
+        nextAttemptAt: nowIso,
+        lastError: "",
+        updatedAt: nowIso,
+      })
+      .where(
+        and(
+          eq(s.emailQueue.campaignId, campaignId),
+          inArray(s.emailQueue.status, ["pending", "retrying"]),
+        ),
+      )
+      .run();
+    logAdminAudit(
+      store,
+      actor,
+      `Resumed paused email campaign #${campaign.id} ("${campaign.subject}")`,
+      "email_campaign",
+      campaign.id,
+      nowIso,
+    );
+  })();
+
+  processEmailCampaignQueue(store, {
+    campaignId,
+    appBaseUrl,
+    quotaOverrides,
+    now,
+  });
+  await processEmailQueueBatch(store, emailService, {
+    batchSize: 50,
+    now,
+    defaultAppBaseUrl: appBaseUrl,
+    quotaOverrides,
+  });
+
+  const updated = store.db
+    .select()
+    .from(s.emailCampaigns)
+    .where(eq(s.emailCampaigns.id, campaignId))
+    .get()!;
+  return formatEmailCampaignSummary(store, updated);
 }
 
 export function evaluateUserEmailReminders(
@@ -1651,7 +2148,9 @@ export async function runEmailWorkerCycle(
   emailService: EmailService,
   appBaseUrl: string,
   now = new Date(),
+  quotaOverrides: EmailQuotaOverrides = {},
 ) {
+  const quotaBefore = getEmailQuotaStatus(store, quotaOverrides, now);
   const activeReaders = store.db
     .select({ id: s.users.id })
     .from(s.users)
@@ -1659,19 +2158,23 @@ export async function runEmailWorkerCycle(
     .all();
 
   const generatedKeys: string[] = [];
-  for (const r of activeReaders) {
-    const res = evaluateUserEmailReminders(store, r.id, appBaseUrl, now);
-    generatedKeys.push(...res.generatedKeys);
+  if (quotaBefore.remainingOptional > 0) {
+    for (const r of activeReaders) {
+      const res = evaluateUserEmailReminders(store, r.id, appBaseUrl, now);
+      generatedKeys.push(...res.generatedKeys);
+    }
   }
 
   const campaignResult = processEmailCampaignQueue(store, {
     appBaseUrl,
     now,
+    quotaOverrides,
   });
   const deliveryResult = await processEmailQueueBatch(store, emailService, {
     batchSize: 50,
     now,
     defaultAppBaseUrl: appBaseUrl,
+    quotaOverrides,
   });
   return {
     reminders: {
@@ -1681,14 +2184,17 @@ export async function runEmailWorkerCycle(
     },
     campaigns: campaignResult,
     delivery: deliveryResult,
+    quota: getEmailQuotaStatus(store, quotaOverrides, now),
   };
 }
 
 export function getAdminEmailOverview(
   store: Store,
   emailService: EmailService,
+  quotaOverrides: EmailQuotaOverrides = {},
 ) {
   const env = getEnvConfig();
+  const quota = getEmailQuotaStatus(store, quotaOverrides);
   const queueRows = store.db
     .select()
     .from(s.emailQueue)
@@ -1734,6 +2240,7 @@ export function getAdminEmailOverview(
         emailService.domainVerified ?? env.email.domainVerified,
       ),
     },
+    quota,
     counts: {
       pending: queueRows.filter((r) => r.status === "pending").length,
       retrying: queueRows.filter((r) => r.status === "retrying").length,
@@ -1742,6 +2249,7 @@ export function getAdminEmailOverview(
       bounced: queueRows.filter((r) => r.status === "bounced").length,
       suppressed: queueRows.filter((r) => r.status === "suppressed").length,
       suppressedReaders: suppressedCount,
+      pausedCampaigns: campaigns.filter((c) => c.status === "paused").length,
     },
     recentQueue: queueRows.slice(0, 60).map((r) => ({
       id: r.id,

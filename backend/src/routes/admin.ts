@@ -79,6 +79,7 @@ import {
   getAdminEmailOverview,
   previewAdminEmailCampaign,
   processEmailQueueBatch,
+  resumeAdminEmailCampaign,
   runEmailWorkerCycle,
   sendImmediateTransactionalEmail,
 } from "../services/emailQueue.js";
@@ -908,7 +909,8 @@ export function registerAdminRoutes(
         | "online_access"
         | "bulk_order"
         | "devotional"
-        | "inquiry";
+        | "inquiry"
+        | "email";
       title: string;
       description: string;
       actionTab: string;
@@ -1036,6 +1038,12 @@ export function registerAdminRoutes(
       }
     }
 
+    const canEmailSummary =
+      canNotifications || adminHasPermission(admin, "settings.read");
+    const emailOverviewSummary = canEmailSummary
+      ? getAdminEmailOverview(store, emailService)
+      : null;
+
     if (canNotifications && failedNotificationCampaignsCount > 0) {
       operationalAlerts.push({
         id: "notif_failed_campaigns",
@@ -1049,6 +1057,44 @@ export function registerAdminRoutes(
       });
     }
 
+    if (canEmailSummary && emailOverviewSummary) {
+      if (!emailOverviewSummary.configuration.configured) {
+        operationalAlerts.push({
+          id: "email_delivery_unconfigured",
+          severity: "high",
+          category: "email",
+          title: "Email Delivery Provider Not Configured",
+          description:
+            "Set EMAIL_PROVIDER=resend with a verified sender domain and API key to enable password resets and transactional emails.",
+          actionTab: "email",
+          createdAt: nowDate.toISOString(),
+        });
+      } else if (emailOverviewSummary.quota.optionalPausedByQuota) {
+        operationalAlerts.push({
+          id: "email_quota_optional_paused",
+          severity: "medium",
+          category: "email",
+          title: "Optional Email Campaigns Paused (Free-Tier Quota)",
+          description:
+            "Daily or monthly optional campaign budget is exhausted. Remaining free-tier capacity is reserved strictly for password resets and security emails.",
+          actionTab: "email",
+          createdAt: nowDate.toISOString(),
+        });
+      }
+      if (emailOverviewSummary.counts.failed > 0) {
+        operationalAlerts.push({
+          id: "email_delivery_failures",
+          severity: "high",
+          category: "email",
+          title: `${emailOverviewSummary.counts.failed} Failed Email Deliveries Need Attention`,
+          description:
+            "Review failed email queue entries and provider status on the Email Management page.",
+          actionTab: "email",
+          createdAt: nowDate.toISOString(),
+        });
+      }
+    }
+
     const scopedAlerts = operationalAlerts.filter((alert) => {
       if (alert.category === "printed_order") return canPrinted;
       if (alert.category === "payment_verification") {
@@ -1057,6 +1103,7 @@ export function registerAdminRoutes(
       if (alert.category === "online_access") return canDigital;
       if (alert.category === "bulk_order") return canBulk;
       if (alert.category === "devotional") return canDevotionals;
+      if (alert.category === "email") return canEmailSummary;
       return canNotifications;
     });
 
@@ -1235,6 +1282,13 @@ export function registerAdminRoutes(
         recentEvents: pushEventsAll.slice(0, 20),
         campaigns: campaignsSummary.items,
       },
+      emailStatusSummary: emailOverviewSummary
+        ? {
+            configuration: emailOverviewSummary.configuration,
+            quota: emailOverviewSummary.quota,
+            counts: emailOverviewSummary.counts,
+          }
+        : undefined,
       engagement: canDevotionals
         ? entries
             .filter((e) => e.published)
@@ -2439,6 +2493,19 @@ export function registerAdminRoutes(
     return { ok: true, campaign };
   });
 
+  app.post(prefix + "/admin/email/campaigns/:id/resume", async (req) => {
+    const admin = requireAdminPermission(req, "notifications.write");
+    const campaignId = idOf(req);
+    const campaign = await resumeAdminEmailCampaign(
+      store,
+      actorOf(admin),
+      campaignId,
+      emailService,
+      appOrigin,
+    );
+    return { ok: true, campaign };
+  });
+
   app.post(
     prefix + "/admin/email/run-worker",
     { config: { rateLimit: { max: 15, timeWindow: "15 minutes" } } },
@@ -2447,7 +2514,7 @@ export function registerAdminRoutes(
       const result = await runEmailWorkerCycle(store, emailService, appOrigin);
       audit(
         admin,
-        `Executed email worker cycle (reminders: ${result.reminders.generatedCount}, sent: ${result.delivery.sentCount}, retrying: ${result.delivery.retryingCount}, failed: ${result.delivery.failedCount})`,
+        `Executed email worker cycle (reminders: ${result.reminders.generatedCount}, sent: ${result.delivery.sentCount}, retrying: ${result.delivery.retryingCount}, failed: ${result.delivery.failedCount}, paused: ${result.delivery.pausedByQuotaCount ?? 0})`,
         "email",
         "worker",
       );

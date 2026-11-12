@@ -361,7 +361,7 @@ export function registerPublicRoutes(
       if (!emailService.configured || !emailService.sendOrderAccessLink) {
         throw new HttpError(
           503,
-          "Automated order-access link delivery is not configured in this environment. Set EMAIL_WEBHOOK_URL to enable email links, or sign in with the purchasing account / contact Cossy Teens Consult Enterprises.",
+          "Automated order-access link delivery is not configured in this environment. Configure EMAIL_PROVIDER and credentials to enable email links, or sign in with the purchasing account / contact Cossy Teens Consult Enterprises.",
         );
       }
 
@@ -389,13 +389,21 @@ export function registerPublicRoutes(
           expiresInMinutes,
         );
         const accessUrl = `${appOrigin}/bookstore?order=${encodeURIComponent(row.orderNumber)}&token=${encodeURIComponent(issued.token)}`;
-        await emailService.sendOrderAccessLink({
+        const sent = await emailService.sendOrderAccessLink({
           to: row.email,
           name: row.fullName,
           orderNumber: row.orderNumber,
           accessUrl,
           expiresInMinutes,
         });
+        if (!sent.delivered) {
+          throw new HttpError(
+            503,
+            sent.error
+              ? `Unable to deliver the order access email right now: ${sent.error}`
+              : "Unable to deliver the order access email right now. Please try again shortly.",
+          );
+        }
       }
 
       return {

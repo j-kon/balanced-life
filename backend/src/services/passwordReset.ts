@@ -14,7 +14,7 @@ import {
   hashPassword,
   logAdminAudit,
 } from "../auth.js";
-import type { EmailService } from "./email.js";
+import { sanitizeProviderError, type EmailService } from "./email.js";
 import {
   deriveKeyedSecret,
   sendImmediateTransactionalEmail,
@@ -146,7 +146,7 @@ export async function requestPasswordResetCode(
     );
   }
 
-  store.db
+  const rateEvent = store.db
     .insert(s.passwordResetRateEvents)
     .values({
       actorType: input.scope,
@@ -154,7 +154,8 @@ export async function requestPasswordResetCode(
       ipHash,
       createdAt: nowIso,
     })
-    .run();
+    .returning({ id: s.passwordResetRateEvents.id })
+    .get();
 
   let targetAccount:
     | { id: number; name: string; email: string; role?: string }
@@ -271,7 +272,7 @@ export async function requestPasswordResetCode(
   })();
 
   // Dispatch immediately without persisting plaintext code in any DB table or log
-  await sendImmediateTransactionalEmail(store, emailService, {
+  const delivery = await sendImmediateTransactionalEmail(store, emailService, {
     userId: input.scope === "reader" ? targetAccount.id : null,
     adminId: input.scope === "admin" ? targetAccount.id : null,
     recipientEmail: targetAccount.email,
@@ -279,6 +280,7 @@ export async function requestPasswordResetCode(
     templateId: "password_reset_code",
     dedupeKey: `reset_code_${input.scope}_${challenge.id}`,
     redactCodeInAudit: true,
+    now,
     payload: {
       recipientName: targetAccount.name,
       code,
@@ -287,6 +289,41 @@ export async function requestPasswordResetCode(
       appBaseUrl: input.appBaseUrl,
     },
   });
+
+  if (!delivery.delivered) {
+    store.sqlite.transaction(() => {
+      store.db
+        .update(s.passwordResetCodes)
+        .set({
+          status: "invalidated",
+          invalidatedAt: nowIso,
+        })
+        .where(eq(s.passwordResetCodes.id, challenge.id))
+        .run();
+
+      if (!delivery.rateLimited && rateEvent?.id) {
+        store.db
+          .delete(s.passwordResetRateEvents)
+          .where(eq(s.passwordResetRateEvents.id, rateEvent.id))
+          .run();
+      }
+    })();
+
+    const safeDetail = sanitizeProviderError(delivery.error, "");
+    if (delivery.rateLimited || delivery.statusCode === 429) {
+      throw new HttpError(
+        429,
+        safeDetail ||
+          "Email sending capacity is temporarily exhausted. Please wait before trying again.",
+      );
+    }
+    throw new HttpError(
+      503,
+      safeDetail
+        ? `Unable to send your verification code right now: ${safeDetail}`
+        : "Unable to send your verification code right now. Please try again shortly or contact support.",
+    );
+  }
 
   return {
     ok: true,

@@ -7,9 +7,9 @@ import {
   computeDigitalTermWindow,
 } from "../src/services/commerce.js";
 import { openDatabase } from "../src/db.js";
-import { hashPassword, tokenHash } from "../src/auth.js";
+import { hashPassword, tokenHash, type AdminActor } from "../src/auth.js";
 import { generateTotpCode } from "../src/services/mfa.js";
-import { adminSessions, adminUsers, devotionals, emailQueue, notificationPreferences, passwordResetCodes, passwordResetRateEvents, users } from "../src/schema.js";
+import { adminSessions, adminUsers, devotionals, emailCampaigns, emailQueue, notificationPreferences, passwordResetCodes, passwordResetRateEvents, users } from "../src/schema.js";
 import { and, desc, eq } from "drizzle-orm";
 import Database from "better-sqlite3";
 import { readFileSync, readdirSync } from "node:fs";
@@ -45,10 +45,13 @@ import {
   renderEmailTemplate,
 } from "../src/services/emailTemplates.js";
 import {
+  createAndQueueAdminEmailCampaign,
   createEmailUnsubscribeToken,
   enqueueEmail,
   evaluateUserEmailReminders,
+  getEmailQuotaStatus,
   processEmailQueueBatch,
+  resumeAdminEmailCampaign,
   runEmailWorkerCycle,
 } from "../src/services/emailQueue.js";
 import {
@@ -4796,4 +4799,348 @@ test("Email Queue Priority 3/6/7: multi-provider factory, backoff retries, idemp
   } finally {
     storeSup.sqlite.close();
   }
+});
+
+test("Free-tier Resend prioritization, strict delivery failure handling, transactional reserve, and campaign auto-pause", async () => {
+  // 1. Verify Resend adapter HTTP handling & secret sanitization without real network calls
+  const resendSecret = "re_test_super_secret_key_999";
+  const resendAdapter = createEmailService({
+    provider: "resend",
+    apiKey: resendSecret,
+    from: "noreply@cossyteens.com",
+    replyTo: "cossyteensconsult@gmail.com",
+    domainVerified: true,
+  });
+
+  const origFetch = globalThis.fetch;
+  try {
+    // Accepted only when HTTP ok AND id is returned
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: "re_msg_accepted_1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const okRes = await resendAdapter.sendEmail({
+      to: "test-inbox@example.org",
+      subject: "Accepted Test",
+      html: "<p>Ok</p>",
+      text: "Ok",
+    });
+    assert.equal(okRes.delivered, true);
+    assert.equal(okRes.messageId, "re_msg_accepted_1");
+
+    // 200 missing message id must NOT report delivered
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const missingIdRes = await resendAdapter.sendEmail({
+      to: "test-inbox@example.org",
+      subject: "No ID Test",
+      html: "<p>NoId</p>",
+      text: "NoId",
+    });
+    assert.equal(missingIdRes.delivered, false);
+
+    // 401/403 must fail safely without leaking API key
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          message: `Invalid API key ${resendSecret} or unverified domain`,
+        }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    const forbiddenRes = await resendAdapter.sendEmail({
+      to: "test-inbox@example.org",
+      subject: "Forbidden Test",
+      html: "<p>403</p>",
+      text: "403",
+    });
+    assert.equal(forbiddenRes.delivered, false);
+    assert.ok(forbiddenRes.error);
+    assert.ok(!forbiddenRes.error.includes(resendSecret));
+
+    // 429 rate-limit flags rateLimited & retryable
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ message: "Too many requests" }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const rateRes = await resendAdapter.sendEmail({
+      to: "test-inbox@example.org",
+      subject: "Rate Test",
+      html: "<p>429</p>",
+      text: "429",
+    });
+    assert.equal(rateRes.delivered, false);
+    assert.equal(rateRes.rateLimited, true);
+    assert.equal(rateRes.retryable, true);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+
+  // 2. Password reset must NOT return ok:true or leave an active code if provider rejects the email
+  const tmpQuotaDir = mkdtempSync(join(tmpdir(), "ctc-email-quota-"));
+  const quotaDbPath = join(tmpQuotaDir, "quota.sqlite");
+  const mockEmail = new MockEmailService();
+  const prevDaily = process.env.EMAIL_DAILY_LIMIT;
+  const prevMonthly = process.env.EMAIL_MONTHLY_LIMIT;
+  const prevReserve = process.env.EMAIL_TRANSACTIONAL_RESERVE;
+  process.env.EMAIL_DAILY_LIMIT = "9";
+  process.env.EMAIL_MONTHLY_LIMIT = "20";
+  process.env.EMAIL_TRANSACTIONAL_RESERVE = "2";
+
+  const quotaApp = await buildApp({
+    databasePath: quotaDbPath,
+    emailService: mockEmail,
+  });
+
+  try {
+    const readerEmail = "reset-strict@example.org";
+    const reg = await quotaApp.inject({
+      method: "POST",
+      url: "/api/v1/auth/register",
+      remoteAddress: "10.90.0.1",
+      headers: { "x-requested-with": "BalancedLife" },
+      payload: {
+        name: "Strict Reset Reader",
+        email: readerEmail,
+        password: "Reader-Strict-2027!",
+        ageGroup: "18_25",
+        guardianConsentConfirmed: true,
+      },
+    });
+    assert.equal(reg.statusCode, 200);
+    // Registration enqueued & sent welcome email; clear before testing forgot-password failure
+    mockEmail.sentEmails = [];
+
+    // Simulate provider outage during forgot-password request
+    mockEmail.failNextCount = 1;
+    const failedResetReq = await quotaApp.inject({
+      method: "POST",
+      url: "/api/v1/auth/forgot-password",
+      remoteAddress: "10.90.0.1",
+      headers: { "x-requested-with": "BalancedLife" },
+      payload: { email: readerEmail },
+    });
+    assert.equal(failedResetReq.statusCode, 503);
+    assert.equal(mockEmail.sentEmails.length, 0);
+
+    // Ensure failed challenge was invalidated AND immediate retry works once provider recovers
+    const storeCheck = openDatabase(quotaDbPath);
+    try {
+      const latestReset = storeCheck.db
+        .select()
+        .from(passwordResetCodes)
+        .orderBy(desc(passwordResetCodes.id))
+        .get()!;
+      assert.equal(latestReset.status, "invalidated");
+    } finally {
+      storeCheck.sqlite.close();
+    }
+
+    const recoveredResetReq = await quotaApp.inject({
+      method: "POST",
+      url: "/api/v1/auth/forgot-password",
+      remoteAddress: "10.90.0.1",
+      headers: { "x-requested-with": "BalancedLife" },
+      payload: { email: readerEmail },
+    });
+    assert.equal(recoveredResetReq.statusCode, 200);
+    assert.equal(mockEmail.sentEmails.length, 1);
+
+    // 3. Test strict transactional priority + free-tier optional budget (daily=4, reserve=2 => max 2 optional) + auto-pause & resume
+    const quotaStore = openDatabase(quotaDbPath);
+    try {
+      const optEmails = [
+        "opt1@example.org",
+        "opt2@example.org",
+        "opt3@example.org",
+      ];
+      for (let i = 0; i < optEmails.length; i++) {
+        const optMail = optEmails[i]!;
+        const r = await quotaApp.inject({
+          method: "POST",
+          url: "/api/v1/auth/register",
+          remoteAddress: `10.90.1.${i + 2}`,
+          headers: { "x-requested-with": "BalancedLife" },
+          payload: {
+            name: `Opt Reader ${i + 1}`,
+            email: optMail,
+            password: "Opt-Reader-2027!",
+            ageGroup: "18_25",
+            guardianConsentConfirmed: true,
+          },
+        });
+        assert.equal(r.statusCode, 200);
+        const readerCookie = String(r.headers["set-cookie"]).split(";")[0];
+        const prefRes = await quotaApp.inject({
+          method: "PATCH",
+          url: "/api/v1/me/notifications/preferences",
+          remoteAddress: `10.90.1.${i + 2}`,
+          headers: {
+            cookie: readerCookie,
+            "x-requested-with": "BalancedLife",
+          },
+          payload: {
+            emailAnnouncementsEnabled: true,
+          },
+        });
+        assert.equal(prefRes.statusCode, 200);
+      }
+
+      mockEmail.sentEmails = [];
+      const quotaBefore = getEmailQuotaStatus(quotaStore);
+      assert.equal(
+        quotaBefore.remainingOptional,
+        2,
+        `Unexpected quotaBefore: ${JSON.stringify(quotaBefore)}`,
+      );
+      const actor: AdminActor = {
+        id: null,
+        name: "Owner Quota Test",
+        email: "owner-quota@example.org",
+        role: "owner",
+      };
+      const campRes = await createAndQueueAdminEmailCampaign(
+        quotaStore,
+        actor,
+        {
+          audienceChannel: "announcements",
+          targetType: "all",
+          title: "Quota Priority Broadcast",
+          body: "Optional announcement subject to daily free-tier reserve.",
+          actionPath: "/dashboard",
+          actionLabel: "Read Devotional",
+          idempotencyKey: `quota_camp_${Date.now()}`,
+        },
+        mockEmail,
+        "http://localhost:5173",
+      );
+
+      const campRowAfterQueue = quotaStore.db
+        .select()
+        .from(emailCampaigns)
+        .where(eq(emailCampaigns.id, campRes.campaign.id))
+        .get()!;
+      // Daily limit = 9, reserve = 2 (optional cap = 7); after 5 transactional welcome/reset emails, only 2 optional emails may send today; 3rd recipient stays pending & campaign auto-pauses
+      assert.equal(campRowAfterQueue.status, "paused");
+      assert.ok(campRowAfterQueue.pauseReason.toLowerCase().includes("capacity"));
+
+      const sentOptionalCount = mockEmail.sentEmails.filter(
+        (m) => m.subject === "Quota Priority Broadcast",
+      ).length;
+      assert.equal(sentOptionalCount, 2);
+
+      // Even though optional capacity is exhausted, transactional password resets still have reserved slots!
+      const quotaNow = getEmailQuotaStatus(quotaStore);
+      assert.equal(quotaNow.optionalPausedByQuota, true);
+      assert.equal(quotaNow.remainingOptional, 0);
+      assert.ok(quotaNow.remainingTransactional >= 1);
+
+      // Enqueue a lower-priority optional email BEFORE a transactional email to prove priority ordering + reserve protection
+      enqueueEmail(quotaStore, {
+        userId: null,
+        recipientEmail: "opt1@example.org",
+        recipientName: "Opt Reader 1",
+        templateId: "admin_announcement",
+        category: "optional",
+        dedupeKey: `low_priority_opt_${Date.now()}`,
+        payload: {
+          recipientName: "Opt Reader 1",
+          title: "Should Wait For Quota",
+          body: "Wait",
+          appBaseUrl: "http://localhost:5173",
+        },
+      });
+
+      const priorityTx = enqueueEmail(quotaStore, {
+        userId: null,
+        recipientEmail: readerEmail,
+        recipientName: "Strict Reset Reader",
+        templateId: "order_delivered",
+        category: "transactional",
+        dedupeKey: `priority_tx_${Date.now()}`,
+        payload: {
+          recipientName: "Strict Reset Reader",
+          reference: "ORD-PRIORITY-777",
+          appBaseUrl: "http://localhost:5173",
+        },
+      });
+      assert.ok(priorityTx);
+
+      const txBatch = await processEmailQueueBatch(quotaStore, mockEmail, {
+        defaultAppBaseUrl: "http://localhost:5173",
+      });
+      assert.equal(txBatch.sentCount, 1);
+      assert.ok(
+        mockEmail.sentEmails.some(
+          (m) => m.to === readerEmail && m.text.includes("ORD-PRIORITY-777"),
+        ),
+      );
+      assert.ok(
+        !mockEmail.sentEmails.some(
+          (m) => m.subject === "Should Wait For Quota",
+        ),
+      );
+
+      // Immediate password-reset code ALSO succeeds inside the reserved transactional budget!
+      const secondResetWhilePaused = await quotaApp.inject({
+        method: "POST",
+        url: "/api/v1/auth/forgot-password",
+        remoteAddress: "10.90.0.1",
+        headers: { "x-requested-with": "BalancedLife" },
+        payload: { email: "opt1@example.org" },
+      });
+      assert.equal(secondResetWhilePaused.statusCode, 200);
+      assert.ok(
+        mockEmail.sentEmails.some(
+          (m) =>
+            m.to === "opt1@example.org" &&
+            m.subject.toLowerCase().includes("reset"),
+        ),
+      );
+
+      // Simulate UTC next day rollover so paused campaign can be resumed
+      const tomorrow = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+      const resumed = await resumeAdminEmailCampaign(
+        quotaStore,
+        actor,
+        campRes.campaign.id,
+        mockEmail,
+        "http://localhost:5173",
+        {},
+        tomorrow,
+      );
+      assert.equal(resumed.status, "completed");
+      const resumedCamp = quotaStore.db
+        .select()
+        .from(emailCampaigns)
+        .where(eq(emailCampaigns.id, campRes.campaign.id))
+        .get()!;
+      assert.equal(resumedCamp.status, "completed");
+    } finally {
+      quotaStore.sqlite.close();
+    }
+  } finally {
+    await quotaApp.close();
+    rmSync(tmpQuotaDir, { recursive: true, force: true });
+    if (prevDaily === undefined) delete process.env.EMAIL_DAILY_LIMIT;
+    else process.env.EMAIL_DAILY_LIMIT = prevDaily;
+    if (prevMonthly === undefined) delete process.env.EMAIL_MONTHLY_LIMIT;
+    else process.env.EMAIL_MONTHLY_LIMIT = prevMonthly;
+    if (prevReserve === undefined) delete process.env.EMAIL_TRANSACTIONAL_RESERVE;
+    else process.env.EMAIL_TRANSACTIONAL_RESERVE = prevReserve;
+  }
+
+  // 4. Verify Admin /overview exposes emailStatusSummary (configuration, quota, counts)
+  const overviewWithEmail = await send("GET", "/admin/overview", undefined, adminCookie);
+  assert.equal(overviewWithEmail.statusCode, 200);
+  const emailSummary = overviewWithEmail.json().emailStatusSummary;
+  assert.ok(emailSummary);
+  assert.equal(typeof emailSummary.configuration.provider, "string");
+  assert.equal(typeof emailSummary.quota.dailyLimit, "number");
+  assert.equal(typeof emailSummary.quota.transactionalReserve, "number");
+  assert.equal(typeof emailSummary.counts.pausedCampaigns, "number");
 });

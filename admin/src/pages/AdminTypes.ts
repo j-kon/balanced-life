@@ -82,7 +82,8 @@ export type AdminOperationalAlert = {
     | "online_access"
     | "bulk_order"
     | "devotional"
-    | "inquiry";
+    | "inquiry"
+    | "email";
   title: string;
   description: string;
   actionTab: string;
@@ -173,6 +174,43 @@ export type AdminOverviewData = {
     activePushDevicesCount: number;
     recentEvents: NotificationEventRecord[];
     campaigns?: AdminNotificationCampaign[];
+  };
+  emailStatusSummary?: {
+    configuration: {
+      configured: boolean;
+      provider: string;
+      fromAddress: string;
+      replyToAddress: string;
+      senderDomain: string;
+      domainVerified: boolean;
+    };
+    quota: {
+      dailyLimit: number;
+      monthlyLimit: number;
+      transactionalReserve: number;
+      optionalDailyLimit: number;
+      sentToday: number;
+      transactionalSentToday: number;
+      optionalSentToday: number;
+      sentThisMonth: number;
+      remainingDaily: number;
+      remainingMonthly: number;
+      remainingTransactional: number;
+      remainingOptional: number;
+      optionalPausedByQuota: boolean;
+      dailyExhausted: boolean;
+      nextResetAt: string;
+    };
+    counts: {
+      pending: number;
+      retrying: number;
+      sent: number;
+      failed: number;
+      bounced: number;
+      suppressed: number;
+      suppressedReaders: number;
+      pausedCampaigns: number;
+    };
   };
   engagement: Array<{
     id: number;
