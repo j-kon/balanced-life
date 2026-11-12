@@ -1973,6 +1973,21 @@ test.describe("End-to-End Production Workflows", () => {
     });
     const resetPage = await readerResetCtx.newPage();
 
+    // Verify Send Verification Code remains clickable and shows honest error when email is unconfigured
+    await resetPage.goto("/forgot-password");
+    await expect(
+      resetPage.getByText(/Email delivery not configured yet/i),
+    ).toBeVisible();
+    const unconfiguredSendBtn = resetPage.getByRole("button", {
+      name: /Send Verification Code/i,
+    });
+    await expect(unconfiguredSendBtn).toBeEnabled();
+    await resetPage.getByLabel(/Email/i).fill(readerEmail);
+    await unconfiguredSendBtn.click();
+    await expect(
+      resetPage.getByText(/Automated password recovery emails are not configured/i),
+    ).toBeVisible();
+
     await resetPage.route("**/api/v1/config", async (route) => {
       const response = await route.fetch();
       const json = (await response.json()) as Record<string, unknown>;

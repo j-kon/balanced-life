@@ -460,7 +460,7 @@ export function ForgotPasswordPage() {
             <button
               className="button full"
               type="submit"
-              disabled={busy || !config.email.configured}
+              disabled={busy}
             >
               {busy ? "Sending Verification Code…" : "Send Verification Code"}{" "}
               <ArrowRight size={17} />
