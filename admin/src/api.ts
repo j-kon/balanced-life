@@ -36,9 +36,22 @@ export async function api<T = any>(
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const data = await res.json();
+  const rawText = await res.text();
+  let data: any = null;
+  if (rawText.trim()) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      // non-JSON response body
+    }
+  }
   if (!res.ok) {
-    throw new Error(data.message || "Request could not be completed.");
+    const errorMsg =
+      data?.message ||
+      data?.error ||
+      (rawText && rawText.length < 200 ? rawText : "") ||
+      `Server returned HTTP ${res.status} ${res.statusText || ""}`.trim();
+    throw new Error(errorMsg);
   }
   return data as T;
 }
